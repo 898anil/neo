@@ -1,0 +1,33 @@
+# Secrets and private, deployment-specific config
+.env
+.env.*
+!.env.example
+private/
+
+# Local working notes
+docs/superpowers/
+.claude/
+
+# Runtime state (COS_HOME defaults to the repo)
+runs/
+transcripts/
+digests/
+sessions.json
+sessions*.json
+cards.json
+chief.json
+urgent.json
+seen.json
+loops.json
+mentions.json
+findings.json
+usage.json
+settings.json
+watches.json
+auto_rca.json
+*.tmp
+
+# Python
+.venv/
+__pycache__/
+*.pyc

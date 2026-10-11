@@ -1,0 +1,29 @@
+#!/bin/sh
+# Convenience wrapper for the Neo conversation viewer CLI.
+# Symlink it into ~/.local/bin so you can run `neo-logs` from anywhere.
+#   neo-logs                 # list threads
+#   neo-logs latest -f       # follow the newest thread live
+#   neo-logs <id> --raw      # full raw transcript
+#   neo-logs activity -f     # follow the high-level activity feed
+# The repo is wherever this script really lives (symlinks resolved).
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
+# Python: NEO_PYTHON, else the repo's .venv, else the Poetry environment, else python3.
+if [ -n "$NEO_PYTHON" ]; then
+  PY="$NEO_PYTHON"
+elif [ -x "$DIR/.venv/bin/python" ]; then
+  PY="$DIR/.venv/bin/python"
+elif VENV="$(cd "$DIR" && poetry env info -p 2>/dev/null)" && [ -x "$VENV/bin/python" ]; then
+  PY="$VENV/bin/python"
+else
+  PY="python3"
+fi
+# Default to the `logs` subcommand unless the first arg is already a subcommand.
+case "$1" in
+  web|logs|list|activity|-h|--help|"") exec "$PY" "$DIR/neo_viewer.py" "$@" ;;
+  *) exec "$PY" "$DIR/neo_viewer.py" logs "$@" ;;
+esac

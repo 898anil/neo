@@ -1,0 +1,46 @@
+{
+  "display_information": {
+    "name": "Neo",
+    "description": "Run Claude Code or Codex on this machine by mentioning @neo, with every step shown in the thread.",
+    "background_color": "#1f1f1f"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "neo",
+      "always_online": true
+    },
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "reactions:write",
+        "channels:history",
+        "groups:history",
+        "im:history"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.im",
+        "message.channels",
+        "message.groups"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
