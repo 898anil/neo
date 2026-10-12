@@ -1,9 +1,12 @@
-"""Trace digests: one screen of model-written HTML for an agent or run trace, laid out for the kind of
-work (an RCA's cause chain, a plan's architecture change, a fix's changes and tests). The trace page
-shows it beside the trace in a sandboxed frame that cannot run scripts.
+"""Trace digests: one screen beside an agent or run trace that says what was asked, what state the work
+is in, the plan as a checklist, what came of it, and (when the work has them) the cause chain, numbers,
+changed files, checks and timeline. The model only fills structured fields (SCHEMA); digest_view draws
+them with one fixed layout, so every digest reads the same way. The trace page shows it in a sandboxed
+frame that cannot run scripts.
 
 Built right after a card (chief.card_scheduler) and on demand when the page finds it missing or stale.
-State: COS_HOME/digests/<key>.json = {kind, html, source_mtime, made_at, model}.
+State: COS_HOME/digests/<key>.json = {kind, data, source_mtime, made_at, model, version}. Digests from
+before the structured layout carry model-written `html` instead of `data` until they are remade.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import cards, fleet
+from . import cards, digest_view, fleet
 from .config import owner_fields, owner_name
 from .runner import Run, cli_path, cos_home, valid_run_id
 
@@ -31,54 +34,77 @@ SKIP_RUN_KINDS = {"mentions", "loops", "watch", "brief", "mention-send"}  # neo'
 WORKING_EVERY_SECONDS = 300  # a working agent's digest is remade at most this often
 RETRY_SECONDS = 600  # after a failed build, wait this long before trying again on its own
 MAX_HTML = 200_000
-SCHEMA = {"type": "object", "required": ["kind", "html"],
-          "properties": {"kind": {"type": "string", "enum": KINDS}, "html": {"type": "string"}}}
-PROMPT = """You turn an agent's work log into a VISUAL digest for {owner_intro}, who glances at it beside the full log.
+_S = {"type": "string"}
+_TONE = {"type": "string", "enum": ["ok", "new", "changed", "broken", "unsure", "neutral"]}
+
+
+def _rows(props: dict, most: int) -> dict:
+    return {"type": "array", "maxItems": most, "items": {"type": "object", "required": list(props),
+                                                         "properties": props, "additionalProperties": False}}
+
+
+SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["kind", "state", "state_note", "intent", "outcome", "needs_you", "plan", "chain", "numbers",
+                 "changes", "checks", "timeline", "next", "confidence", "confidence_why", "evidence"],
+    "properties": {
+        "kind": {"type": "string", "enum": KINDS},
+        "state": {"type": "string", "enum": ["working", "needs_you", "blocked", "done", "failed", "stopped"]},
+        "state_note": _S, "intent": _S, "needs_you": _S, "next": _S, "confidence_why": _S,
+        "outcome": {"type": "object", "required": ["result", "headline"], "additionalProperties": False, "properties": {
+            "result": {"type": "string", "enum": ["worked", "partial", "failed", "unclear", "pending"]}, "headline": _S}},
+        "plan": _rows({"step": _S, "status": {"type": "string", "enum": ["done", "doing", "todo", "failed", "skipped"]}, "note": _S}, 8),
+        "chain": {"type": "object", "required": ["title", "nodes"], "additionalProperties": False, "properties": {
+            "title": _S, "nodes": _rows({"label": _S, "detail": _S, "tone": _TONE, "via": _S}, 6)}},
+        "numbers": _rows({"value": _S, "label": _S, "tone": _TONE}, 4),
+        "changes": _rows({"path": _S, "added": {"type": ["integer", "null"]}, "removed": {"type": ["integer", "null"]},
+                          "kind": {"type": "string", "enum": ["new", "edited", "deleted"]}}, 10),
+        "checks": _rows({"label": _S, "status": {"type": "string", "enum": ["pass", "fail", "pending", "none"]}, "url": _S}, 8),
+        "timeline": _rows({"when": _S, "event": _S, "tone": _TONE}, 6),
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "evidence": _rows({"label": _S, "url": _S}, 6),
+    },
+}
+PROMPT = """You fill the digest for {owner_intro}, who glances at it beside an agent's work log to know in five seconds
+what was asked, where the work stands, and what came of it.
 Below is the end of the work log of a task titled {title!r}.{needs}
-Do not use tools. Return kind and html.
+Do not use tools. Fill every field; leave a text field as an empty string and a list empty when the log has
+nothing for it (never write the word none or a pair of quote marks). Never invent facts, numbers,
+files or URLs: use only what the log shows, and say "guess" in the text when something is a guess.
 
-kind: rca (root cause of an alert or bug), plan (a design or implementation plan), fix (code changed, a PR),
-investigation (a question answered or something looked into), other.
+Write for a phone screen: plain words, no markdown, no emoji, no sentence over 14 words.
 
-The digest is a picture first, words second. It must be understood in five seconds and must not look like a
-document. Hard rules:
-- The centrepiece is a real diagram drawn in inline SVG (boxes, arrows, colour, small icons or emoji as markers).
-  It takes at least half of the digest.
-- Word budget: at most 45 words outside the diagram. Labels at most 6 words. No paragraphs, no sentence over 10
-  words, no list longer than 3 items.
-- Turn every number into a visual: stat tiles (big number, small label), tiny bar charts or sparklines drawn in
-  SVG from counts in the log, a timeline strip with dots for events (deploys, first seen, spikes), a confidence
-  meter (three segments).
-- Colour carries meaning: var(--coral) broken or failing, var(--amber) needs attention or unsure, var(--mint)
-  fixed, new or passing, var(--azure) links and neutral flow.
-- Supporting detail (evidence links, file paths, commands) goes in ONE closed <details><summary>Evidence</summary>
-  at the very bottom, as at most 5 short lines with links.
-
-Layout by kind:
-- rca: a flow diagram of the components involved (service, queue, page, check...) with arrows; the broken link
-  drawn in coral with a warning marker and a label of a few words. Then a timeline strip and 2 or 3 stat tiles if
-  the log has times or counts. Then the fix as up to 3 chips. Then the confidence meter.
-- plan: the architecture BEFORE and AFTER as two SVG diagrams (stacked); new parts mint, changed parts amber,
-  removed parts coral and struck through; a small legend. Then up to 3 chips for the steps.
-- fix: a mini file tree with a green/red bar per file for lines added/removed, test results as pass/fail pills,
-  and PR and CI badges.
-- investigation: the answer as one big headline of at most 12 words, then a diagram or stat tiles showing the
-  key facts.
-- other: pick the diagram that explains it best.
-If the agent is waiting on {owner}, start with a slim amber "Needs you" bar of at most 12 words.
-
-Technical: ONE self-contained HTML fragment (no <html>, <head> or <body>). Width is 360 to 640px: SVGs use a
-viewBox with width="100%" and stay legible at 360px (font-size 11 or more). Colours only through the CSS variables
-var(--ink) page, var(--panel) and var(--raise) boxes, var(--line) borders, var(--text), var(--muted), var(--faint),
-var(--amber), var(--azure), var(--mint), var(--coral); in SVG use them in style attributes, e.g.
-style="fill:var(--panel);stroke:var(--coral)". Inline styles or one <style> block. Fonts are inherited. No scripts,
-event handlers, forms, iframes, images or external resources. Use only URLs that appear in the log. Never invent
-facts or numbers; label a guess as a guess.
+- kind: rca (root cause of an alert or bug), plan (a design or implementation plan), fix (code changed, a PR),
+  investigation (a question answered or something looked into), other.
+- state: where the work is NOW. working (still going), needs_you (waiting on {owner}'s answer or approval),
+  blocked (stuck on something else: CI, a reviewer, access), done, failed, stopped (ended before finishing).
+  state_note: at most 6 words of detail, e.g. "CI running on #8935" or "waiting on a review".
+- intent: what {owner} asked for or what the task is for, in one sentence of at most 18 words. The goal, not the steps.
+- outcome: result worked | partial | failed | unclear | pending (still going), and headline: the single most
+  useful fact about what came of it, at most 14 words. For an rca this is the root cause; for an investigation
+  the answer; for a fix what changed and whether it is proven.
+- needs_you: what {owner} must decide or do, at most 16 words; empty when nothing is needed.
+- plan: the agent's steps as a checklist, in order, at most 8, each at most 8 words, with status done | doing |
+  todo | failed | skipped and a note of at most 8 words (evidence, a number, a PR) or "". Include steps still to do.
+- chain: how it works as a picture, at most 6 nodes in order: label at most 5 words, detail at most 9 words, tone,
+  and via: at most 4 words for the arrow to the next node ("" on the last). rca: the cause chain from trigger to
+  symptom, the broken node tone "broken". plan: the new flow, new parts "new", changed parts "changed". fix: the
+  code path the change sits on. title at most 4 words. Leave nodes [] when a chain would not help.
+- numbers: up to 4 stat tiles from counts in the log (value at most 8 characters, label at most 4 words);
+  tone broken for bad numbers, ok for good ones, neutral otherwise.
+- changes: files changed, with lines added and removed when the log shows them (null otherwise) and kind.
+- checks: tests, lint, type checks, PR, CI, deploy, review: label at most 3 words, status pass | fail | pending |
+  none (not run yet), url when the log has one, else "".
+- timeline: up to 6 dated events (when: a short time like "10:35Z" or "Oct 3"), only when the log has times.
+- next: the next step, at most 16 words.
+- confidence high | medium | low in the outcome, and confidence_why: at most 10 words on what would change it.
+- evidence: up to 6 links from the log (PRs, Sentry, CI runs, dashboards) with a short label; url "" for a fact
+  without a link.
 
 ---- LOG ----
 {material}"""
 
-VERSION = hashlib.sha1(PROMPT.encode()).hexdigest()[:8]  # a new prompt remakes every digest
+VERSION = hashlib.sha1((PROMPT + json.dumps(SCHEMA, sort_keys=True)).encode()).hexdigest()[:8]  # a new prompt remakes every digest
 
 _DROP_BLOCKS = re.compile(r"<(script|iframe|object|embed|form|template|noscript)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 _DROP_TAGS = re.compile(r"</?(?:script|iframe|object|embed|form|template|noscript|link|meta|base|input|button|"
@@ -117,7 +143,8 @@ def get(key: str) -> Optional[dict]:
         data = json.loads(_path(key).read_text())
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) and isinstance(data.get("html"), str) else None
+    ok = isinstance(data, dict) and (isinstance(data.get("data"), dict) or isinstance(data.get("html"), str))
+    return data if ok else None
 
 
 def put(key: str, digest: dict) -> None:
@@ -175,7 +202,7 @@ def make(title: str, material: str, needs_you: str = "", timeout: int = 420) -> 
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     out = raw.get("structured_output") if isinstance(raw, dict) else None
-    if not isinstance(out, dict) or out.get("kind") not in KINDS or not str(out.get("html") or "").strip():
+    if not isinstance(out, dict) or out.get("kind") not in KINDS or not str(out.get("intent") or "").strip():
         return None
     return out
 
@@ -188,7 +215,7 @@ def build(target: dict) -> Optional[dict]:
     out = make(target["title"], text, (cards.get(target["key"]) or {}).get("needs_you", ""))
     if out is None:
         return None
-    digest = {"kind": out["kind"], "html": clean(out["html"]), "source_mtime": target["mtime"],
+    digest = {"kind": out["kind"], "data": out, "source_mtime": target["mtime"],
               "made_at": time.time(), "model": MODEL, "version": VERSION}
     put(target["key"], digest)
     return digest
@@ -231,7 +258,9 @@ def after_card(target: dict) -> None:
 
 
 def _public(digest: dict) -> dict:
-    return {k: digest.get(k) for k in ("kind", "html", "made_at", "model")}
+    # Drawn on every read, so a layout change shows at once without remaking any digest.
+    html = digest_view.render(digest["data"]) if isinstance(digest.get("data"), dict) else clean(digest.get("html", ""))
+    return {"kind": digest.get("kind"), "html": html, "made_at": digest.get("made_at"), "model": digest.get("model")}
 
 
 def status(key: str, overview: dict, now: Optional[float] = None) -> dict:

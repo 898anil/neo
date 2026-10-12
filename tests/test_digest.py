@@ -18,6 +18,19 @@ class Proc:
         self.returncode, self.stdout, self.stderr = 0, stdout, ""
 
 
+SAMPLE = {
+    "kind": "fix", "state": "blocked", "state_note": "CI running on #8935", "intent": "Stop repeated guidance cards",
+    "outcome": {"result": "partial", "headline": "Gate written; tests not run yet"}, "needs_you": "",
+    "plan": [{"step": "Add embedding port", "status": "done", "note": ""}, {"step": "Run tests", "status": "todo", "note": ""}],
+    "chain": {"title": "Card path", "nodes": [{"label": "New card", "detail": "", "tone": "neutral", "via": "embed"},
+                                              {"label": "Skip repeat", "detail": "cosine >= 0.93", "tone": "new", "via": ""}]},
+    "numbers": [{"value": "9/215", "label": "true repeats", "tone": "ok"}],
+    "changes": [{"path": "a/b/service.py", "added": 12, "removed": 3, "kind": "edited"}],
+    "checks": [{"label": "ruff", "status": "pass", "url": ""}], "timeline": [], "next": "Run the unit tests",
+    "confidence": "medium", "confidence_why": "tests not run", "evidence": [],
+}
+
+
 def target(key="run:r1", mtime=NOW - 100, **kw):
     return {"key": key, "kind": "run", "run_id": "r1", "title": "t", "mtime": mtime, "working": False, **kw}
 
@@ -45,6 +58,50 @@ class CleanTest(unittest.TestCase):
 
     def test_caps_size(self):
         self.assertEqual(len(self.d.clean("a" * 300_000)), self.d.MAX_HTML)
+
+
+class ViewTest(unittest.TestCase):
+    def setUp(self):
+        from cos import digest_view
+        self.v = digest_view
+
+    def test_draws_every_part_the_fields_carry(self):
+        html = self.v.render(SAMPLE)
+        for part in ("Blocked", "CI running on #8935", "Stop repeated guidance cards", "Partly done", "1/2 done",
+                     "Card path", "cosine &gt;= 0.93", "9/215", "<b>service.py</b>", "+12 −3", "✓ ruff", "Run the unit tests",
+                     "medium confidence"):
+            self.assertIn(part, html, part)
+        self.assertNotIn("Needs you</b>", html)  # needs_you is empty
+        self.assertNotIn("Timeline", html)  # no dated events
+
+    def test_model_text_is_escaped_and_only_web_links_survive(self):
+        html = self.v.render({**SAMPLE, "intent": '<script>alert(1)</script><img src=x onerror=alert(1)>',
+                              "evidence": [{"label": "bad", "url": "javascript:alert(1)"}, {"label": "PR", "url": "https://github.com/o/r/pull/1"}],
+                              "checks": [{"label": "CI", "status": "fail", "url": "data:text/html,x"}]})
+        self.assertNotIn("<script", html)
+        self.assertNotIn("<img", html)
+        self.assertNotIn("javascript:", html)
+        self.assertNotIn("data:text", html)
+        self.assertIn('href="https://github.com/o/r/pull/1"', html)
+
+    def test_bad_stored_enums_and_titles_render_safely(self):
+        html = self.v.render({**SAMPLE, "state": ["x"], "confidence": {"a": 1}, "outcome": {"result": [], "headline": "h"},
+                              "plan": [{"step": "s", "status": {}, "note": ""}], "chain": {"title": "R&D path", "nodes": SAMPLE["chain"]["nodes"]}})
+        self.assertIn("Stopped", html)
+        self.assertIn("R&amp;D path", html)
+        self.assertNotIn("&amp;amp;", html)
+
+    def test_empty_written_as_quotes_or_none_shows_nothing(self):
+        for empty in ('""', "none", " N/A ", "-"):
+            html = self.v.render({**SAMPLE, "needs_you": empty, "next": empty})
+            self.assertNotIn("Needs you</b>", html, empty)
+            self.assertNotIn("Next</p>", html, empty)
+
+    def test_missing_or_malformed_fields_do_not_break_it(self):
+        html = self.v.render({"kind": "other", "intent": "x", "plan": "not a list", "chain": None, "changes": [1, "a"],
+                              "outcome": "bad", "numbers": [{"value": ""}]})
+        self.assertIn('class="dg"', html)
+        self.assertNotIn("Plan", html)
 
 
 class DigestTest(unittest.TestCase):
@@ -86,23 +143,34 @@ class DigestTest(unittest.TestCase):
                 self.assertEqual(self.d.status("run:r1", {}, NOW), {"status": "none", "skipped": True})
                 start.assert_not_called()
 
-    def test_build_stores_cleaned_html(self):
-        out = {"structured_output": {"kind": "rca", "html": "<div>Cause</div><script>x()</script>"}}
+    def test_build_stores_the_structured_fields(self):
+        out = {"structured_output": {**SAMPLE, "kind": "rca"}}
         with patch.object(self.d.cards, "load_events", return_value=[{"kind": "text", "body": "found it"}]), \
              patch.object(self.d.subprocess, "run", return_value=Proc(json.dumps(out))) as run:
             got = self.d.build(target())
-        self.assertEqual((got["kind"], got["html"]), ("rca", "<div>Cause</div>"))
+        self.assertEqual((got["kind"], got["data"]["intent"]), ("rca", SAMPLE["intent"]))
         self.assertEqual(self.d.get("run:r1")["source_mtime"], NOW - 100)
         cmd = run.call_args[0][0]
         self.assertIn(self.d.MODEL, cmd)
         self.assertEqual(cmd[cmd.index("--tools") + 1], "")
+        self.assertEqual(json.loads(cmd[cmd.index("--json-schema") + 1]), self.d.SCHEMA)
+
+    def test_status_draws_structured_digests_and_still_serves_old_html_cleaned(self):
+        self.d.put("run:r1", {"kind": "fix", "data": SAMPLE, "source_mtime": NOW - 100, "made_at": NOW, "version": self.d.VERSION})
+        with patch.object(self.d, "target_for", return_value=target()):
+            got = self.d.status("run:r1", {}, NOW)
+        self.assertIn('class="dg"', got["html"])
+        self.assertIn("Stop repeated guidance cards", got["html"])
+        self.d.put("run:r2", {"kind": "rca", "html": "<p>old</p><script>x()</script>", "source_mtime": NOW - 100,
+                              "made_at": NOW, "version": "old"})
+        self.assertEqual(self.d._public(self.d.get("run:r2"))["html"], "<p>old</p>")
 
     def test_failed_call_stores_nothing(self):
         with patch.object(self.d.cards, "load_events", return_value=[{"kind": "text", "body": "x"}]), \
              patch.object(self.d.subprocess, "run", return_value=Proc("not json")):
             self.assertIsNone(self.d.build(target()))
         with patch.object(self.d.cards, "load_events", return_value=[{"kind": "text", "body": "x"}]), \
-             patch.object(self.d.subprocess, "run", return_value=Proc(json.dumps({"structured_output": {"kind": "rca", "html": " "}}))):
+             patch.object(self.d.subprocess, "run", return_value=Proc(json.dumps({"structured_output": {**SAMPLE, "intent": " "}}))):
             self.assertIsNone(self.d.build(target()))
         self.assertIsNone(self.d.get("run:r1"))
 
