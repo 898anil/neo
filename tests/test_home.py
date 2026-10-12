@@ -40,7 +40,7 @@ class HomeTest(unittest.TestCase):
     def test_decide_contains_approvals_questions_failures_and_stalls(self):
         o = ov([agent("a", "approve"), agent("b", "reply"), agent("s", "stuck"), agent("c", "working")],
                [task("r1", "failed", "failed")])
-        out = build(o, [loop("l1", stalled="Fix PR open 50h, not merged")], {}, since=SINCE, now=NOW)
+        out = build(o, [loop("l1", stalled="Fix PR open 50h, not merged", links={"prs": ["https://github.com/o/r/pull/1"]})], {}, since=SINCE, now=NOW)
         self.assertEqual({d["key"] for d in out["decide"]}, {"agent:a", "agent:b", "agent:s", "run:r1", "loop:l1"})
         self.assertEqual(out["counts"]["decide"], 5)
 
@@ -126,8 +126,8 @@ class HomeTest(unittest.TestCase):
 
     def test_agent_questions_come_before_stalled_alerts(self):
         c = {"run:r1": card(needs_you="Which option?")}
-        out = build(ov(tasks=[task("r1", updated=NOW - 60)]), [loop("l1", stalled="RCA done, no fix after 116h", at=NOW - 400000)],
-                    c, SINCE, NOW)
+        out = build(ov(tasks=[task("r1", updated=NOW - 60)]), [loop("l1", stalled="RCA done, no fix after 116h", at=NOW - 400000, key="slack:C1:1.5")],
+                    c, SINCE, NOW, traces={("C1", "1.5"): "r7"})
         self.assertEqual([d["key"] for d in out["decide"]], ["run:r1", "loop:l1"])
         self.assertEqual((out["counts"]["asks"], out["counts"]["stalled"]), (1, 1))
 
@@ -142,7 +142,15 @@ class HomeTest(unittest.TestCase):
         d = {x["key"]: x for x in out["decide"]}
         self.assertEqual((d["loop:l1"]["trace_href"], d["loop:l1"]["slack_href"]), ("#/run/r7", src))
         self.assertEqual(d["loop:l1"]["href"], "#/run/r7")
-        self.assertIsNone(d["loop:l2"]["trace_href"])
+        self.assertNotIn("loop:l2", d)  # stalled with nothing to open: in flight, not Decide
+
+    def test_stalled_loop_with_nothing_to_open_is_in_flight_not_decide(self):
+        src = "https://x.slack.com/archives/C9/p9"
+        out = build(ov(), [loop("l2", stage="rca", stalled="RCA done, no doc or fix after 90h", key="slack:C9:9.9",
+                                links={"prs": [], "source": src})], {}, SINCE, NOW)
+        self.assertEqual(out["decide"], [])
+        self.assertEqual(out["counts"]["stalled"], 0)
+        self.assertEqual([(m["key"], m["line"]) for m in out["in_flight"]], [("loop:l2", "RCA done, no doc or fix after 90h")])
 
     def test_regressed_loop_is_its_own_section_not_in_decide(self):
         out = build(ov(), [loop("l1", stage="rca", regressed=True, stalled="No RCA after 5h")], {}, SINCE, NOW)

@@ -284,6 +284,9 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
                                    "result": "worked" if loop["stage"] == "verified" else "moving"})
             else:
                 quiet += 1
+        elif loop.get("stalled") and not (trace or base["pr_href"]):
+            # Stalled but nothing to open except the Slack thread: not a decision, so it waits in flight.
+            in_flight.append({**base, "line": loop["stalled"] + fired, "at": loop["stage_at"]})
         elif loop.get("stalled"):
             decide.append({**base, "question": loop["stalled"] + fired, "recommend": "", "age": now - loop["stage_at"], "at": loop["stage_at"],
                            "urgent": False, "stalled": True})
