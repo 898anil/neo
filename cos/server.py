@@ -7,7 +7,7 @@ POST /api/home/seen                 the owner looked at the home screen now
 POST /api/home/do                   {key} -> carry out the card's recommendation (its do_it)
 GET  /api/digest?key=run:<id>|agent:<id>  the trace page's visual digest (ready / writing / none)
 POST /api/digest/refresh            {key} -> rebuild the digest now
-POST /api/home/close                {key} -> stop showing a Waiting-on-others card (until a newer card)
+POST /api/home/close                {key} -> close a card's ask: a decision, a wait on others, or a stopped-unfinished row (until a newer card)
 POST /api/mentions/<id>/<send|neo|dismiss>   {text} for send: post as the owner in that thread
 POST /api/mentions/check            look for new mentions of the owner now
 POST /api/loops/<id>/<mute|close|open>

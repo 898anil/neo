@@ -739,8 +739,14 @@ function whereOf(d) {
 }
 function doneButton(d) {
   if (d.kind === "loop") return null;
+  // Opening an agent no longer clears its question (it stays under Decide until answered), so Done
+  // closes the ask itself; a newer question from the same agent or run brings it back.
   const seen = () => (d.kind === "run" ? api(`/api/runs/${d.run_id}/seen`, { method: "POST", body: "{}" }) : actOn(d, "seen"));
-  return h("button", { class: "btn quiet", onclick: async (e) => { e.currentTarget.disabled = true; try { await seen(); refresh(); } catch (err) { toast(err.message); } } }, "Done");
+  const close = () => api("/api/home/close", { method: "POST", body: JSON.stringify({ key: d.key }) });
+  return h("button", { class: "btn quiet", title: "Nothing more needed from you here", onclick: async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try { await Promise.all([seen(), close()]); refresh(); } catch (err) { toast(err.message); b.disabled = false; }
+  } }, "Done");
 }
 function loopButton(d, action, label) {
   return h("button", { class: "btn quiet", onclick: async (e) => {
@@ -791,7 +797,9 @@ function decideCard(d, o) {
   }
   const c = h("div", { class: "ask" });
   c.append(h("div", { class: "who" }, h("span", { class: `lamp ${d.attention === "failed" ? "failed" : "blocked"}` }),
-    h("a", linkAttrs(d.href), d.title), h("span", {}, ago(d.at)), h("span", { class: "where" }, whereOf(d))));
+    h("a", linkAttrs(d.href), d.title), h("span", {}, ago(d.at)), h("span", { class: "where" }, whereOf(d)),
+    // Read on a phone and left for later: say so, so it doesn't look like something new or something handled.
+    d.opened ? h("span", { class: "tag warn" }, "Opened, not answered") : null));
   if (d.kind === "loop") c.append(stageBar(d.stage_index));
   c.append(h("div", { class: `what${d.attention === "failed" ? " bad" : ""}` }, d.question || "Needs a look"));
   const info = moreInfo(d.key, [cardBits(d.card), d.also && d.also.length ? alsoLine(d.also) : null]);
@@ -815,6 +823,17 @@ function doItButton(d) {
       toast("On it"); if (r.id) location.hash = `#/run/${r.id}`; else refresh();
     } catch (err) { toast(err.message); b.disabled = false; }
   } }, "Do it");
+}
+function unfinishedCard(u) {
+  // Stopped partway and asked nothing: without this it would sit as a quiet "Idle" row.
+  const [label, tone] = RESULT[u.result] || ["Stopped", "warn"];
+  return h("div", { class: "ask" },
+    h("div", { class: "who" }, h("span", { class: `lamp ${RESULT_LAMP[u.result] || "partial"}` }), h("a", linkAttrs(u.href), u.title),
+      h("span", {}, `idle ${ago(u.at)}`), h("span", { class: "where" }, whereOf(u)), h("span", { class: `tag ${tone}` }, label)),
+    h("div", { class: "what" }, u.line || "Stopped without a summary. Open it to see where it got to."),
+    moreInfo(u.key, [u.risk ? h("div", { class: "risk" }, h("b", {}, "Not done or not verified: "), u.risk) : null,
+      u.next ? h("div", { class: "ev" }, h("b", {}, "If you do nothing: "), u.next) : null]),
+    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(u.href) }, "Open"), doneButton(u)));
 }
 function waitingCard(m) {
   const close = h("button", { class: "btn quiet", onclick: async () => {
@@ -882,21 +901,29 @@ function renderHome(o) {
   const d = homeData;
   if (!d) { paint(h("div", { class: "wrap" }, h("header", { class: "hero" }, h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host), h("h1", { class: "calm" }, "Loading…"))), "home:loading"); return; }
   const c = d.counts;
-  const urgentBits = [c.regressed && `${c.regressed} regressed`, c.decide && `${c.decide} to decide`].filter(Boolean);
+  const asks = c.asks ?? c.decide, stalled = c.stalled || 0, unfinished = c.unfinished || 0;
+  const urgentBits = [c.regressed && `${c.regressed} regressed`, asks && `${asks} waiting on you`,
+    unfinished && `${unfinished} stopped unfinished`, stalled && `${stalled} stalled alert${stalled > 1 ? "s" : ""}`].filter(Boolean);
   const since = d.since ? `Since you looked ${ago(d.since)} ago, at ${clock(d.since * 1000)}` : "Everything so far";
   const moved = moreMoved ? d.moved : d.moved.slice(0, 8);
   const note = (text) => h("p", { class: "tab-note" }, text);
   const tabs = segControl([
-    ["decide", `Decide ${c.regressed + c.decide}`], ["moved", `Updates ${c.moved}`], ["flight", `In flight ${c.in_flight}`],
+    ["decide", `Decide ${c.regressed + c.decide + unfinished}`], ["moved", `Updates ${c.moved}`], ["flight", `In flight ${c.in_flight}`],
     ["others", `Waiting ${c.others || 0}`], ["monitor", `Monitoring ${c.monitoring || 0}`], ["rest", `Other ${c.quiet}`],
   ], () => homeTab, setHomeTab);
   tabs.classList.add("home-tabs");
   const body = {
     decide: () => [
       d.regressed.length ? [groupHead("g-regressed", "Regressed", c.regressed, "Came back after the fix."), d.regressed.map(regressedCard)] : null,
-      d.decide.length ? [d.regressed.length ? groupHead("g-decide", "Decide", c.decide, "Neo can do the ones with Do it.") : note("Neo can do the ones with Do it."),
-        d.decide.map((x) => decideCard(x, o))] : null,
-      !d.regressed.length && !d.decide.length ? h("p", { class: "empty" }, "Nothing to decide.") : null],
+      // Agents and people asking you first, then agents that stopped partway, then alerts that stalled:
+      // a fresh question must never sit under a pile of days-old alerts.
+      asks ? [groupHead("g-decide", "Waiting on you", asks, "Stays here until you answer or tap Done, even after you open it. Neo can do the ones with Do it."),
+        d.decide.filter((x) => !x.stalled).map((x) => decideCard(x, o))] : null,
+      unfinished ? [groupHead("g-unfinished", "Stopped before finishing", unfinished, "Idle without finishing (partly done, failed or unclear) and asked nothing. Open to continue it, or tap Done if it's enough."),
+        d.unfinished.map(unfinishedCard)] : null,
+      stalled ? [groupHead("g-stalled", "Stalled alerts", stalled, "Alerts with no progress for a while. Hand one to an agent or mute it."),
+        d.decide.filter((x) => x.stalled).map((x) => decideCard(x, o))] : null,
+      !d.regressed.length && !d.decide.length && !unfinished ? h("p", { class: "empty" }, "Nothing to decide.") : null],
     moved: () => d.moved.length ? [note(d.since ? "Moved since you looked. Tap one for the full story." : "Recent. Tap one for the full story."),
       h("div", { class: "list" }, moved.map((m) => homeItem(m, RESULT_LAMP[m.result] || ""))),
       d.moved.length > moved.length ? h("button", { class: "more", type: "button", onclick: () => { moreMoved = true; paintedSig = ""; renderHome(o); } }, `Show ${d.moved.length - moved.length} more`) : null]

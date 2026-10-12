@@ -11,11 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 NOW = 1_790_000_000.0
 
 
-def payload(decide=(), regressed=(), moved=(), in_flight=(), quiet=0, moved_more=0):
-    p = {"since": NOW - 3600, "now": NOW, "decide": list(decide), "regressed": list(regressed), "moved": list(moved),
+def payload(decide=(), regressed=(), moved=(), in_flight=(), quiet=0, moved_more=0, unfinished=()):
+    p = {"since": NOW - 3600, "now": NOW, "decide": list(decide), "unfinished": list(unfinished), "regressed": list(regressed), "moved": list(moved),
          "moved_more": moved_more, "in_flight": list(in_flight), "quiet": quiet}
     p["counts"] = {"decide": len(p["decide"]), "regressed": len(p["regressed"]), "moved": len(p["moved"]) + moved_more,
-                   "in_flight": len(p["in_flight"]), "quiet": quiet}
+                   "in_flight": len(p["in_flight"]), "quiet": quiet, "unfinished": len(p["unfinished"])}
     return p
 
 
@@ -110,6 +110,25 @@ class NudgeTest(unittest.TestCase):
         p2 = payload(decide=[self.card_ask("run:a", 5), self.card_ask("run:c", 4)])
         self.assertIsNone(self.urgent.nudge(p2, NOW + 3600, 11))
         self.assertIn("run:c", self.urgent.nudge(p2, NOW + 4 * 3600, 14)["text"])
+
+    def test_opened_question_and_stopped_agents_are_nudged(self):
+        opened = {**self.card_ask("agent:g", 3), "opened": True}
+        stopped = {"key": "agent:p", "title": "Guidance lease race", "href": "#/agent/neo/p", "at": NOW - 4 * 3600,
+                   "age": 4 * 3600, "result": "partial", "line": "Fixed 2 of 3 tests"}
+        n = self.urgent.nudge(payload(decide=[opened], unfinished=[stopped]), NOW, 11)
+        self.assertIn("you opened it, not answered", n["text"])
+        self.assertIn("1 agent stopped before finishing", n["text"])
+        self.assertIn("Fixed 2 of 3 tests", n["text"])
+        self.urgent.mark_sent([n], NOW)
+        self.assertIsNone(self.urgent.nudge(payload(unfinished=[stopped]), NOW + 4 * 3600, 15))  # once per stop
+
+    def test_digest_lists_stopped_agents_even_when_nothing_else_moved(self):
+        stopped = {"key": "agent:p", "title": "Lease race", "href": "", "result": "partial", "line": "Fixed 2 of 3 tests"}
+        text = self.urgent.digest_text(payload(unfinished=[stopped]), None)
+        self.assertIn("1 stopped unfinished", text)
+        self.assertIn("*Stopped before finishing*", text)
+        self.assertNotIn("Nothing needs you", text)
+        self.assertNotIn("stopped unfinished", self.urgent.digest_text(payload(quiet=3), None))
 
     def test_waiting_agents_and_loops_are_not_in_the_nudge(self):
         p = payload(decide=[ask("agent:a", 5 * 3600), ask("loop:l", 5 * 3600, kind="loop")])

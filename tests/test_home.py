@@ -49,12 +49,77 @@ class HomeTest(unittest.TestCase):
         d = out["decide"][0]
         self.assertEqual((d["question"], d["recommend"]), ("Merge #12?", "Yes, CI green"))
 
-    def test_unread_card_with_a_question_needs_you_until_seen(self):
+    def test_opening_a_question_keeps_it_until_answered_or_done(self):
         c = {"run:r1": card(needs_you="Ship the spinner-name change?")}
         o = ov(tasks=[task("r1")])
-        self.assertEqual([d["key"] for d in build(o, [], c, SINCE, NOW)["decide"]], ["run:r1"])
-        seen = {"run:r1": NOW - 100}
-        self.assertEqual(build(o, [], c, SINCE, NOW, seen=seen.get)["decide"], [])
+        out = build(o, [], c, SINCE, NOW)
+        self.assertEqual([(d["key"], d["opened"]) for d in out["decide"]], [("run:r1", False)])
+        opened = {"run:r1": NOW - 100}  # read on the phone, left for later: still a question, marked opened
+        out = build(o, [], c, SINCE, NOW, seen=opened.get)
+        self.assertEqual([(d["key"], d["opened"]) for d in out["decide"]], [("run:r1", True)])
+        done = {"run:r1": NOW - 100, "waiting:run:r1": NOW - 100}  # the owner tapped Done
+        self.assertEqual(build(o, [], c, SINCE, NOW, seen=done.get)["decide"], [])
+
+    def test_idle_agent_that_asked_and_was_opened_stays_in_decide_not_idle(self):
+        c = {"agent:g": card(needs_you="Which option should I build?", result="answered", source_mtime=NOW - 7200)}
+        a = agent("g", "idle", last_active=NOW - 7200)
+        out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:g": NOW - 3600}.get)
+        self.assertEqual([d["key"] for d in out["decide"]], ["agent:g"])
+        self.assertEqual(out["in_flight"], [])
+
+    def test_partly_done_idle_agent_is_stopped_unfinished_until_done(self):
+        c = {"agent:p": card(result="partial", did="Fixed 2 of 3 tests", risk="third test not run", source_mtime=NOW - 9000, made_at=NOW - 8900)}
+        a = agent("p", "idle", last_active=NOW - 9000)
+        out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:p": NOW - 8000}.get)
+        self.assertEqual([(u["key"], u["result"], u["line"]) for u in out["unfinished"]], [("agent:p", "partial", "Fixed 2 of 3 tests")])
+        self.assertEqual((out["in_flight"], out["moved"], out["counts"]["unfinished"]), ([], [], 1))
+        out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:p": NOW, "waiting:agent:p": NOW}.get)
+        self.assertEqual(out["unfinished"], [])
+        self.assertTrue(out["in_flight"][0]["idle"])
+
+    def test_answered_question_does_not_come_back_when_the_agent_stops_again(self):
+        # The owner opened it and answered; the agent worked and stopped again before its next card landed.
+        c = {"agent:g": card(needs_you="Which option?", result="partial", source_mtime=NOW - 7200, made_at=NOW - 7100)}
+        a = agent("g", "idle", last_active=NOW - 1200)
+        out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:g": NOW - 6000}.get)
+        self.assertEqual((out["decide"], out["unfinished"]), ([], []))
+
+    def test_unread_old_question_still_asks_even_if_the_agent_moved_on(self):
+        c = {"agent:g": card(needs_you="Which option?", source_mtime=NOW - 7200)}
+        out = build(ov([agent("g", "idle", last_active=NOW - 1200)]), [], c, SINCE, NOW)
+        self.assertEqual([d["key"] for d in out["decide"]], ["agent:g"])
+
+    def test_partly_done_dashboard_run_is_unfinished_but_slack_run_is_not(self):
+        c = {"run:d": card(result="partial", made_at=NOW - 8900, source_mtime=NOW - 9000),
+             "run:s": card(result="unclear", made_at=NOW - 8900, source_mtime=NOW - 9000)}
+        d, sl = task("d", updated=NOW - 9000), {**task("s", updated=NOW - 9000), "source": "slack"}
+        d["source"] = "dashboard"
+        out = build(ov(tasks=[d, sl]), [], c, SINCE, NOW)
+        self.assertEqual([u["key"] for u in out["unfinished"]], ["run:d"])
+
+    def test_partial_card_waiting_on_others_is_only_in_others(self):
+        c = {"agent:o": card(result="partial", needs_you="Sachin must approve #1", ask_kind="others", source_mtime=NOW - 9000)}
+        out = build(ov([agent("o", "idle", last_active=NOW - 9000)]), [], c, SINCE, NOW)
+        self.assertEqual(([o["key"] for o in out["others"]], out["unfinished"], out["decide"]), (["agent:o"], [], []))
+
+    def test_done_on_a_partial_question_clears_it_from_decide_and_unfinished(self):
+        c = {"agent:q": card(result="partial", needs_you="Merge?", source_mtime=NOW - 9000, made_at=NOW - 8900)}
+        a = agent("q", "idle", last_active=NOW - 9000)
+        self.assertEqual([d["key"] for d in build(ov([a]), [], c, SINCE, NOW)["decide"]], ["agent:q"])
+        out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:q": NOW, "waiting:agent:q": NOW}.get)
+        self.assertEqual((out["decide"], out["unfinished"]), ([], []))
+
+    def test_finished_idle_agent_says_nothing_needs_you(self):
+        c = {"agent:w": card(result="worked", did="Merged #1", source_mtime=NOW - 9000, made_at=NOW - 8900)}
+        out = build(ov([agent("w", "idle", last_active=NOW - 9000)]), [], c, SINCE, NOW)
+        self.assertTrue(out["in_flight"][0]["line"].startswith("Idle, nothing needs you"))
+
+    def test_agent_questions_come_before_stalled_alerts(self):
+        c = {"run:r1": card(needs_you="Which option?")}
+        out = build(ov(tasks=[task("r1", updated=NOW - 60)]), [loop("l1", stalled="RCA done, no fix after 116h", at=NOW - 400000)],
+                    c, SINCE, NOW)
+        self.assertEqual([d["key"] for d in out["decide"]], ["run:r1", "loop:l1"])
+        self.assertEqual((out["counts"]["asks"], out["counts"]["stalled"]), (1, 1))
 
     def test_oldest_wait_first(self):
         o = ov([agent("new", "approve", NOW - 60), agent("old", "approve", NOW - 6000)])

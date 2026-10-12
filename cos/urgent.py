@@ -81,18 +81,34 @@ def nudge(payload: dict, now: float, local_hour: int, base_url: Optional[str] = 
     sent = STORE.read()
     if now - sent.get("nudge|last", 0) < NUDGE_EVERY_HOURS * 3600:
         return None
-    rows = [d for d in payload.get("decide", []) if not d.get("urgent") and d.get("kind") != "loop"
-            and d.get("age", 0) >= NUDGE_AFTER_HOURS * 3600 and f"nudge|{d['key']}|{int(d.get('at') or 0)}" not in sent]
-    if not rows:
+    fresh = lambda d: (d.get("age", 0) >= NUDGE_AFTER_HOURS * 3600  # noqa: E731
+                       and f"nudge|{d['key']}|{int(d.get('at') or 0)}" not in sent)
+    # A question you opened and left is still a question: it stays in decide (see home.build) and is nudged.
+    rows = [d for d in payload.get("decide", []) if not d.get("urgent") and d.get("kind") != "loop" and fresh(d)]
+    # Agents that stopped partway and asked nothing: they sit idle until someone continues or closes them.
+    stopped = [u for u in payload.get("unfinished", []) if fresh(u)]
+    if not rows and not stopped:
         return None
     rows.sort(key=lambda d: -d["age"])
-    lines = [f":hourglass: *{len(rows)} decision{'s' if len(rows) > 1 else ''} waiting on you* (tap Do it on the dashboard to accept)"]
-    for d in rows[:NUDGE_ROWS]:
-        lines.append(f"• {_link(d.get('href', ''), base_url, d['title'][:80])} ({int(d['age'] // 3600)}h): {d.get('question', '')}"
-                     + (f"\n   _Recommend:_ {d['recommend']}" if d.get("recommend") else ""))
-    if len(rows) > NUDGE_ROWS:
-        lines.append(f"• +{len(rows) - NUDGE_ROWS} more on the dashboard")
-    ledger = ["nudge|last"] + [f"nudge|{d['key']}|{int(d.get('at') or 0)}" for d in rows]
+    stopped.sort(key=lambda u: -u["age"])
+    lines = []
+    if rows:
+        lines.append(f":hourglass: *{len(rows)} decision{'s' if len(rows) > 1 else ''} waiting on you* (tap Do it on the dashboard to accept)")
+        for d in rows[:NUDGE_ROWS]:
+            lines.append(f"• {_link(d.get('href', ''), base_url, d['title'][:80])} ({int(d['age'] // 3600)}h"
+                         + (", you opened it, not answered" if d.get("opened") else "") + f"): {d.get('question', '')}"
+                         + (f"\n   _Recommend:_ {d['recommend']}" if d.get("recommend") else ""))
+        if len(rows) > NUDGE_ROWS:
+            lines.append(f"• +{len(rows) - NUDGE_ROWS} more on the dashboard")
+    if stopped:
+        lines.append(f":double_vertical_bar: *{len(stopped)} agent{'s' if len(stopped) > 1 else ''} stopped before finishing* "
+                     "(continue or close them on the dashboard)")
+        for u in stopped[:NUDGE_ROWS]:
+            lines.append(f"• {RESULT_EMOJI.get(u.get('result'), '•')} {_link(u.get('href', ''), base_url, u['title'][:80])} "
+                         f"(idle {int(u['age'] // 3600)}h): {u.get('line', '')[:200]}")
+        if len(stopped) > NUDGE_ROWS:
+            lines.append(f"• +{len(stopped) - NUDGE_ROWS} more on the dashboard")
+    ledger = ["nudge|last"] + [f"nudge|{d['key']}|{int(d.get('at') or 0)}" for d in rows + stopped]
     return {"ledger": ledger, "reason": "nudge", "text": "\n".join(lines)}
 
 
@@ -110,9 +126,10 @@ def mark_sent(items: list[dict], now: Optional[float] = None) -> None:
 
 def digest_text(payload: dict, base_url: Optional[str]) -> str:
     c = payload["counts"]
-    head = (f"*Today:* {c['decide']} to decide · {c['regressed']} regressed · {c['moved']} moved · "
+    stopped = f"{c['unfinished']} stopped unfinished · " if c.get("unfinished") else ""
+    head = (f"*Today:* {c['decide']} to decide · {stopped}{c['regressed']} regressed · {c['moved']} moved · "
             f"{c['in_flight']} in flight · {c['quiet']} quiet")
-    if not (c["decide"] or c["regressed"] or c["moved"] or c["in_flight"]):
+    if not (c["decide"] or c.get("unfinished") or c["regressed"] or c["moved"] or c["in_flight"]):
         return head + "\nNothing needs you."
     lines = [head]
 
@@ -127,6 +144,8 @@ def digest_text(payload: dict, base_url: Optional[str]) -> str:
     title = lambda r: _link(r.get("href", ""), base_url, r["title"])  # noqa: E731
     section("Regressed", payload["regressed"], lambda r: f"{title(r)}: {r.get('line', '')}", c["regressed"])
     section("Decide", payload["decide"], lambda r: f"{title(r)}: {r.get('question', '')}", c["decide"])
+    section("Stopped before finishing", payload.get("unfinished", []),
+            lambda r: f"{RESULT_EMOJI.get(r.get('result'), '•')} {title(r)}: {r.get('line', '')}", c.get("unfinished", 0))
     section("Moved", payload["moved"], lambda r: f"{RESULT_EMOJI.get(r.get('result'), '•')} {title(r)}: {r.get('line', '')}", c["moved"])
     section("Waiting on others", payload.get("others", []), lambda r: f"{title(r)}: {r.get('line', '')}", c.get("others", 0))
     section("In flight", payload["in_flight"], lambda r: f"{title(r)}: {r.get('line', '')}", c["in_flight"])
