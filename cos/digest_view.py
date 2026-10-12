@@ -170,8 +170,8 @@ def _header(d: dict) -> str:
     live = " live" if _k(d.get("state")) == "working" else ""
     shown_note = not _blank(d.get("state_note")) and _blank(d.get("needs_you"))
     note = f'<span class="note">{_t(d.get("state_note"), 80)}</span>' if shown_note else ""
-    head = (f'<div class="top"><span class="pill{live}" style="{_c(colour)}"><i></i>{label}</span>{note}'
-            f'<span class="kind">{escape(KIND.get(_k(d.get("kind")), "Digest"))}</span></div>')
+    # The kind (Fix, RCA…) is already in the frame's top line on the trace page.
+    head = f'<div class="top"><span class="pill{live}" style="{_c(colour)}"><i></i>{label}</span>{note}</div>'
     if not _blank(d.get("intent")):
         head += f'<p class="intent">{_t(d.get("intent"), 220)}</p>'
     if not _blank(d.get("needs_you")):
