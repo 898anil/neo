@@ -95,6 +95,38 @@ CSS = """
 .dg details[open] summary{margin-bottom:8px}
 .dg details ul{padding:0;list-style:none;display:grid;gap:4px;font-size:13px}
 .dg a{color:var(--azure);text-decoration:none}
+.dg{gap:16px}
+.dg .intent{font:400 15px/1.4 var(--serif),Georgia,serif;color:var(--muted)}
+.dg .fig{margin:4px 0 0;padding:16px 14px 18px;border-radius:14px;background:var(--wash)}
+.dg .fig figcaption{font:600 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-bottom:14px}
+.dg .flow{display:flex;flex-wrap:wrap;align-items:stretch;row-gap:14px}
+.dg .nd{flex:1 1 84px;min-width:84px;max-width:180px;position:relative;display:flex;align-items:center;justify-content:center;text-align:center;
+  padding:12px 8px;border-radius:10px;font-size:12.5px;line-height:1.25;font-weight:600;color:var(--text);
+  background:color-mix(in srgb,var(--c) 10%,var(--panel));box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--c) 70%,transparent)}
+.dg .nd.todo{color:var(--faint);font-weight:500;background:var(--panel);box-shadow:inset 0 0 0 1px var(--line)}
+.dg .nd.broken{background:color-mix(in srgb,var(--coral) 16%,var(--panel))}
+.dg .nd i{position:absolute;top:-8px;right:-6px;width:18px;height:18px;border-radius:50%;display:grid;place-items:center;
+  font:700 11px/1 var(--mono);font-style:normal;background:var(--c);color:var(--panel)}
+.dg .nd.doing i{animation:p 1.6s ease-in-out infinite}
+.dg .ar{flex:0 0 18px;align-self:center;height:2px;background:var(--faint);position:relative;opacity:.7}
+.dg .ar::after{content:"";position:absolute;right:-1px;top:-4px;border:5px solid transparent;border-left:6px solid var(--faint);border-right:0}
+.dg .out{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0;background:none}
+.dg .out .h{flex:1 1 220px;font-size:15px;font-weight:600;line-height:1.35}
+.dg .meter{cursor:help}
+.dg .prog{display:flex;align-items:center;gap:10px;margin:0;font:600 12px var(--mono);color:var(--muted)}
+.dg .prog .seg{flex:1;display:flex;gap:3px}
+.dg .prog .seg i{flex:1;height:8px;border-radius:2px;opacity:.9}
+.dg .prog .seg i.todo,.dg .prog .seg i.skipped{background:var(--line)!important}
+.dg .now{display:flex;gap:8px;align-items:baseline;font-size:13.5px;color:var(--text);margin-top:-6px}
+.dg .now b{font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--azure);flex:none}
+.dg details>summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dg details>summary::before{content:"▸";font-size:10px;color:var(--faint)}
+.dg details[open]>summary::before{content:"▾"}
+.dg details.chg>summary .tag{font-size:10px;padding:2px 6px;border-radius:4px;background:color-mix(in srgb,var(--c) 12%,transparent)}
+.dg details.chg>summary .n{font:11px var(--mono);color:var(--faint);letter-spacing:0;text-transform:none}
+.dg details ol.steps{margin-top:6px}
+.dg .tl .ev span{font-size:11.5px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.dg .next{font-size:13.5px}
 """
 
 
@@ -136,13 +168,52 @@ def _section(label: str, body: str) -> str:
 def _header(d: dict) -> str:
     label, colour = STATE.get(_k(d.get("state")), STATE["stopped"])
     live = " live" if _k(d.get("state")) == "working" else ""
-    note = f'<span class="note">{_t(d.get("state_note"), 80)}</span>' if not _blank(d.get("state_note")) else ""
+    shown_note = not _blank(d.get("state_note")) and _blank(d.get("needs_you"))
+    note = f'<span class="note">{_t(d.get("state_note"), 80)}</span>' if shown_note else ""
     head = (f'<div class="top"><span class="pill{live}" style="{_c(colour)}"><i></i>{label}</span>{note}'
             f'<span class="kind">{escape(KIND.get(_k(d.get("kind")), "Digest"))}</span></div>')
-    need = d.get("needs_you")
-    if not _blank(need):
-        head += f'<div class="need"><b>Needs you</b><span>{_t(need, 200)}</span></div>'
+    if not _blank(d.get("intent")):
+        head += f'<p class="intent">{_t(d.get("intent"), 220)}</p>'
+    if not _blank(d.get("needs_you")):
+        head += f'<div class="need"><b>Needs you</b><span>{_t(d.get("needs_you"), 200)}</span></div>'
     return head
+
+
+def _steps(d: dict) -> list[tuple[str, str]]:
+    """(text, status) for each plan step, unknown statuses read as still to do."""
+    return [(str(s.get("step") or ""), _k(s.get("status")) if _k(s.get("status")) in STEP else "todo") for s in _rows(d.get("plan"), 8)]
+
+
+def _has_chain(d: dict) -> bool:
+    chain = d.get("chain") if isinstance(d.get("chain"), dict) else {}
+    return len([n for n in _rows(chain.get("nodes"), 6) if not _blank(n.get("label"))]) >= 2
+
+
+def _diagram(d: dict) -> str:
+    """The picture at the top: the cause chain or flow when the model drew one, otherwise the plan as a flow."""
+    chain = d.get("chain") if isinstance(d.get("chain"), dict) else {}
+    nodes = [n for n in _rows(chain.get("nodes"), 6) if not _blank(n.get("label"))]
+    if len(nodes) >= 2:
+        title = _t(chain.get("title"), 60) or "How it works"
+        boxes = [(n.get("label"), _k(n.get("tone")) if _k(n.get("tone")) in TONE else "neutral", n.get("detail"), n.get("via")) for n in nodes]
+    else:
+        steps = _steps(d)
+        if len(steps) < 2:
+            return ""
+        title = "Plan"
+        tone_of = {"done": "ok", "doing": "doing", "failed": "broken", "todo": "todo", "skipped": "todo"}
+        boxes = [(text, tone_of[status], "", "") for text, status in steps]
+    parts = []
+    for i, (label, tone, detail, via) in enumerate(boxes):
+        colour = {"doing": "azure", "todo": "faint"}.get(tone, TONE.get(tone, "muted"))
+        tip = f' title="{escape(str(detail).strip()[:160], quote=True)}"' if not _blank(detail) else ""
+        mark = {"broken": "!", "new": "+", "changed": "~", "ok": "✓", "doing": "●"}.get(tone, "")
+        badge = f'<i>{mark}</i>' if mark else ""
+        parts.append(f'<div class="nd {tone}" style="{_c(colour)}"{tip}>{badge}<span>{_t(label, 60)}</span></div>')
+        if i < len(boxes) - 1:
+            vtip = f' title="{escape(str(via).strip()[:80], quote=True)}"' if not _blank(via) else ""
+            parts.append(f'<span class="ar"{vtip}></span>')
+    return f'<figure class="fig"><figcaption>{title}</figcaption><div class="flow">{"".join(parts)}</div></figure>'
 
 
 def _outcome(d: dict) -> str:
@@ -153,49 +224,33 @@ def _outcome(d: dict) -> str:
     if n:
         conf_colour = {3: "mint", 2: "amber", 1: "coral"}[n]
         bars = "".join(f'<i class="{"on" if i < n else ""}"></i>' for i in range(3))
-        meter = f'<span class="meter" style="{_c(conf_colour)}">{bars} {escape(d["confidence"])} confidence</span>'
-    why = f'<p class="why">{_t(d.get("confidence_why"), 120)}</p>' if not _blank(d.get("confidence_why")) else ""
+        why = f' — {str(d.get("confidence_why")).strip()[:120]}' if not _blank(d.get("confidence_why")) else ""
+        meter = f'<span class="meter" style="{_c(conf_colour)}" title="{escape(d["confidence"] + " confidence" + why, quote=True)}">{bars}</span>'
     headline = _t(out.get("headline"), 160)
-    if not headline and not meter:
+    if not headline:
         return ""
-    return (f'<div class="out"><div class="row"><span class="pill" style="{_c(colour)}"><i></i>{label}</span>{meter}</div>'
-            f'<p class="h">{headline}</p>{why}</div>')
+    return f'<div class="out"><span class="pill" style="{_c(colour)}"><i></i>{label}</span><p class="h">{headline}</p>{meter}</div>'
 
 
-def _plan(d: dict) -> str:
-    steps = _rows(d.get("plan"), 8)
+def _progress(d: dict) -> str:
+    """Plan progress as one segmented bar, the step in hand, and the full checklist folded away."""
+    steps = _steps(d)
     if not steps:
         return ""
-    done = sum(1 for s in steps if _k(s.get("status")) == "done")
-    segs = "".join(f'<i style="width:{100 / len(steps):.3f}%;background:var(--{STEP.get(_k(s.get("status")), "faint")})"></i>'
-                   for s in steps if _k(s.get("status")) in ("done", "doing", "failed"))
+    done = sum(1 for _, s in steps if s == "done")
+    segs = "".join(f'<i style="background:var(--{STEP[s]})" class="{s}"></i>' for _, s in steps)
+    now = next((text for text, s in steps if s in ("doing", "failed")), None) or next((text for text, s in steps if s == "todo"), None)
+    now_line = f'<p class="now"><b>{"Now" if any(s == "doing" for _, s in steps) else "Next"}</b>{_t(now, 120)}</p>' if now else ""
     items = []
-    for i, s in enumerate(steps, 1):
+    for i, s in enumerate(_rows(d.get("plan"), 8), 1):
         status = _k(s.get("status")) if _k(s.get("status")) in STEP else "todo"
-        colour = STEP[status]
         mark = {"done": ("fill", "✓"), "failed": ("fill", "✕"), "doing": ("half", ""), "skipped": ("", "–")}.get(status, ("", str(i)))
         cls = {"todo": " dim", "skipped": " skip"}.get(status, "")
         note = f'<small>{_t(s.get("note"), 100)}</small>' if not _blank(s.get("note")) else ""
-        items.append(f'<li><span class="ic {mark[0]}" style="{_c(colour)}">{mark[1]}</span>'
+        items.append(f'<li><span class="ic {mark[0]}" style="{_c(STEP[status])}">{mark[1]}</span>'
                      f'<span class="st{cls}">{_t(s.get("step"), 120)}{note}</span></li>')
-    prog = f'<div class="prog"><span>{done}/{len(steps)} done</span><span class="bar">{segs}</span></div>'
-    return _section("Plan", prog + f'<ol class="steps">{"".join(items)}</ol>')
-
-
-def _chain(d: dict) -> str:
-    chain = d.get("chain") if isinstance(d.get("chain"), dict) else {}
-    nodes = _rows(chain.get("nodes"), 6)
-    if len(nodes) < 2:
-        return ""
-    parts = []
-    for i, n in enumerate(nodes):
-        tone = _k(n.get("tone")) if _k(n.get("tone")) in TONE else "neutral"
-        word = f'<em>{TONE_WORD[tone]}</em>' if tone in TONE_WORD else ""
-        detail = f'<small>{_t(n.get("detail"), 120)}</small>' if not _blank(n.get("detail")) else ""
-        parts.append(f'<div class="node {tone}" style="{_c(TONE[tone])}"><div class="t"><span>{_t(n.get("label"), 80)}</span>{word}</div>{detail}</div>')
-        if i < len(nodes) - 1:
-            parts.append(f'<div class="via">{_t(n.get("via"), 60)}</div>')
-    return _section(_t(chain.get("title"), 60) or "How it fits together", f'<div class="chain">{"".join(parts)}</div>')
+    return (f'<div class="prog"><div class="seg">{segs}</div><span>{done}/{len(steps)}</span></div>{now_line}'
+            f'<details><summary>Plan · {len(steps)} steps</summary><ol class="steps">{"".join(items)}</ol></details>')
 
 
 def _numbers(d: dict) -> str:
@@ -213,6 +268,8 @@ def _changes(d: dict) -> str:
     if not files:
         return ""
     widest = max([_num(f.get("added")) + _num(f.get("removed")) for f in files] + [1])
+    kinds = {"new": 0, "edited": 0, "deleted": 0}
+    added = removed = 0
     rows = []
     for f in files:
         path = str(f.get("path") or "").strip()[:160]
@@ -220,7 +277,9 @@ def _changes(d: dict) -> str:
         # The file name first and whole; the folder after it, trimmed from the left when long.
         shown = f"<b>{escape(base or path)}</b>" + (f"<span>&lrm;{escape(head)}/&lrm;</span>" if head else "")
         add, rem = _num(f.get("added")), _num(f.get("removed"))
-        kind = _k(f.get("kind")) if _k(f.get("kind")) in ("new", "edited", "deleted") else "edited"
+        added, removed = added + add, removed + rem
+        kind = _k(f.get("kind")) if _k(f.get("kind")) in kinds else "edited"
+        kinds[kind] += 1
         if add or rem:
             bar = (f'<span class="b"><i style="width:{add / widest * 100:.1f}%;background:var(--mint)"></i>'
                    f'<i style="width:{rem / widest * 100:.1f}%;background:var(--coral)"></i></span>')
@@ -229,7 +288,11 @@ def _changes(d: dict) -> str:
             bar = ""
             nums = f'<span class="n"><span class="tag" style="{_c({"new": "mint", "deleted": "coral"}.get(kind, "amber"))}">{kind}</span></span>'
         rows.append(f'<div class="file"><span class="p" title="{escape(path, quote=True)}">{shown}</span><span class="r">{bar}{nums}</span></div>')
-    return _section(f"Changes · {len(files)} file{'s' if len(files) != 1 else ''}", f'<div class="files">{"".join(rows)}</div>')
+    tags = "".join(f'<span class="tag" style="{_c(c)}">{n} {k}</span>' for k, c in (("new", "mint"), ("edited", "amber"), ("deleted", "coral"))
+                   if (n := kinds[k]))
+    lines = f'<span class="n">+{added} −{removed}</span>' if added or removed else ""
+    return (f'<details class="chg"><summary>{len(files)} file{"s" if len(files) != 1 else ""} {tags}{lines}</summary>'
+            f'<div class="files">{"".join(rows)}</div></details>')
 
 
 def _checks(d: dict) -> str:
@@ -240,16 +303,16 @@ def _checks(d: dict) -> str:
         inner = f'{mark} {_t(x.get("label"), 40)}'
         pills.append(f'<a class="chk" style="{_c(colour)}" href="{url}" target="_blank" rel="noopener">{inner}</a>' if url
                      else f'<span class="chk" style="{_c(colour)}">{inner}</span>')
-    return _section("Checks", f'<div class="checks">{"".join(pills)}</div>') if pills else ""
+    return f'<div class="checks">{"".join(pills)}</div>' if pills else ""
 
 
 def _timeline(d: dict) -> str:
-    events = _rows(d.get("timeline"), 6)
+    events = [e for e in _rows(d.get("timeline"), 6) if not _blank(e.get("when"))]
     if len(events) < 2:
         return ""
-    cells = "".join(f'<div class="ev" style="{_c(TONE.get(_k(e.get("tone")), "muted"))}"><i></i><b>{_t(e.get("when"), 16)}</b><span>{_t(e.get("event"), 80)}</span></div>'
-                    for e in events)
-    return _section("Timeline", f'<div class="tl">{cells}</div>')
+    cells = "".join(f'<div class="ev" style="{_c(TONE.get(_k(e.get("tone")), "muted"))}" title="{escape(str(e.get("event") or "")[:120], quote=True)}">'
+                    f'<i></i><b>{_t(e.get("when"), 16)}</b><span>{_t(e.get("event"), 60)}</span></div>' for e in events)
+    return f'<div class="tl">{cells}</div>'
 
 
 def _evidence(d: dict) -> str:
@@ -262,11 +325,10 @@ def _evidence(d: dict) -> str:
 
 
 def render(d: dict) -> str:
-    """The digest page body for structured digest fields."""
-    intent = _section("Asked", f'<p class="intent">{_t(d.get("intent"), 220)}</p>') if not _blank(d.get("intent")) else ""
-    # Cause-first work (an RCA, an answer) leads with the chain; build work leads with the plan.
-    cause_first = _k(d.get("kind")) in ("rca", "investigation")
-    middle: Iterable[str] = ([_chain(d), _numbers(d), _plan(d)] if cause_first else [_plan(d), _chain(d), _numbers(d)])
-    nxt = _section("Next", f'<p class="next">{_t(d.get("next"), 200)}</p>') if not _blank(d.get("next")) else ""
-    body = [_header(d), intent, _outcome(d), *middle, _changes(d), _checks(d), _timeline(d), nxt, _evidence(d)]
+    """The digest page body for structured digest fields: the picture first, words only where they carry
+    the point (the outcome, the step in hand, what is next); the rest is folded away."""
+    nxt = f'<p class="next">{_t(d.get("next"), 200)}</p>' if not _blank(d.get("next")) else ""
+    # When the plan itself is the picture, the progress bar under it would only repeat it.
+    progress = _progress(d) if _has_chain(d) else ""
+    body = [_header(d), _diagram(d), _outcome(d), _numbers(d), progress, _checks(d), _timeline(d), _changes(d), nxt, _evidence(d)]
     return f'<style>{CSS}</style><div class="dg">{"".join(p for p in body if p)}</div>'

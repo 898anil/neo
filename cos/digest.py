@@ -86,10 +86,11 @@ Write for a phone screen: plain words, no markdown, no emoji, no sentence over 1
 - needs_you: what {owner} must decide or do, at most 16 words; empty when nothing is needed.
 - plan: the agent's steps as a checklist, in order, at most 8, each at most 8 words, with status done | doing |
   todo | failed | skipped and a note of at most 8 words (evidence, a number, a PR) or "". Include steps still to do.
-- chain: how it works as a picture, at most 6 nodes in order: label at most 5 words, detail at most 9 words, tone,
-  and via: at most 4 words for the arrow to the next node ("" on the last). rca: the cause chain from trigger to
-  symptom, the broken node tone "broken". plan: the new flow, new parts "new", changed parts "changed". fix: the
-  code path the change sits on. title at most 4 words. Leave nodes [] when a chain would not help.
+- chain: the picture at the top of the digest, so always draw it: 3 to 5 nodes in order, label at most 4 words
+  (a thing, not a sentence), detail at most 9 words, tone, and via: at most 4 words for the arrow to the next
+  node (empty on the last). rca: the cause chain from trigger to symptom, the broken node tone "broken". plan: the
+  new flow, new parts "new", changed parts "changed". fix: the code path the change sits on, the changed part
+  "changed" or "new". investigation: question, the sources checked, the answer. title at most 4 words.
 - numbers: up to 4 stat tiles from counts in the log (value at most 8 characters, label at most 4 words);
   tone broken for bad numbers, ok for good ones, neutral otherwise.
 - changes: files changed, with lines added and removed when the log shows them (null otherwise) and kind.

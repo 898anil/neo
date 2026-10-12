@@ -67,12 +67,19 @@ class ViewTest(unittest.TestCase):
 
     def test_draws_every_part_the_fields_carry(self):
         html = self.v.render(SAMPLE)
-        for part in ("Blocked", "CI running on #8935", "Stop repeated guidance cards", "Partly done", "1/2 done",
+        for part in ("Blocked", "CI running on #8935", "Stop repeated guidance cards", "Partly done", "1/2",
                      "Card path", "cosine &gt;= 0.93", "9/215", "<b>service.py</b>", "+12 −3", "✓ ruff", "Run the unit tests",
-                     "medium confidence"):
+                     "medium confidence", "Next</b>Run tests"):
             self.assertIn(part, html, part)
         self.assertNotIn("Needs you</b>", html)  # needs_you is empty
-        self.assertNotIn("Timeline", html)  # no dated events
+        self.assertNotIn('class="tl"', html)  # no dated events
+        self.assertLess(html.index('class="fig"'), html.index('class="out"'))  # the picture comes first
+
+    def test_without_a_chain_the_plan_is_the_picture(self):
+        html = self.v.render({**SAMPLE, "chain": {"title": "", "nodes": []}})
+        self.assertIn("<figcaption>Plan</figcaption>", html)
+        self.assertIn("Add embedding port", html)
+        self.assertNotIn('class="prog"', html)
 
     def test_model_text_is_escaped_and_only_web_links_survive(self):
         html = self.v.render({**SAMPLE, "intent": '<script>alert(1)</script><img src=x onerror=alert(1)>',
@@ -95,13 +102,13 @@ class ViewTest(unittest.TestCase):
         for empty in ('""', "none", " N/A ", "-"):
             html = self.v.render({**SAMPLE, "needs_you": empty, "next": empty})
             self.assertNotIn("Needs you</b>", html, empty)
-            self.assertNotIn("Next</p>", html, empty)
+            self.assertNotIn('class="next"', html, empty)
 
     def test_missing_or_malformed_fields_do_not_break_it(self):
         html = self.v.render({"kind": "other", "intent": "x", "plan": "not a list", "chain": None, "changes": [1, "a"],
                               "outcome": "bad", "numbers": [{"value": ""}]})
         self.assertIn('class="dg"', html)
-        self.assertNotIn("Plan", html)
+        self.assertNotIn('class="steps"', html)
 
 
 class DigestTest(unittest.TestCase):
