@@ -156,6 +156,7 @@
   .tag { font-size: 12px; font-weight: 500; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
   .tag.bad { color: var(--coral); } .tag.good { color: var(--mint); } .tag.warn { color: var(--amber-ink); }
   .row-link .result-tag { margin-right: 6px; vertical-align: 1px; }
+  .tag.live { color: var(--azure); }
   .sheet .meta { color: var(--muted); font-size: 14px; margin: -8px 0 16px; }
   .sheet .stack { display: grid; gap: 8px; }
   .sheet .stack .btn { height: 40px; justify-content: center; }
@@ -549,11 +550,25 @@ async function loadOverview() {
 }
 
 // ------------------------------------------------------------------ rows
+// A session row says at a glance what it is doing, how its last turn ended, and whether it needs you.
+// needs / result come from the server (home.needs_of), the same rule the home screen sections use.
+const ACTIVITY = { approve: ["Needs approval", "warn"], reply: ["Asked you", "warn"], stuck: ["Stuck", "bad"], failed: ["Failed", "bad"],
+  working: ["Working", "live"] };
+const NEEDS_TAG = { you: ["Needs you", "warn"], others: ["Waiting on others", ""], unfinished: ["Stopped unfinished", "warn"] };
+function stateTags(x) {
+  const activity = ACTIVITY[x.attention] || (x.kind === "run" && x.status !== "running" ? ["Done", ""] : ["Idle", ""]);
+  const result = x.attention !== "working" && RESULT[x.result] && RESULT[x.result][0] !== activity[0] && RESULT[x.result];
+  // Approve / reply / stuck / failed already say it needs you; don't say it twice.
+  const needs = !ACTIVITY[x.attention] || x.attention === "working" ? NEEDS_TAG[x.needs] : null;
+  const tag = ([label, tone]) => h("span", { class: `tag ${tone} result-tag` }, label);
+  return [tag(activity), result ? tag(result) : null, needs ? tag(needs) : null,
+    x.opened && x.needs === "you" ? tag(["Opened, not answered", "warn"]) : null];
+}
 function agentRow(a) {
   const lamp = a.attention === "review" || a.attention === "stuck" ? a.attention : lampState(a);
   return h("a", { class: "row-link", href: agentHref(a) },
     h("span", { class: `lamp ${lamp}` }),
-    h("span", { class: "t" }, a.title),
+    h("span", { class: "t" }, ...stateTags({ ...a, kind: "agent" }), a.title),
     h("span", { class: "when" }, ago(a.last_active)),
     h("span", { class: "s" }, `${a.repo}, ${a.engine}${a.session === "default" ? "" : ", started by neo"}`),
     a.last_text ? h("span", { class: "said" }, plain(a.last_text).slice(0, 240)) : null,
@@ -577,7 +592,7 @@ function runRow(r) {
   const cost = r.cost_usd ? `, $${Number(r.cost_usd).toFixed(2)}` : "";
   return h("a", { class: "row-link", href },
     h("span", { class: `lamp ${r.status}` }),
-    h("span", { class: "t" }, r.title || cleanPrompt(r.prompt) || "(no prompt)"),
+    h("span", { class: "t" }, ...stateTags({ ...r, kind: "run" }), r.title || cleanPrompt(r.prompt) || "(no prompt)"),
     h("span", { class: "when" }, agoIso(r.created_at)),
     h("span", { class: "s" }, `${STATE[r.status] || r.status}, ${r.engine}${live ? " live" : ""} ${from}${cost}`),
   );
@@ -865,7 +880,7 @@ function homeRow(m, lamp) {
   const line = label && m.line ? m.line.replace(`${label}: `, "") : m.line;
   return h("a", { class: "row-link", ...linkAttrs(m.href) },
     h("span", { class: `lamp ${lamp}` }),
-    h("span", { class: "t" }, label ? h("span", { class: `tag ${tone} result-tag` }, label) : null, m.title),
+    h("span", { class: "t" }, ...(m.kind === "loop" ? [label ? h("span", { class: `tag ${tone} result-tag` }, label) : null] : stateTags(m)), m.title),
     h("span", { class: "when" }, ago(m.at)),
     m.kind === "loop" ? h("span", { class: "s" }, stageBar(m.stage_index, m.loop && m.loop.regressed)) : null,
     line ? h("span", { class: "said" }, line + extra) : null);

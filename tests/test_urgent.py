@@ -130,6 +130,13 @@ class NudgeTest(unittest.TestCase):
         self.assertNotIn("Nothing needs you", text)
         self.assertNotIn("stopped unfinished", self.urgent.digest_text(payload(quiet=3), None))
 
+    def test_digest_marks_idle_rows_in_flight(self):
+        rows = [{"key": "agent:i", "title": "Lease race", "href": "", "idle": True, "result": "partial", "line": "Fixed 2 of 3"},
+                {"key": "agent:w", "title": "Busy", "href": "", "line": "Running tests"}]
+        text = self.urgent.digest_text(payload(in_flight=rows), None)
+        self.assertIn("• Idle :large_yellow_circle: Lease race: Fixed 2 of 3", text)
+        self.assertIn("• Busy: Running tests", text)
+
     def test_waiting_agents_and_loops_are_not_in_the_nudge(self):
         p = payload(decide=[ask("agent:a", 5 * 3600), ask("loop:l", 5 * 3600, kind="loop")])
         self.assertIsNone(self.urgent.nudge(p, NOW, 11))

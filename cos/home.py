@@ -155,6 +155,61 @@ def mention_row(m: dict, now: float) -> dict:
             "mention": {k: m.get(k, "") for k in ("id", "draft_reply", "neo_task", "evidence", "status", "sent_text")}}
 
 
+def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tuple[str, bool, dict]:
+    """(needs, opened, card in effect) for one agent or run: what it needs from the owner right now.
+
+    needs: "you" (approve, reply, stuck, failed, or an open question on its card), "others" (waits on a
+    reviewer, vendor or owner), "working", "unfinished" (stopped partly done / failed / unclear and asked
+    nothing) or "none". The home screen sections and the session-row tags both come from this.
+    `it` needs key, kind, at, attention and, for runs, source."""
+    card = card or {}
+    # Cards are written when an agent stops; once it is working again (the owner answered, it resumed), the
+    # card is history: the row goes by the live state until the next card. A finished item keeps its
+    # card until the new one lands, so it does not flicker out of Decide.
+    if card and it["attention"] == "working" and card.get("source_mtime", 0) < (it["at"] or 0) - CARD_SLACK_SECONDS:
+        card = {}
+    kind = card.get("ask_kind") or "decide"  # cards made before ask_kind existed
+    # An open ask stays until the owner answers it (the agent resumes, so the card is dropped above), a
+    # newer card replaces it, or the owner closes it. Opening the agent or run is not an answer: a
+    # question read on a phone and left for later must not turn into a quiet "Idle" row.
+    not_closed = seen(waiting_key(it["key"])) < card.get("source_mtime", 0)
+    opened = bool(card) and seen(it["key"]) >= card.get("source_mtime", 0)
+    # The card describes the latest stop. If the agent ran again after it (the owner answered, then it stopped
+    # again) the old ask was answered; it must not come back as "opened, not answered" while the next card is
+    # still being written, or forever if that card never lands.
+    card_current = card.get("source_mtime", 0) >= (it["at"] or 0) - CARD_SLACK_SECONDS
+    open_ask = bool(card.get("needs_you")) and not_closed and (card_current or not opened)
+    if it["attention"] in DECIDE_ATTENTION:
+        return "you", False, card
+    if open_ask and kind == "decide":
+        return "you", opened, card
+    if open_ask and kind == "others":
+        return "others", False, card
+    if it["attention"] == "working":
+        return "working", False, card
+    if (card.get("result") in UNFINISHED_RESULTS and not_closed and card_current
+            and not (it["kind"] == "run" and it.get("source") == "slack")):
+        # Stopped without finishing and asked nothing: someone has to continue, redirect or close it. A Slack
+        # run already delivered its answer in the thread, so it is not left hanging here.
+        return "unfinished", opened, card
+    return "none", opened, card
+
+
+def annotate(overview: dict, cards_by_key: dict, seen: Callable[[str], float]) -> dict:
+    """The agent board's rows with the same needs / result the home screen uses, for their tags."""
+    _seen = lambda key: seen(key) or 0.0  # noqa: E731
+
+    def tag(row: dict, it: dict) -> dict:
+        needs, opened, card = needs_of(it, cards_by_key.get(it["key"]), _seen)
+        return {**row, "needs": needs, "opened": opened, "result": card.get("result")}
+    return {**overview,
+            "agents": [tag(a, {"key": fleet._seen_key(a), "kind": "agent", "at": a.get("last_active") or 0,
+                               "attention": a.get("attention")}) for a in overview.get("agents", [])],
+            "tasks": [tag(t, {"key": f"run:{t['id']}", "kind": "run", "at": _run_time(t), "source": t.get("source"),
+                              "attention": t.get("attention") or ("working" if t.get("status") == "running" else None)})
+                      for t in overview.get("tasks", [])]}
+
+
 def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: float, now: float,
           seen: Optional[Callable[[str], float]] = None, mentions: Optional[list] = None,
           traces: Optional[dict] = None) -> dict:
@@ -174,40 +229,22 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
                       "reason": t.get("reason", ""), "run_id": t["id"], "source": t.get("source")})
     for it in items:
         it["card"] = cards_by_key.get(it["key"])
+        it["needs"], it["opened"], it["live_card"] = needs_of(it, it["card"], seen)
 
     decide, regressed, moved, in_flight, others, monitoring, unfinished = [], [], [], [], [], [], []
     quiet = 0
     for it in items:
-        card = it["card"] or {}
-        # Cards are written when an agent stops; once it is working again (the owner answered, it resumed), the
-        # card is history: the row goes by the live state until the next card. A finished item keeps its
-        # card until the new one lands, so it does not flicker out of Decide.
-        if card and it["attention"] == "working" and card.get("source_mtime", 0) < (it["at"] or 0) - CARD_SLACK_SECONDS:
-            card = {}
-        kind = card.get("ask_kind") or "decide"  # cards made before ask_kind existed
-        # An open ask stays until the owner answers it (the agent resumes, so the card is dropped above), a
-        # newer card replaces it, or the owner closes it. Opening the agent or run is not an answer: a
-        # question read on a phone and left for later must not turn into a quiet "Idle" row.
-        not_closed = seen(waiting_key(it["key"])) < card.get("source_mtime", 0)
-        opened = bool(card) and seen(it["key"]) >= card.get("source_mtime", 0)
-        # The card describes the latest stop. If the agent ran again after it (the owner answered, then it stopped
-        # again) the old ask was answered; it must not come back as "opened, not answered" while the next card is
-        # still being written, or forever if that card never lands.
-        card_current = card.get("source_mtime", 0) >= (it["at"] or 0) - CARD_SLACK_SECONDS
-        open_ask = bool(card.get("needs_you")) and not_closed and (card_current or not opened)
-        if it["attention"] in DECIDE_ATTENTION or (open_ask and kind == "decide"):
+        card = it.pop("live_card")
+        needs = it["needs"]
+        if needs == "you":
             decide.append({**it, "question": card.get("needs_you") or it["reason"], "recommend": card.get("recommend", ""),
                            "do_it": card.get("do_it", ""), "topic": card.get("topic", ""), "result": card.get("result"),
-                           "opened": opened and it["attention"] not in DECIDE_ATTENTION,
                            "age": now - it["at"] if it["at"] else 0, "urgent": it["attention"] in DECIDE_ATTENTION})
-        elif open_ask and kind == "others":
+        elif needs == "others":
             others.append({**it, "line": card["needs_you"], "recommend": card.get("recommend", ""), "topic": card.get("topic", "")})
-        elif it["attention"] == "working":
+        elif needs == "working":
             in_flight.append({**it, "line": _first_line(it.get("last_text")) or "Working"})
-        elif (card.get("result") in UNFINISHED_RESULTS and not_closed and card_current
-              and not (it["kind"] == "run" and it.get("source") == "slack")):
-            # Stopped without finishing and asked nothing: someone has to continue, redirect or close it. A Slack
-            # run already delivered its answer in the thread, so it is not left hanging here.
+        elif needs == "unfinished":
             unfinished.append({**it, "result": card["result"], "line": card.get("did") or _first_line(it.get("last_text")),
                                "risk": card.get("risk", ""), "next": card.get("next", ""),
                                "age": now - it["at"] if it["at"] else 0})
@@ -219,9 +256,9 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
             elif it["kind"] == "agent":
                 # An open session stays visible until the owner closes it, even if it stopped without a
                 # conclusion; quiet would hide it.
-                did = f"{RESULT_WORDS.get(card['result'], card['result'])}: {card['did']}" if card.get("did") else _first_line(it.get("last_text"))
-                head = "Idle, nothing needs you" if card else "Idle"
-                in_flight.append({**it, "idle": True, "result": card.get("result"), "line": head + (f" · {did}" if did else " · no result yet")})
+                # The row's tags say Idle / Partly done / Needs you (index.html stateTags); the line is what it did.
+                did = card.get("did") or _first_line(it.get("last_text"))
+                in_flight.append({**it, "idle": True, "result": card.get("result"), "line": did or "No result yet"})
             else:
                 quiet += 1
 

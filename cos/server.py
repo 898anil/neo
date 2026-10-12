@@ -432,7 +432,9 @@ class Handler(BaseHTTPRequestHandler):
         if not parts:
             return self._static("index.html", "text/html; charset=utf-8")
         if parts == ["api", "overview"]:
-            return self._json({**board_overview(fleet.overview()), "default_engine": default_engine(),
+            # Each agent and task carries needs / result (home.annotate), so its row can say Idle, Partly done, Needs you.
+            data = home.annotate(fleet.overview(), cards.STORE.read(), fleet.seen.get)
+            return self._json({**board_overview(data), "default_engine": default_engine(),
                                "findings": [board_finding(f) for f in watches.open_findings()]})
         if parts == ["api", "home"]:
             raw = (parse_qs(urlparse(self.path).query).get("since") or [""])[0]

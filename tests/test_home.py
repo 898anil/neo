@@ -112,7 +112,17 @@ class HomeTest(unittest.TestCase):
     def test_finished_idle_agent_says_nothing_needs_you(self):
         c = {"agent:w": card(result="worked", did="Merged #1", source_mtime=NOW - 9000, made_at=NOW - 8900)}
         out = build(ov([agent("w", "idle", last_active=NOW - 9000)]), [], c, SINCE, NOW)
-        self.assertTrue(out["in_flight"][0]["line"].startswith("Idle, nothing needs you"))
+        self.assertEqual([(m["line"], m["needs"], m["result"]) for m in out["in_flight"]], [("Merged #1", "none", "worked")])
+
+    def test_board_rows_get_the_same_needs_and_result_as_home(self):
+        from cos.home import annotate
+        c = {"agent:q": card(needs_you="Merge?", result="partial", source_mtime=NOW - 9000),
+             "agent:p": card(result="partial", source_mtime=NOW - 9000), "run:r": card(result="worked", source_mtime=NOW - 9000)}
+        o = ov([agent("q", "idle", NOW - 9000), agent("p", "idle", NOW - 9000), agent("w", "working")], [task("r", updated=NOW - 9000)])
+        rows = annotate(o, c, {"agent:q": NOW}.get)
+        got = {r.get("pane_id") or r["id"]: (r["needs"], r["result"], r["opened"]) for r in rows["agents"] + rows["tasks"]}
+        self.assertEqual(got, {"q": ("you", "partial", True), "p": ("unfinished", "partial", False),
+                               "w": ("working", None, False), "r": ("none", "worked", False)})
 
     def test_agent_questions_come_before_stalled_alerts(self):
         c = {"run:r1": card(needs_you="Which option?")}
@@ -179,7 +189,7 @@ class HomeTest(unittest.TestCase):
         self.assertEqual({r["key"] for r in out["in_flight"]}, {"agent:w", "agent:i", "loop:l1"})
         idle = next(r for r in out["in_flight"] if r["key"] == "agent:i")
         self.assertTrue(idle["idle"])
-        self.assertTrue(idle["line"].startswith("Idle"))
+        self.assertEqual((idle["line"], idle["needs"]), ("No result yet", "none"))
         self.assertIsNone(idle["result"])  # no card yet, so no outcome tag
         self.assertEqual([r["key"] for r in out["monitoring"]], ["loop:v"])  # verified fixes show for MONITOR_DAYS
         self.assertEqual(out["quiet"], 1)

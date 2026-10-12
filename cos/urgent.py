@@ -148,6 +148,8 @@ def digest_text(payload: dict, base_url: Optional[str]) -> str:
             lambda r: f"{RESULT_EMOJI.get(r.get('result'), '•')} {title(r)}: {r.get('line', '')}", c.get("unfinished", 0))
     section("Moved", payload["moved"], lambda r: f"{RESULT_EMOJI.get(r.get('result'), '•')} {title(r)}: {r.get('line', '')}", c["moved"])
     section("Waiting on others", payload.get("others", []), lambda r: f"{title(r)}: {r.get('line', '')}", c.get("others", 0))
-    section("In flight", payload["in_flight"], lambda r: f"{title(r)}: {r.get('line', '')}", c["in_flight"])
+    # Idle rows carry only what the agent did; say it is idle and how it ended, as the dashboard's tags do.
+    section("In flight", payload["in_flight"], lambda r: (f"Idle {RESULT_EMOJI.get(r.get('result'), '')} " if r.get("idle") else "")
+            + f"{title(r)}: {r.get('line', '')}", c["in_flight"])
     text = "\n".join(lines)
     return text if len(text) <= DIGEST_MAX else text[: DIGEST_MAX - 40].rsplit("\n", 1)[0] + "\n• …more on the dashboard"
