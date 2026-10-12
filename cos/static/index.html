@@ -570,6 +570,32 @@
     .topbar .title b { font-size: 19px; }
     .links { padding-left: 16px; }
   }
+  /* trace times: clock under the turn number, day lines on the spine */
+  .tl-wrap > .msg.agent[data-t]::after, .tl-wrap > .msg.you[data-t]::after { content: attr(data-t); position: absolute; left: -54px; width: 32px; text-align: right;
+    font: 9.5px var(--mono); color: var(--faint); opacity: .8; background: var(--ink); padding: 1px 0; }
+  .tl-wrap > .msg.agent[data-t]::after { top: 19px; }
+  .tl-wrap > .msg.you[data-t]::after { top: 28px; left: -50px; width: 30px; }
+  .tl-wrap > .note[data-t] { display: flex; gap: 10px; align-items: baseline; }
+  .tl-wrap > .note[data-t]::after { content: attr(data-t); order: -1; font: 9.5px var(--mono); color: var(--faint); flex: none; }
+  .tl-wrap > .day { margin: 8px 0 20px -52px; padding-left: 52px; font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); position: relative; }
+  .tl-wrap > .day::before { content: ""; position: absolute; left: 22px; top: 2px; width: 11px; height: 11px; border-radius: 3px; background: var(--ink); box-shadow: inset 0 0 0 1.5px var(--muted); }
+  @media (max-width: 480px) {
+    .tl-wrap > .msg.agent[data-t]::after { left: -42px; width: 26px; font-size: 8.5px; }
+    .tl-wrap > .msg.you[data-t]::after { left: -40px; width: 26px; font-size: 8.5px; }
+    .tl-wrap > .day { margin-left: -40px; padding-left: 40px; }
+    .tl-wrap > .day::before { left: 14px; }
+  }
+  @media (max-width: 480px) {
+    .chat .wrap.tl-wrap { padding-left: 48px; }
+    .tl-wrap::before { left: 24px; }
+    .tl-wrap > .msg.agent::before { left: -48px; width: 30px; }
+    .tl-wrap > .msg.agent[data-t]::after { left: -48px; width: 30px; font-size: 8.5px; }
+    .tl-wrap > .msg.you::before { left: -44px; }
+    .tl-wrap > .msg.you[data-t]::after { left: -46px; width: 30px; font-size: 8.5px; }
+    .tl-wrap > .steps::before, .tl-wrap > .note::before { left: -27px; }
+    .tl-wrap > .day { margin-left: -48px; padding-left: 48px; }
+    .tl-wrap > .day::before { left: 19px; }
+  }
 </style>
 </head>
 <body>
@@ -1706,7 +1732,8 @@ function groupEvents(events) {
 function renderSteps(g, key, openSet) {
   const calls = g.items.filter((e) => e.kind === "tool_call");
   const failed = g.items.some((e) => e.kind === "tool_result" && (e.data || {}).is_error);
-  const label = calls.length ? `Ran ${count(calls.length, "step", "steps").toLowerCase()}` : "Thought it through";
+  const took = traceSpan(g.items[0] && g.items[0].ts, g.items[g.items.length - 1] && g.items[g.items.length - 1].ts);
+  const label = (calls.length ? `Ran ${count(calls.length, "step", "steps").toLowerCase()}` : "Thought it through") + (took ? ` · ${took}` : "");
   const lastCall = calls[calls.length - 1];
   const box = h("div", { class: `steps${openSet.has(key) ? " open" : ""}` });
   const btn = h("button", { "aria-expanded": openSet.has(key) ? "true" : "false", onclick: () => {
@@ -1736,16 +1763,36 @@ function stepLabel(name) {
   return name === "shell" ? "Shell" : name;
 }
 
+// Times in the trace: a local clock beside every message, a day line when the date changes, and how long
+// each run of steps took.
+const traceTime = (ts) => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) ? d : null; };
+function traceSpan(a, b) {
+  const s = (traceTime(b) - traceTime(a)) / 1000;
+  if (!(s >= 1)) return "";
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, "0")}s`;
+  return `${Math.floor(s / 3600)}h ${String(Math.round((s % 3600) / 60)).padStart(2, "0")}m`;
+}
+const traceDay = (d) => d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+const stampTime = (node, ts) => {
+  const d = traceTime(ts); if (!d) return node;
+  node.dataset.t = clock(d.getTime());
+  node.title = d.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return node;
+};
 function renderTimeline(events, openSet) {
   const groups = groupEvents(events);
   const frag = document.createDocumentFragment();
   if (!groups.length) frag.append(h("p", { class: "note" }, "Nothing yet. Steps and replies appear here as the agent works."));
+  let day = "";
   groups.forEach((g, i) => {
-    if (g.type === "you") frag.append(h("div", { class: "msg you" }, cleanPrompt(g.ev.body)));
-    else if (g.type === "agent" && /^API Error:/.test(g.ev.body.trim())) frag.append(h("div", { class: "note bad cut" }, g.ev.body.trim().replace(/^API Error:\s*/, "")));
-    else if (g.type === "agent") frag.append(h("div", { class: "msg agent" }, md(g.ev.body)));
+    const d = traceTime(g.ev ? g.ev.ts : g.items && g.items[0] && g.items[0].ts);
+    if (d && traceDay(d) !== day) { day = traceDay(d); frag.append(h("div", { class: "day" }, day === traceDay(new Date()) ? `Today · ${day}` : day)); }
+    if (g.type === "you") frag.append(stampTime(h("div", { class: "msg you" }, cleanPrompt(g.ev.body)), g.ev.ts));
+    else if (g.type === "agent" && /^API Error:/.test(g.ev.body.trim())) frag.append(stampTime(h("div", { class: "note bad cut" }, g.ev.body.trim().replace(/^API Error:\s*/, "")), g.ev.ts));
+    else if (g.type === "agent") frag.append(stampTime(h("div", { class: "msg agent" }, md(g.ev.body)), g.ev.ts));
     else if (g.type === "steps") frag.append(renderSteps(g, `s${i}`, openSet));
-    else if (g.type === "error") frag.append(h("div", { class: "note bad" }, `${g.ev.title}${g.ev.body ? ": " + g.ev.body.slice(0, 300) : ""}`));
+    else if (g.type === "error") frag.append(stampTime(h("div", { class: "note bad" }, `${g.ev.title}${g.ev.body ? ": " + g.ev.body.slice(0, 300) : ""}`), g.ev.ts));
     else if (g.type === "blocked") frag.append(h("div", { class: "note warn" }, "Waiting for your approval", g.ev.body ? h("pre", {}, g.ev.body.split("\n").slice(-10).join("\n")) : null));
     else if (g.type === "note") frag.append(h("p", { class: "note" }, g.text));
   });
