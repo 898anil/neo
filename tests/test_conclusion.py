@@ -19,7 +19,7 @@ class ConclusionTest(unittest.TestCase):
     def test_status_lines_in_the_shapes_agents_write_them(self):
         for text in ("Merged.\n\nStatus: done — merged #12", "*Status:* needs-you — pick A or B", "**Status**: waiting on CI",
                      "Status - blocked: no prod access", "> Status: needs you — approve the promote", "status: FAILED — tests red",
-                     "## Status: done", "Status: ✅ done — merged", "Answer.\n\nStatus: answered — see above\n"):
+                     "## Status: done", "Status: ✅ done — merged", "Status: ⚠️ blocked — no access", "Answer.\n\nStatus: answered — see above\n"):
             self.assertTrue(conclusion.concluded(text), text)
 
     def test_plans_and_mentions_are_not_a_conclusion(self):

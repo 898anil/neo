@@ -7,8 +7,8 @@ replace the answer). A second stop always goes through (stop_hook_active), so an
 trapped, and any error lets the stop through too.
 
 Only agent sessions get it (the ones started with the agent brief, which asks for the line): neo passes it
-with --settings (settings_json / write_settings). Scheduled jobs (brief, watches, loops, mentions) and the
-owner's own Claude sessions are not affected.
+with --settings (settings_json / write_settings), including when neo resumes one of the owner's sessions.
+Scheduled jobs (brief, watches, loops, mentions) and Claude sessions neo did not start are not affected.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 
 STATES = ("done", "answered", "needs-you", "blocked", "failed", "waiting")
 # "*Status:* done — merged #12", "Status: needs you - pick A or B", "## **Status**: waiting on CI".
-_STATUS_RE = re.compile(r"^[ \t*_>`#-]*status[ \t*_`]*[:\-–—][ \t*_`]*(?:\W[ \t]*)?"
+_STATUS_RE = re.compile(r"^[ \t*_>`#-]*status[ \t*_`]*[:\-–—][ \t*_`]*(?:\W+[ \t]*)?"
                         r"(done|answered|needs[ \t_-]?you|blocked|failed|waiting)\b", re.I)
 TAIL_LINES = 3  # the line must close the reply, not sit in a list with more plans after it
 REASON = (

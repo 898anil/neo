@@ -324,6 +324,7 @@ class InteractiveRunTest(unittest.TestCase):
             "claude", "hi", str(self.work), "l", "slack", None, Herdr("testsess"), events.append,
         )
         self.set_status("idle")
+        self.assertNotIn("--settings", json.loads((self.state / "start_args").read_text()))  # no brief, no Stop hook
         self.runs.append(irun)
         self.write_transcript({"type": "assistant", "message": {"content": [{"type": "text", "text": "first"}]}})
         self.wait_for(events, lambda e: e["kind"] == "text")
