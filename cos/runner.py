@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import conclusion
 from .events import normalize
 
 ENGINES = ("claude", "codex")
@@ -64,16 +65,20 @@ def cli_path(engine: str) -> str:
 
 def build_command(
     engine: str, prompt: str, mode: str, session_id: Optional[str] = None, system: Optional[str] = None,
-    extra_args: Optional[list[str]] = None,
+    extra_args: Optional[list[str]] = None, conclude: bool = False,
 ) -> list[str]:
     """system: standing instructions. Claude takes them natively (--append-system-prompt, on every
     turn); Codex has no equivalent flag, so they lead the first prompt of the session.
-    extra_args: more CLI options for the engine (for example Claude's --allowedTools, --json-schema)."""
+    extra_args: more CLI options for the engine (for example Claude's --allowedTools, --json-schema).
+    conclude: an agent session (it has the agent brief): Claude gets the Stop hook that makes each turn end
+    with a Status line (cos/conclusion.py). Scheduled jobs leave it off."""
     extra_args = list(extra_args or [])
     model = os.environ.get(f"{engine.upper()}_MODEL")
     if engine == "claude":
         cmd = [cli_path("claude"), "-p", "--output-format", "stream-json", "--verbose"]
         cmd += CLAUDE_MODE_FLAGS[mode]
+        if conclude:
+            cmd += ["--settings", conclusion.settings_json()]
         if system:
             cmd += ["--append-system-prompt", system]
         if model:
@@ -238,7 +243,7 @@ class Run:
         emit = on_event or (lambda _e: None)
         try:
             cmd = build_command(engine, text, mode, meta["session_id"] if is_follow_up else None,
-                                system=meta.get("system_prompt"),
+                                system=meta.get("system_prompt"), conclude=bool(meta.get("conclude")),
                                 extra_args=(meta.get("cli_args") or []) + ([] if is_follow_up else meta.get("first_turn_args") or []))
             emit(self.append_event({"kind": "prompt", "title": "You", "body": text, "data": {}}, turn))
             raw_path = self.dir / "raw.jsonl"

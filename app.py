@@ -299,7 +299,7 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
     cwd = req.cwd or WORKDIR
     system = await asyncio.to_thread(agent_brief, cwd)  # reads memory and runs git: not on the event loop
     slack = {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
-             "system_prompt": system}
+             "system_prompt": system, "conclude": bool(system)}
     if kind:
         slack["kind"] = kind
 

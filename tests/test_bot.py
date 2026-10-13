@@ -265,6 +265,9 @@ class InteractiveRunTest(unittest.TestCase):
         path = args[args.index("--append-system-prompt-file") + 1]
         self.assertIn("1. `reproduce` it", Path(path).read_text())
         self.assertIn("--remote-control", args)
+        # An agent session (it has the brief) gets the Stop hook that asks for a Status line.
+        hook = json.loads(Path(args[args.index("--settings") + 1]).read_text())
+        self.assertIn("conclusion.py", hook["hooks"]["Stop"][0]["hooks"][0]["command"])
         # Not left in default (approve-everything) mode: the phone gets the same powers as desktop.
         self.assertEqual(args[args.index("--permission-mode") + 1], "bypassPermissions")
 
@@ -321,6 +324,7 @@ class InteractiveRunTest(unittest.TestCase):
             "claude", "hi", str(self.work), "l", "slack", None, Herdr("testsess"), events.append,
         )
         self.set_status("idle")
+        self.assertNotIn("--settings", json.loads((self.state / "start_args").read_text()))  # no brief, no Stop hook
         self.runs.append(irun)
         self.write_transcript({"type": "assistant", "message": {"content": [{"type": "text", "text": "first"}]}})
         self.wait_for(events, lambda e: e["kind"] == "text")

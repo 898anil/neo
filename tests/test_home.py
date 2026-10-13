@@ -1,6 +1,7 @@
 """Home payload: what needs the owner, what regressed, what moved since they last looked."""
 
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -118,11 +119,12 @@ class HomeTest(unittest.TestCase):
         from cos.home import annotate
         c = {"agent:q": card(needs_you="Merge?", result="partial", source_mtime=NOW - 9000),
              "agent:p": card(result="partial", source_mtime=NOW - 9000), "run:r": card(result="worked", source_mtime=NOW - 9000)}
-        o = ov([agent("q", "idle", NOW - 9000), agent("p", "idle", NOW - 9000), agent("w", "working")], [task("r", updated=NOW - 9000)])
+        o = ov([agent("q", "idle", NOW - 9000), agent("p", "idle", NOW - 9000), agent("w", "working"),
+                agent("n", "idle", time.time() - 9000)], [task("r", updated=NOW - 9000)])
         rows = annotate(o, c, {"agent:q": NOW}.get)
         got = {r.get("pane_id") or r["id"]: (r["needs"], r["result"], r["opened"]) for r in rows["agents"] + rows["tasks"]}
         self.assertEqual(got, {"q": ("you", "partial", True), "p": ("unfinished", "partial", False),
-                               "w": ("working", None, False), "r": ("none", "worked", False)})
+                               "w": ("working", None, False), "n": ("unfinished", None, False), "r": ("none", "worked", False)})
 
     def test_agent_questions_come_before_stalled_alerts(self):
         c = {"run:r1": card(needs_you="Which option?")}
@@ -191,9 +193,9 @@ class HomeTest(unittest.TestCase):
         self.assertEqual([r["key"] for r in out["in_flight"]], ["run:r2"])
 
     def test_in_flight_and_quiet(self):
-        o = ov([agent("w", "working"), agent("i", "idle", NOW - 90000)])
-        out = build(o, [loop("l1", at=NOW - 9000), loop("v", stage="verified", at=NOW - 9000), loop("m", status="muted", at=NOW - 9000)], {}, SINCE, NOW)
-        # an idle session stays in flight until it is closed, never hidden in quiet
+        o = ov([agent("w", "working"), agent("i", "idle", NOW - 600)])
+        out = build(o, [loop("l1", at=NOW - 9000), loop("v", stage="verified", at=NOW - 9000), loop("m", status="muted", at=NOW - 9000)], {}, NOW - 60, NOW)
+        # an idle session stays in flight until it is closed, never hidden in quiet (its card is still being written)
         self.assertEqual({r["key"] for r in out["in_flight"]}, {"agent:w", "agent:i", "loop:l1"})
         idle = next(r for r in out["in_flight"] if r["key"] == "agent:i")
         self.assertTrue(idle["idle"])
@@ -201,6 +203,33 @@ class HomeTest(unittest.TestCase):
         self.assertIsNone(idle["result"])  # no card yet, so no outcome tag
         self.assertEqual([r["key"] for r in out["monitoring"]], ["loop:v"])  # verified fixes show for MONITOR_DAYS
         self.assertEqual(out["quiet"], 1)
+
+    def test_idle_agent_with_no_conclusion_is_stopped_unfinished_until_done(self):
+        a = agent("i", "idle", NOW - 7200, last_text="Next I'll check the deploy")
+        out = build(ov([a]), [], {}, SINCE, NOW)
+        self.assertEqual([(u["key"], u["result"], u["line"], u["needs"]) for u in out["unfinished"]],
+                         [("agent:i", None, "Next I'll check the deploy", "unfinished")])
+        self.assertEqual((out["in_flight"], out["counts"]["unfinished"]), ([], 1))
+        done = {"agent:i": NOW, "waiting:agent:i": NOW}
+        out = build(ov([a]), [], {}, SINCE, NOW, seen=done.get)
+        self.assertEqual(out["unfinished"], [])
+        self.assertTrue(out["in_flight"][0]["idle"])
+        # it ran again after Done and stopped again with nothing to show: back on the list
+        later = agent("i", "idle", NOW + 7200)
+        self.assertEqual([u["key"] for u in build(ov([later]), [], {}, SINCE, NOW + 9000, seen=done.get)["unfinished"]], ["agent:i"])
+
+    def test_stale_card_does_not_count_as_a_conclusion_for_the_latest_stop(self):
+        c = {"agent:s": card(result="worked", did="Merged #1", source_mtime=NOW - 20000, made_at=NOW - 19900)}
+        a = agent("s", "idle", NOW - 7200, last_text="Waiting for CI")
+        out = build(ov([a]), [], c, SINCE, NOW)
+        self.assertEqual([(u["key"], u["result"], u["line"]) for u in out["unfinished"]], [("agent:s", None, "Waiting for CI")])
+        # after Done the row is idle in flight with its latest words, not the old card's "Merged #1"
+        out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:s": NOW, "waiting:agent:s": NOW}.get)
+        self.assertEqual([(m["line"], m["result"]) for m in out["in_flight"]], [("Waiting for CI", None)])
+
+    def test_idle_agent_that_never_got_a_prompt_is_not_unfinished(self):
+        out = build(ov([agent("e", "idle", NOW - 90000, prompts=0)]), [], {}, SINCE, NOW)
+        self.assertEqual((out["unfinished"], [m["key"] for m in out["in_flight"]]), ([], ["agent:e"]))
 
     def test_counts_match_sections(self):
         o = ov([agent("a", "approve"), agent("w", "working")], [task("r1", updated=NOW - 60)])

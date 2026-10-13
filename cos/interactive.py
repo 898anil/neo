@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import conclusion
 from .events import TRANSCRIPT_NORMALIZERS
 from .herdr import Herdr, HerdrError, agent_session_id
 from .runner import CLAUDE_MODE_FLAGS, MODES, Run
@@ -124,6 +125,13 @@ class InteractiveRun:
         name = agent_name_for(run.id)
         if engine == "claude":
             agent_args = (*CLAUDE_MODE_FLAGS[mode], *agent_args)
+        if engine == "claude" and system:
+            # An agent session (it has the brief): every turn ends with a Status line (cos/conclusion.py). As a
+            # file, like the brief below. Without it the agent still starts; it just isn't held to a conclusion.
+            try:
+                agent_args = ("--settings", str(conclusion.write_settings(run.dir / "stop-hook-settings.json")), *agent_args)
+            except OSError as exc:
+                log.warning("stop hook settings not written for %s: %s", run.id, exc)
         if engine == "claude" and os.environ.get("NEO_REMOTE_CONTROL", "1") != "0":
             # Native Remote Control: continue this exact session from the Claude app.
             agent_args = ("--remote-control", name, *agent_args)
