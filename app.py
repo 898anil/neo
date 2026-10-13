@@ -426,6 +426,14 @@ class LiveThread:
                 channel=self.channel, thread_ts=self.thread_ts,
                 text=clip(f":speech_balloon: _Sent from the dashboard or terminal:_\n{quoted}"),
             )
+        restart = (event.get("data") or {}).get("auto_restart")
+        if restart is not None:
+            # neo is about to send "continue" for an API error, or has stopped trying.
+            icon = ":warning:" if restart == "exhausted" else ":arrows_counterclockwise:"
+            await self.client.chat_postMessage(
+                channel=self.channel, thread_ts=self.thread_ts, text=clip(f"{icon} _{event.get('body', '')}_"),
+            )
+            return
         if self.reporter is None and event["kind"] == "status" and state not in ("working", "blocked"):
             # Between turns: no progress message to update.
             if state == "closed":

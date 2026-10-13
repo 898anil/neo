@@ -31,6 +31,32 @@ TERMINAL = ("done", "failed", "cancelled")
 RUN_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
 MAX_PROMPT = 100_000
 
+# A turn that dies on a passing Claude/Codex API fault (dropped stream, overload, 5xx) is resumed
+# with "continue" instead of being left for a person to nudge. Auth, quota and prompt errors are
+# not transient and are left alone.
+AUTO_RESTART_PROMPT = "continue"
+AUTO_RESTART_DELAYS = (15.0, 60.0, 180.0)  # seconds before each attempt; its length is the cap
+# A live session's streak resets when the agent makes progress; this caps restarts between two
+# human prompts all the same, so an agent that always fails at the same point cannot loop forever.
+MAX_AUTO_RESTARTS_PER_PROMPT = 6
+_TRANSIENT_ERROR_RE = re.compile(
+    r"connection lost|stopped arriving|overloaded|\b5\d\d\b|internal server error|bad gateway"
+    r"|service unavailable|timed? ?out|econnreset|econnrefused|socket hang up|fetch failed"
+    r"|network error|stream (disconnected|error|closed)|terminated",
+    re.IGNORECASE,
+)
+_PERMANENT_ERROR_RE = re.compile(
+    r"login|authenticat|oauth|credit balance|usage limit|hit your limit|quota|prompt is too long"
+    r"|invalid.?request|\b40[0-4]\b",
+    re.IGNORECASE,
+)
+
+
+def is_transient_engine_error(text: Optional[str]) -> bool:
+    """True for a Claude/Codex API error that a retry can clear."""
+    text = text or ""
+    return bool(_TRANSIENT_ERROR_RE.search(text)) and not _PERMANENT_ERROR_RE.search(text)
+
 CLAUDE_MODE_FLAGS = {
     # Headless default mode auto-denies anything that needs approval; denials show in the timeline.
     "readonly": ["--permission-mode", "default"],
@@ -133,6 +159,15 @@ def _run_lock(run_id: str) -> threading.RLock:
         return _LOCKS.setdefault(run_id, threading.RLock())
 
 
+_WAKES: dict[str, threading.Event] = {}
+
+
+def _wake_event(run_id: str) -> threading.Event:
+    """Set by cancel() to cut an auto-restart back-off short, from any Run object in this process."""
+    with _LOCKS_GUARD:
+        return _WAKES.setdefault(run_id, threading.Event())
+
+
 class Run:
     """One conversation with one engine; each prompt or follow-up is a turn."""
 
@@ -144,6 +179,9 @@ class Run:
         self._lock = _run_lock(run_id)
         self._proc: Optional[subprocess.Popen] = None
         self._cancelled = False
+        self._last_error: Optional[str] = None  # the engine's error text for the latest turn
+        self._turn_answered = False  # the latest turn already produced a successful result
+        self._stderr_offset = 0
 
     # ---------------------------------------------------------------- storage
 
@@ -224,19 +262,64 @@ class Run:
     # -------------------------------------------------------------- execution
 
     def execute(self, prompt: Optional[str] = None, on_event: Optional[Callable[[dict], None]] = None) -> dict:
-        """Run one turn to completion. Without a prompt, runs the initial prompt."""
+        """Run one turn to completion. Without a prompt, runs the initial prompt. A turn that ends
+        on a transient engine error is resumed with "continue" (see AUTO_RESTART_DELAYS).
+
+        While it waits the run stays "running" with no engine pid and retry_owner set to this
+        process: callers keep treating it as busy, and if this process dies, fresh_meta() sees a
+        dead owner and closes the run out as it does for any engine lost in a restart."""
+        final = self._execute_turn(prompt, on_event)
+        emit = on_event or (lambda _e: None)
+        first_turn = prompt is None
+        wake = _wake_event(self.id)
+        for attempt, delay in enumerate((*AUTO_RESTART_DELAYS, None), 1):
+            if (final.get("status") != "failed" or self._cancelled or self._turn_answered
+                    or not is_transient_engine_error(self._last_error)):
+                break
+            turn = final.get("turns") or 1
+            if delay is None:
+                emit(self.append_event({
+                    "kind": "error", "title": "Auto-restart gave up",
+                    "body": f"Still failing after {len(AUTO_RESTART_DELAYS)} restarts: {(self._last_error or '')[:500]}",
+                    "data": {"auto_restart": "exhausted"},
+                }, turn))
+                break
+            with self._lock:
+                if self.meta()["status"] != "failed":
+                    break  # someone else moved the run on (a dashboard message, a cancel)
+                wake.clear()
+                self.update_meta(status="running", pid=None, retry_owner=os.getpid())
+            emit(self.append_event({
+                "kind": "status", "title": "Auto-restart",
+                "body": f"{final['engine']} API error; retrying in {delay:.0f}s ({attempt}/{len(AUTO_RESTART_DELAYS)})",
+                "data": {"auto_restart": attempt, "error": (self._last_error or "")[:500]},
+            }, turn))
+            wake.wait(delay)
+            if final.get("session_id"):
+                final = self._execute_turn(AUTO_RESTART_PROMPT, on_event, keep_first_turn_args=first_turn, retrying=True)
+            else:  # died before a session existed: run the same turn again
+                final = self._execute_turn(prompt, on_event, retrying=True)
+            if final.get("status") == "cancelled":
+                break
+        return final
+
+    def _execute_turn(self, prompt: Optional[str], on_event: Optional[Callable[[dict], None]],
+                      keep_first_turn_args: bool = False, retrying: bool = False) -> dict:
         with self._lock:  # claim the run so two callers cannot start turns at once
             meta = self.meta()
             if meta.get("runtime", "headless") != "headless":
                 raise RuntimeError("live runs are driven through herdr, not execute()")
-            if meta["status"] == "running":
+            if retrying and (meta["status"] != "running" or meta.get("retry_owner") != os.getpid()):
+                return meta  # cancelled (or taken over) while we waited
+            if meta["status"] == "running" and not retrying:
                 raise RuntimeError("run is already executing a turn")
             is_follow_up = prompt is not None
             if is_follow_up and not meta.get("session_id"):
                 raise RuntimeError("no session id recorded yet; cannot send a follow-up")
             turn = meta["turns"] + 1
             self._cancelled = False
-            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None})
+            self._last_error, self._turn_answered = None, False
+            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None, "retry_owner": None})
 
         engine, mode, cwd = meta["engine"], meta["mode"], meta["cwd"]
         text = prompt if is_follow_up else meta["prompt"]
@@ -244,10 +327,13 @@ class Run:
         try:
             cmd = build_command(engine, text, mode, meta["session_id"] if is_follow_up else None,
                                 system=meta.get("system_prompt"), conclude=bool(meta.get("conclude")),
-                                extra_args=(meta.get("cli_args") or []) + ([] if is_follow_up else meta.get("first_turn_args") or []))
+                                extra_args=(meta.get("cli_args") or [])
+                                + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []))
             emit(self.append_event({"kind": "prompt", "title": "You", "body": text, "data": {}}, turn))
             raw_path = self.dir / "raw.jsonl"
             offset = raw_path.stat().st_size if raw_path.exists() else 0
+            stderr_path = self.dir / "stderr.log"
+            self._stderr_offset = stderr_path.stat().st_size if stderr_path.exists() else 0
             # The engine writes straight to files, not to a pipe into this process: if the bot
             # restarts, the engine keeps running and a new bot picks up where this one stopped.
             with raw_path.open("ab") as out, (self.dir / "stderr.log").open("ab") as err:
@@ -271,6 +357,7 @@ class Run:
         Works for an engine we started (proc) and for one a previous bot process started (pid)."""
         raw_path = self.dir / "raw.jsonl"
         last_text, saw_result, completed, failed_turn = "", False, False, False
+        self._last_error = None
         status, code = "failed", None
         buffered = b""
         last_save = 0.0
@@ -300,6 +387,12 @@ class Run:
                             save_rate_limits(raw.get("rate_limit_info") or {})
                         completed = completed or rtype in ("result", "turn.completed")
                         failed_turn = failed_turn or rtype == "turn.failed" or (rtype == "result" and raw.get("is_error"))
+                        if rtype == "result" and raw.get("is_error"):
+                            self._last_error = str(raw.get("result") or raw.get("subtype") or "")
+                        elif rtype in ("result", "turn.completed"):
+                            self._turn_answered = True
+                        elif rtype in ("turn.failed", "error"):
+                            self._last_error = json.dumps(raw.get("error") or raw.get("message") or raw)
                         for event in normalize(engine, raw):
                             data = event.get("data") or {}
                             if event["kind"] == "session" and data.get("session_id"):
@@ -330,6 +423,10 @@ class Run:
                 emit(self.append_event({"kind": "error", "title": "Cancelled", "body": "Stopped by user", "data": {}}, turn))
             elif code != 0:
                 tail = (self.dir / "stderr.log").read_text(errors="replace")[-2000:]
+                if self._last_error is None and proc is not None:  # this turn's stderr only
+                    with (self.dir / "stderr.log").open("rb") as fh:
+                        fh.seek(self._stderr_offset)
+                        self._last_error = fh.read().decode("utf-8", errors="replace")[-2000:]
                 emit(self.append_event({"kind": "error", "title": f"Engine exited {code}", "body": tail, "data": {"exit_code": code}}, turn))
             else:
                 status = "done"
@@ -370,7 +467,14 @@ class Run:
         """Stop the running turn, whether it was started by this process or another."""
         self._cancelled = True
         proc = self._proc
-        pid = proc.pid if proc else self.meta().get("pid")
+        with self._lock:
+            meta = self.meta()
+            pid = proc.pid if proc else meta.get("pid")
+            if not pid and meta.get("status") == "running" and meta.get("retry_owner"):
+                # Waiting to auto-restart: don't, and wake the waiter so it gives up now.
+                self.update_meta(status="cancelled", retry_owner=None)
+                _wake_event(self.id).set()
+                return True
         if not pid:
             return False
         if not self._kill(pid):
