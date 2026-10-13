@@ -29,6 +29,9 @@ class SystemWatchesTest(unittest.TestCase):
         patcher = patch.object(Path, "home", return_value=self.home)
         patcher.start()
         self.addCleanup(patcher.stop)
+        running = patch.object(system_watches, "launchctl_running", return_value=set())
+        self.running = running.start()
+        self.addCleanup(running.stop)
         system_watches._cache.update(at=0.0, rows=[])
 
     def job(self, name, program, **extra):
@@ -140,6 +143,71 @@ class SystemWatchesTest(unittest.TestCase):
             (row,) = system_watches.collect()
         self.assertEqual(row["schedule"], "Daily at 09:30; Every hour")  # sorted plist names
         self.assertEqual(row["last_exit"], 2)
+
+    def test_row_says_running_and_last_log_line(self):
+        d = self.folder("feed-watch")
+        label, log = self.job("feed-watch", ["/py", str(d / "check.py")], StartInterval=1800)
+        log.write_text("first\n2026-10-13 feed-watch breaches=1 new=0\n\n")
+        self.running.return_value = {label}
+        with patch.object(system_watches, "launchctl_status", return_value={label: 0}):
+            (row,) = system_watches.collect()
+        self.assertTrue(row["running"])
+        self.assertEqual(row["summary"], "2026-10-13 feed-watch breaches=1 new=0")
+        self.assertEqual(row["labels"], [label])
+
+    def test_check_now_and_on_off_drive_launchctl_for_every_job_of_the_watch(self):
+        d = self.folder("security-drift")
+        (d / "check.py").write_text("import neowatch as nw\n")
+        self.job("security-drift", ["/x/bin/python", str(d / "check.py")], StartInterval=3600)
+        self.job("security-drift-buckets", ["/x/bin/python", str(d / "check.py"), "buckets"])
+        a = self.folder("deploy-watch")
+        self.job("deploy-watch", ["/bin/sh", "-c", f"python -m cos run --mode full {a}/prompt.md"])
+        both = {"com.anil.neo-security-drift": 0, "com.anil.neo-security-drift-buckets": 0}
+        calls = []
+        with patch.object(system_watches, "launchctl_status", return_value=both), \
+                patch.object(system_watches, "_launchctl", side_effect=lambda *a: calls.append(a)):
+            system_watches.run("com.anil.neo-security-drift-buckets")
+            system_watches._cache["at"] = 0.0
+            system_watches.set_on("com.anil.neo-security-drift", False)
+            for job in ("com.anil.neo-deploy-watch", "com.anil.neo-slack-bot"):  # an agent job; neo itself
+                with self.assertRaises(ValueError):
+                    system_watches.set_on(job, False)
+        uid = os.getuid()
+        self.assertEqual(sorted(calls), [  # off = disable (survives reboot) + unload, per job
+            ("bootout", f"gui/{uid}/com.anil.neo-security-drift"),
+            ("bootout", f"gui/{uid}/com.anil.neo-security-drift-buckets"),
+            ("disable", f"gui/{uid}/com.anil.neo-security-drift"),
+            ("disable", f"gui/{uid}/com.anil.neo-security-drift-buckets"),
+            ("kickstart", f"gui/{uid}/com.anil.neo-security-drift"),
+            ("kickstart", f"gui/{uid}/com.anil.neo-security-drift-buckets")])
+        calls.clear()
+        system_watches._cache["at"] = 0.0
+        with patch.object(system_watches, "launchctl_status", return_value={}), \
+                patch.object(system_watches, "_launchctl", side_effect=lambda *a: calls.append(a)):
+            with self.assertRaises(ValueError):
+                system_watches.run("com.anil.neo-security-drift")  # off: turn it on first
+            system_watches.set_on("com.anil.neo-security-drift", True)
+            with self.assertRaises(ValueError):
+                system_watches.run("com.anil.neo-not-a-watch")
+        self.assertEqual(sorted(c[0] for c in calls), ["bootstrap", "bootstrap", "enable", "enable"])
+        self.assertEqual(sorted(Path(c[2]).name for c in calls if c[0] == "bootstrap"),
+                         ["com.anil.neo-security-drift-buckets.plist", "com.anil.neo-security-drift.plist"])
+
+    def test_unknown_launchd_state_refuses_to_act(self):
+        d = self.folder("feed-watch")
+        (d / "check.py").write_text("import neowatch as nw\n")
+        self.job("feed-watch", ["/x/bin/python", str(d / "check.py")])
+        raw = self.folder("cost-report")
+        (raw / "check.py").write_text("post_every_run()\n")  # no neowatch: a re-run would post again
+        self.job("cost-report", ["/x/bin/python", str(raw / "check.py")])
+        with patch.object(system_watches, "launchctl_status", return_value={"com.anil.neo-feed-watch": 0}):
+            kinds = {r["name"]: r["kind"] for r in system_watches.listing()}
+        self.assertEqual(kinds, {"Feed watch": "check", "Cost report": "job"})
+        with patch.object(system_watches, "launchctl_status", return_value=None), \
+                patch.object(system_watches, "_launchctl") as lc:
+            with self.assertRaises(RuntimeError):
+                system_watches.set_on("com.anil.neo-feed-watch", False)
+            lc.assert_not_called()
 
 
 class SyncFindingsTest(unittest.TestCase):

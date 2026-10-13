@@ -612,6 +612,16 @@ class Handler(BaseHTTPRequestHandler):
                 watches.delete(parts[2])
                 return self._json({"ok": True})
             return self._json(watches.start(parts[2], "dashboard"), HTTPStatus.ACCEPTED)
+        if len(parts) == 4 and parts[:2] == ["api", "system-watches"] and parts[3] in ("run", "on", "off"):
+            from . import system_watches
+            try:
+                if parts[3] == "run":
+                    return self._json(system_watches.run(parts[2]), HTTPStatus.ACCEPTED)
+                return self._json(system_watches.set_on(parts[2], parts[3] == "on"))
+            except ValueError as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                return self._error(HTTPStatus.BAD_GATEWAY, str(exc))
         if len(parts) == 4 and parts[:2] == ["api", "findings"] and parts[3] in ("dismiss", "reopen"):
             try:
                 return self._json(watches.set_status(parts[2], "dismissed" if parts[3] == "dismiss" else "new"))

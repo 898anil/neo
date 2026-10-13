@@ -57,6 +57,30 @@ def launchctl_status() -> Optional[dict[str, Optional[int]]]:
     return loaded
 
 
+def launchctl_running() -> set[str]:
+    """Labels of neo jobs running right now (launchctl list shows a PID)."""
+    try:
+        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {p[2] for p in (line.split(None, 2) for line in out.splitlines()[1:])
+            if len(p) == 3 and p[2].startswith(PREFIX) and p[0].isdigit()}
+
+
+def last_line(log_path: object) -> str:
+    """The last non-empty line of the job's log: what its last run said."""
+    if not isinstance(log_path, str):
+        return ""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 4096))
+            lines = [ln.strip() for ln in f.read().decode("utf-8", "replace").splitlines() if ln.strip()]
+    except OSError:
+        return ""
+    return lines[-1][:300] if lines else ""
+
+
 def schedule(job: dict) -> str:
     every = job.get("StartInterval")
     if isinstance(every, int) and every > 0:
@@ -113,15 +137,17 @@ def iso(ts: float) -> str:
 
 
 SKIP = {".", "..", "lib", "worktrees"}
+NEVER = {"com.anil.neo-slack-bot", "com.anil.neo-viewer"}  # neo itself: never started or stopped from here
 
 
 def collect() -> list[dict]:
     """One row per ~/.neo folder; several jobs on one folder (e.g. hourly + daily) share a row."""
     status = launchctl_status()
+    running = launchctl_running()
     rows: dict[str, dict] = {}
     for plist in sorted(agents_dir().glob(PREFIX + "*.plist")):
         try:
-            row = _row(plist, status)
+            row = _row(plist, status, running)
         except Exception:  # one odd job must not hide the others
             log.exception("system watches: skipping %s", plist.name)
             continue
@@ -132,6 +158,13 @@ def collect() -> list[dict]:
             rows[row["folder"]] = row
             continue
         same["id"] = min(same["id"], row["id"])
+        same["labels"] += row["labels"]
+        same["plists"] += row["plists"]
+        if row["kind"] != "check":
+            same["kind"] = "job"
+        same["running"] = same["running"] or row["running"]
+        if row["last_run"] and (not same["last_run"] or row["last_run"] > same["last_run"]):
+            same["summary"] = row["summary"] or same["summary"]
         same["schedule"] = f"{same['schedule']}; {row['schedule']}"
         if same["loaded"] is not None and row["loaded"] is not None:
             same["loaded"] = same["loaded"] or row["loaded"]
@@ -140,7 +173,7 @@ def collect() -> list[dict]:
     return list(rows.values())
 
 
-def _row(plist: Path, status: Optional[dict[str, Optional[int]]]) -> Optional[dict]:
+def _row(plist: Path, status: Optional[dict[str, Optional[int]]], running: frozenset | set = frozenset()) -> Optional[dict]:
     try:
         job = plistlib.loads(plist.read_bytes())
     except (OSError, plistlib.InvalidFileException, ValueError):
@@ -152,7 +185,18 @@ def _row(plist: Path, status: Optional[dict[str, Optional[int]]]) -> Optional[di
     if not m or m.group(1) in SKIP or not (neo_dir() / m.group(1)).is_dir():
         return None  # the bot and the viewer, not watches
     label = str(job.get("Label") or plist.stem)
+    if label in NEVER:
+        return None
     folder = neo_dir() / m.group(1)
+    # Only a plain read-only check (python ~/.neo/<dir>/check.py ...) can be run or turned on/off from the
+    # dashboard. Agent jobs (cos run --mode full), shell pipelines and the heartbeat are listed, not driven.
+    check = (len(args) >= 2 and isinstance(args[1], str) and args[1] == str(folder / "check.py")
+             and isinstance(args[0], str) and Path(args[0]).name.startswith("python"))
+    if check:  # and it posts through neowatch (only on change), so an extra run is harmless
+        try:
+            check = "neowatch" in (folder / "check.py").read_text(errors="replace")
+        except OSError:
+            check = False
     log_path = job.get("StandardOutPath")
     try:
         last_run = iso(Path(log_path).stat().st_mtime) if isinstance(log_path, str) else None
@@ -161,6 +205,11 @@ def _row(plist: Path, status: Optional[dict[str, Optional[int]]]) -> Optional[di
     breaches = open_breaches(folder)
     return {
         "id": label,
+        "labels": [label],
+        "plists": [str(plist)],
+        "kind": "check" if check else "job",
+        "running": label in running,
+        "summary": last_line(log_path),
         "name": m.group(1).replace("-", " ").capitalize(),
         "folder": str(folder),
         "about": describe(folder),
@@ -172,6 +221,66 @@ def _row(plist: Path, status: Optional[dict[str, Optional[int]]]) -> Optional[di
         "breaches": breaches[:MAX_OPEN],
         "complete": len(breaches) <= MAX_OPEN,
     }
+
+
+def _find(watch_id: str) -> dict:
+    """A system watch the dashboard may drive: a read-only check, never neo itself."""
+    if watch_id in NEVER or not enabled():
+        raise ValueError("no such system watch")
+    for row in listing():
+        if watch_id == row["id"] or watch_id in row["labels"]:
+            if row.get("kind") != "check" or NEVER & set(row["labels"]):
+                raise ValueError("this job runs an agent or a pipeline; ask neo in Slack to run or stop it")
+            return row
+    raise ValueError("no such system watch")
+
+
+def _loaded() -> dict:
+    status = launchctl_status()
+    if status is None:
+        raise RuntimeError("launchd status unavailable; try again")
+    return status
+
+
+def _launchctl(*args: str) -> None:
+    try:
+        done = subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"launchctl {args[0]} is still working; refresh in a minute") from None
+    if done.returncode != 0:
+        raise RuntimeError(f"launchctl {args[0]} failed ({done.returncode}): {(done.stderr or done.stdout).strip()[:200]}")
+
+
+def run(watch_id: str) -> dict:
+    """Check now: start the job's run (launchd does nothing if it is already running)."""
+    row = _find(watch_id)
+    status = _loaded()
+    loaded = [label for label in row["labels"] if label in status]
+    if not loaded:
+        raise ValueError("this watch is off; turn it on first")
+    for label in loaded:
+        _launchctl("kickstart", f"gui/{os.getuid()}/{label}")
+    _cache["at"] = 0.0
+    return {"ok": True}
+
+
+def set_on(watch_id: str, on: bool) -> dict:
+    """Turn a watch on (enable + load its LaunchAgent) or off (disable + unload; disabled survives a reboot,
+    which a plain unload would not). Its files stay."""
+    row = _find(watch_id)
+    loaded = _loaded()
+    for label, plist in zip(row["labels"], row["plists"]):
+        target = f"gui/{os.getuid()}/{label}"
+        if on:
+            _launchctl("enable", target)
+            if label not in loaded:
+                _launchctl("bootstrap", f"gui/{os.getuid()}", plist)
+        else:
+            _launchctl("disable", target)
+            if label in loaded:
+                _launchctl("bootout", target)
+    _cache["at"] = 0.0
+    return {"ok": True}
 
 
 def enabled() -> bool:

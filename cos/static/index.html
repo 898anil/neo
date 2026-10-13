@@ -1362,14 +1362,11 @@ function renderToday(o) {
     groupHead("g-found", "Found by your watches", found.length, found.length ? "New problems. Start an agent on one, or dismiss it." : "Nothing new."),
     found.map(findingCard),
     fixing.length ? [groupHead("g-fixing", "Being fixed", fixing.length), h("div", { class: "list" }, fixing.map(fixingRow))] : null,
-    groupHead("g-watches", "Watches", wd ? wd.watches.length : 0, "Read-only checks on a schedule.", h("button", { class: "btn quiet", onclick: () => watchSheet(null) }, "Add")),
-    wd ? h("div", { class: "list" }, wd.watches.map(watchRow)) : h("p", { class: "empty" }, "Loading watches…"),
-    wd && wd.system && wd.system.length ? [
-      groupHead("g-system", "System watches", wd.system.length, "Scripts neo runs on the Mac mini (launchd). They post to Slack only when something changes."),
-      h("div", { class: "list" }, wd.system.map(systemRow))] : null,
+    groupHead("g-watches", "Watches", wd ? wd.watches.length + (wd.system || []).length : 0, "Read-only checks on a schedule.", h("button", { class: "btn quiet", onclick: () => watchSheet(null) }, "Add")),
+    wd ? h("div", { class: "list" }, wd.watches.map(watchRow), (wd.system || []).map(systemRow)) : h("p", { class: "empty" }, "Loading watches…"),
   );
   paint(page, "today:" + viewSig(o) + JSON.stringify(wd && wd.watches.map((x) => [x.id, x.name, x.enabled, x.every, x.hours, x.running, x.open, x.last_run && x.last_run.id]))
-    + JSON.stringify(wd && (wd.system || []).map((x) => [x.id, x.loaded, x.last_exit, x.last_run, x.open, x.schedule, x.breaches.map((b) => b.key)])));
+    + JSON.stringify(wd && (wd.system || []).map((x) => [x.id, x.loaded, x.running, x.last_exit, x.last_run, x.open, x.schedule, x.summary, x.breaches.map((b) => b.key)])));
 }
 
 let searchQ = "", searchData = null, searchBusy = false;
@@ -1631,18 +1628,24 @@ function watchRow(w) {
     said ? h("span", { class: "said" }, plain(said)) : null);
 }
 function systemLamp(w) {
-  return w.loaded === false ? "closed" : w.open || w.last_exit ? "failed" : w.last_run ? "done" : "idle";
+  return w.running ? "running" : w.loaded === false ? "closed" : w.last_exit ? "failed" : w.last_run ? "done" : "idle";
 }
 function systemRow(w) {
-  const state = w.loaded === false ? "Off" : w.loaded === null ? "Status unknown" : w.schedule;
-  const said = w.open ? w.breaches.map((b) => b.key).join(", ") : w.last_exit ? `The last run exited with status ${w.last_exit}.` : w.about;
+  const state = w.loaded === false ? "Off" : w.loaded === null ? "Status unknown" : w.schedule.startsWith("Every") ? `${w.schedule}, all day` : w.schedule;
+  const said = w.running ? "Checking now…" : w.last_exit ? "The last check failed. Open it to see why." : w.summary || w.about;
   return h("a", { class: "row-link", href: "#/today", onclick: (e) => { e.preventDefault(); systemSheet(w); } },
     h("span", { class: `lamp ${systemLamp(w)}` }), h("span", { class: "t" }, w.name), h("span", { class: "when" }, agoIso(w.last_run)),
     h("span", { class: "s" }, `${state}${w.open ? `, ${w.open} open` : ""}`),
     said ? h("span", { class: "said" }, said) : null);
 }
 function systemSheet(w) {
-  const sheet = sheetShell(w.name, `System watch: ${w.name}`);
+  const sheet = sheetShell(w.name, `Watch: ${w.name}`);
+  const act = (what, done) => async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try { await api(`/api/system-watches/${enc(w.id)}/${what}`, { method: "POST", body: "{}" }); toast(done); closeSheets(); watchAt = 0; refresh(); }
+    catch (err) { toast(err.message); b.disabled = false; }
+  };
+  const on = w.loaded !== false;
   const facts = [
     ["Schedule", w.loaded === false ? `${w.schedule} (turned off)` : w.schedule],
     ["Last run", w.last_run ? `${agoIso(w.last_run)} ago` : "Not yet"],
@@ -1654,9 +1657,15 @@ function systemSheet(w) {
     w.open ? h("div", { class: "list" }, w.breaches.map((b) => h("div", { class: "row-link" },
       h("span", { class: "lamp failed" }), h("span", { class: "t" }, b.key), h("span", { class: "when" }, agoIso(b.since)),
       b.detail ? h("span", { class: "said" }, b.detail) : null))) : null,
+    w.summary ? [h("h4", {}, w.last_run ? `Last check, ${agoIso(w.last_run)} ago` : "Last check"), h("p", { class: "meta" }, w.summary)] : null,
     h("dl", { class: "facts" }, facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
-    h("p", { class: "hint" }, "Read-only here. To turn it off, ask neo in Slack."),
-    h("div", { class: "stack" }, h("button", { class: "btn quiet", onclick: closeSheets }, "Close"))].filter(Boolean));
+    h("p", { class: "hint" }, w.kind === "check"
+      ? "A watch only reads. What this one checks is a script, so it can't be edited here: ask neo in Slack to change it."
+      : "This job runs an agent or a pipeline on its own schedule, so it can't be started or stopped here: ask neo in Slack."),
+    h("div", { class: "stack" },
+      w.kind === "check" && on ? h("button", { class: "btn quiet", disabled: w.running, onclick: act("run", "Checking now") }, w.running ? "Checking now…" : "Check now") : null,
+      w.kind === "check" ? h("button", { class: "btn quiet", onclick: act(on ? "off" : "on", on ? "Turned off" : "Turned on") }, on ? "Turn off" : "Turn on") : null,
+      h("button", { class: "btn quiet", onclick: closeSheets }, "Close"))].flat().filter(Boolean));
 }
 function watchSheet(w) {
   const isNew = !w;
