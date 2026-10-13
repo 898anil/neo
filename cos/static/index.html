@@ -115,6 +115,9 @@
   .row-link .t { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row-link .when { color: var(--faint); font-size: 13px; padding-top: 1px; font-variant-numeric: tabular-nums; }
   .row-link .s { grid-column: 2 / 4; color: var(--muted); font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sheet dl.facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13.5px; margin: 12px 0; }
+  .sheet dl.facts dt { color: var(--muted); }
+  .sheet dl.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   .row-link .said { grid-column: 2 / 4; font-size: 13.5px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .row-link:hover, .row-link:active { background: var(--raise); }
   .empty { color: var(--faint); padding: 28px 0; text-align: center; }
@@ -1361,8 +1364,12 @@ function renderToday(o) {
     fixing.length ? [groupHead("g-fixing", "Being fixed", fixing.length), h("div", { class: "list" }, fixing.map(fixingRow))] : null,
     groupHead("g-watches", "Watches", wd ? wd.watches.length : 0, "Read-only checks on a schedule.", h("button", { class: "btn quiet", onclick: () => watchSheet(null) }, "Add")),
     wd ? h("div", { class: "list" }, wd.watches.map(watchRow)) : h("p", { class: "empty" }, "Loading watches…"),
+    wd && wd.system && wd.system.length ? [
+      groupHead("g-system", "System watches", wd.system.length, "Scripts neo runs on the Mac mini (launchd). They post to Slack only when something changes."),
+      h("div", { class: "list" }, wd.system.map(systemRow))] : null,
   );
-  paint(page, "today:" + viewSig(o) + JSON.stringify(wd && wd.watches.map((x) => [x.id, x.name, x.enabled, x.every, x.hours, x.running, x.open, x.last_run && x.last_run.id])));
+  paint(page, "today:" + viewSig(o) + JSON.stringify(wd && wd.watches.map((x) => [x.id, x.name, x.enabled, x.every, x.hours, x.running, x.open, x.last_run && x.last_run.id]))
+    + JSON.stringify(wd && (wd.system || []).map((x) => [x.id, x.loaded, x.last_exit, x.last_run, x.open, x.schedule, x.breaches.map((b) => b.key)])));
 }
 
 let searchQ = "", searchData = null, searchBusy = false;
@@ -1622,6 +1629,34 @@ function watchRow(w) {
     h("span", { class: `lamp ${lamp}` }), h("span", { class: "t" }, w.name), h("span", { class: "when" }, lr ? agoIso(lr.created_at) : ""),
     h("span", { class: "s" }, `${sched}${w.open ? `, ${w.open} open` : ""}`),
     said ? h("span", { class: "said" }, plain(said)) : null);
+}
+function systemLamp(w) {
+  return w.loaded === false ? "closed" : w.open || w.last_exit ? "failed" : w.last_run ? "done" : "idle";
+}
+function systemRow(w) {
+  const state = w.loaded === false ? "Off" : w.loaded === null ? "Status unknown" : w.schedule;
+  const said = w.open ? w.breaches.map((b) => b.key).join(", ") : w.last_exit ? `The last run exited with status ${w.last_exit}.` : w.about;
+  return h("a", { class: "row-link", href: "#/today", onclick: (e) => { e.preventDefault(); systemSheet(w); } },
+    h("span", { class: `lamp ${systemLamp(w)}` }), h("span", { class: "t" }, w.name), h("span", { class: "when" }, agoIso(w.last_run)),
+    h("span", { class: "s" }, `${state}${w.open ? `, ${w.open} open` : ""}`),
+    said ? h("span", { class: "said" }, said) : null);
+}
+function systemSheet(w) {
+  const sheet = sheetShell(w.name, `System watch: ${w.name}`);
+  const facts = [
+    ["Schedule", w.loaded === false ? `${w.schedule} (turned off)` : w.schedule],
+    ["Last run", w.last_run ? `${agoIso(w.last_run)} ago` : "Not yet"],
+    ["Last exit", w.last_exit === null || w.last_exit === undefined ? "None yet" : String(w.last_exit)],
+    ["Job", w.id], ["Folder", w.folder]];
+  sheet.append(...[
+    w.about ? h("p", {}, w.about) : null,
+    h("h4", {}, w.open ? `Open now (${w.open})` : "Nothing open"),
+    w.open ? h("div", { class: "list" }, w.breaches.map((b) => h("div", { class: "row-link" },
+      h("span", { class: "lamp failed" }), h("span", { class: "t" }, b.key), h("span", { class: "when" }, agoIso(b.since)),
+      b.detail ? h("span", { class: "said" }, b.detail) : null))) : null,
+    h("dl", { class: "facts" }, facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+    h("p", { class: "hint" }, "Read-only here. To turn it off, ask neo in Slack."),
+    h("div", { class: "stack" }, h("button", { class: "btn quiet", onclick: closeSheets }, "Close"))].filter(Boolean));
 }
 function watchSheet(w) {
   const isNew = !w;

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import system_watches
 from .config import workdir
 from .runner import Run, cos_home, list_runs, now_iso
 
@@ -481,4 +482,4 @@ def listing() -> dict:
             "open": sum(1 for f in store.values() if f["watch_id"] == w["id"] and f["status"] in OPEN),
             "last_run": {k: last.get(k) for k in ("id", "status", "created_at", "watch_summary", "watch_found", "watch_new", "cost_usd")} if last else None,
         })
-    return {"watches": rows, "findings": open_findings(), "templates": templates()}
+    return {"watches": rows, "findings": open_findings(), "templates": templates(), "system": system_watches.listing()}
