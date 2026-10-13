@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from cos import cards, digest, fleet, home, loops, mentions, urgent, work
+from cos import cards, digest, fleet, home, loops, mentions, pause, urgent, work
 from cos.store import JsonStore
 
 log = logging.getLogger("neo")
@@ -118,10 +118,24 @@ async def mention_scheduler() -> None:
 
 
 async def urgent_scheduler(client, where: str, mention: str, base_url: Optional[str]) -> None:
+    was_paused = False
     while True:
         try:
+            if pause.is_paused():
+                was_paused = True
+                await asyncio.sleep(URGENT_EVERY_SECONDS)
+                continue  # nothing marked sent, so what is still urgent goes out after the pause
             payload = await asyncio.to_thread(home.home)
             items = urgent.due(payload, time.time(), base_url)
+            if was_paused and len(items) > 1:
+                # One message for everything that piled up, not a burst of pings.
+                text = "\n\n".join(item["text"] for item in items[:20])
+                more = f"\n\n…and {len(items) - 20} more on the dashboard" if len(items) > 20 else ""
+                await client.chat_postMessage(channel=where, text=f"{mention}*While notifications were paused*\n{text}{more}"[:3800],
+                                              unfurl_links=False)
+                urgent.mark_sent(items)
+                items = []
+            was_paused = False
             for item in items:
                 await client.chat_postMessage(channel=where, text=f"{mention}{item['text']}", unfurl_links=False)
                 urgent.mark_sent([item])
@@ -142,7 +156,7 @@ async def digest_scheduler(client, where: str, mention: str, base_url: Optional[
     while True:
         try:
             now = datetime.now()
-            if digest_due(now, DIGEST_AT, STATE.read().get("digest_day")):
+            if digest_due(now, DIGEST_AT, STATE.read().get("digest_day")) and not pause.is_paused():
                 payload = await asyncio.to_thread(home.home, digest_since(now))
                 text = urgent.digest_text(payload, base_url)
                 link = f"\n<{base_url}|Open the dashboard>" if base_url else ""

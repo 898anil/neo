@@ -1675,6 +1675,21 @@ function settingsSheet() {
       try { const r = await api("/api/settings", { method: "POST", body: JSON.stringify({ default_engine: v }) }); if (overview) overview.default_engine = r.default_engine; toast(`${v === "codex" ? "Codex" : "Claude"} is now the default`); }
       catch (err) { engine = before; toast(err.message); }
     }), hint)));
+  const note = () => (overview && overview.notifications) || { paused: false, text: "Notifications are on." };
+  const n0 = note();
+  let pauseChoice = !n0.paused ? "on" : n0.until === "forever" ? "forever" : "timed"; // a timed pause shows as text only
+  const pauseNow = h("span", null, note().text);
+  const pauseHint = h("span", { class: "hint" }, pauseNow, " While paused I post nothing to Slack on my own (agent notifications, briefs, digests, urgent pings, watch findings, auto RCA, scheduled checks); I still answer when you mention me.");
+  sheet.append(h("form", { onsubmit: (e) => e.preventDefault() },
+    h("label", { class: "lbl" }, "Slack notifications", segControl([["on", "On"], ["1h", "Pause 1h"], ["8h", "Pause 8h"], ["forever", "Pause"]], () => pauseChoice, async (v) => {
+      const before = pauseChoice; pauseChoice = v;
+      try {
+        const r = await api("/api/settings", { method: "POST", body: JSON.stringify({ notifications: v }) });
+        if (overview) overview.notifications = r.notifications;
+        pauseNow.textContent = r.notifications.text;
+        toast(r.notifications.text);
+      } catch (err) { pauseChoice = before; toast(err.message); }
+    }), pauseHint)));
 }
 
 const RENDER = { home: (o) => renderHome(o), today: (o) => renderToday(o), runs: (o) => renderRuns(o), work: () => renderWork() };

@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import ask, brief, cards, digest, fleet, home, loops, memory, mentions, settings, watches, work
+from . import ask, brief, cards, digest, fleet, home, loops, memory, mentions, pause, settings, watches, work
 from .config import agent_brief, default_engine, owner_fields, workdir
 from .herdr import HerdrError
 from .runner import ENGINES, TERMINAL, Run, list_runs, valid_run_id
@@ -434,7 +434,7 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["api", "overview"]:
             # Each agent and task carries needs / result (home.annotate), so its row can say Idle, Partly done, Needs you.
             data = home.annotate(fleet.overview(), cards.STORE.read(), fleet.seen.get)
-            return self._json({**board_overview(data), "default_engine": default_engine(),
+            return self._json({**board_overview(data), "default_engine": default_engine(), "notifications": pause.state(),
                                "findings": [board_finding(f) for f in watches.open_findings()]})
         if parts == ["api", "home"]:
             raw = (parse_qs(urlparse(self.path).query).get("since") or [""])[0]
@@ -446,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["api", "watches"]:
             return self._json(watches.listing())
         if parts == ["api", "settings"]:
-            return self._json({"default_engine": default_engine()})
+            return self._json({"default_engine": default_engine(), "notifications": pause.state()})
         if len(parts) == 3 and parts[:2] == ["api", "findings"]:
             found = watches.get_finding(parts[2])
             return self._json(watches.view(found)) if found else self._error(HTTPStatus.NOT_FOUND, "no such finding")
@@ -588,10 +588,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.NOT_FOUND, str(exc))
         if parts == ["api", "settings"]:
             try:
-                settings.save(**{k: v for k, v in (body or {}).items() if k in ("default_engine",)})
+                body = body or {}
+                choice = body.get("notifications")
+                if "notifications" in body and choice not in (None, "on", pause.FOREVER):
+                    if not isinstance(choice, str):
+                        raise ValueError("notifications must be \"on\", \"forever\" or a duration like \"2h\"")
+                    pause.parse_duration(choice)  # validate before saving anything
+                settings.save(**{k: v for k, v in body.items() if k in ("default_engine",)})
+                if "notifications" in body:
+                    pause.apply(choice)
             except ValueError as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
-            return self._json({"default_engine": default_engine()})
+            return self._json({"default_engine": default_engine(), "notifications": pause.state()})
         if parts == ["api", "watches"]:
             try:
                 return self._json(watches.save(body or {}), HTTPStatus.CREATED)
