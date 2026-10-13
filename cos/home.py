@@ -96,6 +96,9 @@ def monitor_line(loop: dict, now: float) -> str:
 
 MONITOR_STAGES = ("deployed", "verified")
 CARD_SLACK_SECONDS = 60  # an agent's last line can land just after its card was written
+# An agent idle this long whose last stop has no card (the card writer failed or never ran) stopped without a
+# conclusion: it goes to "Stopped before finishing", not to In flight where it reads like it is still working.
+NO_CONCLUSION_SECONDS = 30 * 60
 
 
 def _first_line(text: Optional[str], limit: int = 160) -> str:
@@ -160,8 +163,10 @@ def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tu
 
     needs: "you" (approve, reply, stuck, failed, or an open question on its card), "others" (waits on a
     reviewer, vendor or owner), "working", "unfinished" (stopped partly done / failed / unclear and asked
-    nothing) or "none". The home screen sections and the session-row tags both come from this.
-    `it` needs key, kind, at, attention and, for runs, source."""
+    nothing, or an agent idle for NO_CONCLUSION_SECONDS with no card for its last stop) or "none". The home
+    screen sections and the session-row tags both come from this.
+    `it` needs key, kind, at, attention and, for runs, source; for agents, prompts and now (to tell how long
+    it has been idle)."""
     card = card or {}
     # Cards are written when an agent stops; once it is working again (the owner answered, it resumed), the
     # card is history: the row goes by the live state until the next card. A finished item keeps its
@@ -192,19 +197,26 @@ def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tu
         # Stopped without finishing and asked nothing: someone has to continue, redirect or close it. A Slack
         # run already delivered its answer in the thread, so it is not left hanging here.
         return "unfinished", opened, card
+    if (it["kind"] == "agent" and it.get("prompts") and it["at"] and not card_current
+            and it.get("now", 0) - it["at"] >= NO_CONCLUSION_SECONDS and seen(waiting_key(it["key"])) < it["at"]):
+        # Idle with nothing that says how its last stop ended: someone has to continue or close it. Done closes
+        # it until the agent runs again. The stale card is not this stop's outcome, so it is dropped.
+        return "unfinished", seen(it["key"]) >= it["at"], {}
     return "none", opened, card
 
 
 def annotate(overview: dict, cards_by_key: dict, seen: Callable[[str], float]) -> dict:
     """The agent board's rows with the same needs / result the home screen uses, for their tags."""
     _seen = lambda key: seen(key) or 0.0  # noqa: E731
+    now = time.time()
 
     def tag(row: dict, it: dict) -> dict:
         needs, opened, card = needs_of(it, cards_by_key.get(it["key"]), _seen)
         return {**row, "needs": needs, "opened": opened, "result": card.get("result")}
     return {**overview,
             "agents": [tag(a, {"key": fleet._seen_key(a), "kind": "agent", "at": a.get("last_active") or 0,
-                               "attention": a.get("attention")}) for a in overview.get("agents", [])],
+                               "attention": a.get("attention"), "prompts": a.get("prompts"), "now": now})
+                       for a in overview.get("agents", [])],
             "tasks": [tag(t, {"key": f"run:{t['id']}", "kind": "run", "at": _run_time(t), "source": t.get("source"),
                               "attention": t.get("attention") or ("working" if t.get("status") == "running" else None)})
                       for t in overview.get("tasks", [])]}
@@ -221,7 +233,8 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
         items.append({"key": fleet._seen_key(row), "kind": "agent", "title": row.get("title") or row.get("name"),
                       "href": _agent_href(row), "at": row.get("last_active") or 0, "attention": row.get("attention"),
                       "reason": row.get("reason", ""), "session": row["session"], "pane_id": row["pane_id"],
-                      "repo": row.get("repo", ""), "last_text": row.get("last_text") or ""})
+                      "repo": row.get("repo", ""), "last_text": row.get("last_text") or "", "prompts": row.get("prompts"),
+                      "now": now})
     for t in overview.get("tasks", []):
         items.append({"key": f"run:{t['id']}", "kind": "run", "title": t.get("title") or t["id"],
                       "href": f"#/run/{t['id']}", "at": _run_time(t), "status": t.get("status"),
@@ -245,7 +258,7 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
         elif needs == "working":
             in_flight.append({**it, "line": _first_line(it.get("last_text")) or "Working"})
         elif needs == "unfinished":
-            unfinished.append({**it, "result": card["result"], "line": card.get("did") or _first_line(it.get("last_text")),
+            unfinished.append({**it, "result": card.get("result"), "line": card.get("did") or _first_line(it.get("last_text")),
                                "risk": card.get("risk", ""), "next": card.get("next", ""),
                                "age": now - it["at"] if it["at"] else 0})
         else:

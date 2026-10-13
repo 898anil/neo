@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import conclusion
 from .events import normalize
 
 ENGINES = ("claude", "codex")
@@ -74,6 +75,7 @@ def build_command(
     if engine == "claude":
         cmd = [cli_path("claude"), "-p", "--output-format", "stream-json", "--verbose"]
         cmd += CLAUDE_MODE_FLAGS[mode]
+        cmd += ["--settings", conclusion.settings_json()]  # every turn ends with a Status line
         if system:
             cmd += ["--append-system-prompt", system]
         if model:
