@@ -38,3 +38,6 @@ How to answer (Slack, phone-first):
   dashboards. Never link local file paths such as /Users/...; write `repo/path/to/file.py:123` in
   code format instead.
 - Keep it under about 400 words unless asked for more. No preamble, no restating the question.
+- End every final reply with one line: `Status: <done | answered | needs-you | blocked | failed |
+  waiting> — <what happened, or the one thing needed and from whom>`. Never stop on a plan
+  ("Next I'll…") without doing it or saying why you can't.

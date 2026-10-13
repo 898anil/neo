@@ -1266,7 +1266,7 @@ function renderHome(o) {
       // Agents and people asking you first, then agents that stopped partway, then alerts that stalled:
       // a fresh question must never sit under a pile of days-old alerts.
       asks ? [d.regressed.length ? groupHead("g-decide", "Asking you", asks, null) : null, d.decide.filter((x) => !x.stalled).map((x) => mark(decideCard(x, o), x))] : null,
-      unfinished ? [groupHead("g-unfinished", "Stopped before finishing", unfinished, "Partly done, failed or unclear, and asked nothing. Open to continue it, or tap Done."),
+      unfinished ? [groupHead("g-unfinished", "Stopped before finishing", unfinished, "Partly done, failed, unclear or idle with no conclusion, and asked nothing. Open to continue it, or tap Done."),
         d.unfinished.map((x) => mark(unfinishedCard(x), x))] : null,
       stalled ? [groupHead("g-stalled", "Stalled alerts", stalled, "No progress for a while. Hand one to an agent or mute it."),
         d.decide.filter((x) => x.stalled).map((x) => mark(decideCard(x, o), x))] : null,

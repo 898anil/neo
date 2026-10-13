@@ -654,7 +654,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return self._error(HTTPStatus.CONFLICT, str(exc))
             cwd = work.repo_dir(pr["repo"]) or workdir()
-            extra = {"kind": f"pr-{parts[2]}", "pr_url": pr["url"], "system_prompt": agent_brief(cwd),
+            standing = agent_brief(cwd)
+            extra = {"kind": f"pr-{parts[2]}", "pr_url": pr["url"], "system_prompt": standing, "conclude": bool(standing),
                      "title": f"Review: {pr['title']}" if parts[2] == "review" else f"Fix CI: {pr['title']}"}
             try:
                 if parts[2] == "review":
@@ -707,7 +708,7 @@ class Handler(BaseHTTPRequestHandler):
                     cwd=cwd,
                     mode=str(body.get("mode", "readonly")),
                     source="dashboard",
-                    extra={"system_prompt": agent_brief(cwd), "branch": branch},
+                    extra={"system_prompt": (standing := agent_brief(cwd)), "conclude": bool(standing), "branch": branch},
                 )
             except ValueError as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
