@@ -202,6 +202,8 @@ def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tu
         # Idle with nothing that says how its last stop ended: someone has to continue or close it. Done closes
         # it until the agent runs again. The stale card is not this stop's outcome, so it is dropped.
         return "unfinished", seen(it["key"]) >= it["at"], {}
+    if it["kind"] == "agent" and not card_current:
+        card = {}  # an older stop's outcome; don't show it as this one's (e.g. after Done on the row above)
     return "none", opened, card
 
 

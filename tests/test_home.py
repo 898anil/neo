@@ -220,8 +220,12 @@ class HomeTest(unittest.TestCase):
 
     def test_stale_card_does_not_count_as_a_conclusion_for_the_latest_stop(self):
         c = {"agent:s": card(result="worked", did="Merged #1", source_mtime=NOW - 20000, made_at=NOW - 19900)}
-        out = build(ov([agent("s", "idle", NOW - 7200, last_text="Waiting for CI")]), [], c, SINCE, NOW)
+        a = agent("s", "idle", NOW - 7200, last_text="Waiting for CI")
+        out = build(ov([a]), [], c, SINCE, NOW)
         self.assertEqual([(u["key"], u["result"], u["line"]) for u in out["unfinished"]], [("agent:s", None, "Waiting for CI")])
+        # after Done the row is idle in flight with its latest words, not the old card's "Merged #1"
+        out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:s": NOW, "waiting:agent:s": NOW}.get)
+        self.assertEqual([(m["line"], m["result"]) for m in out["in_flight"]], [("Waiting for CI", None)])
 
     def test_idle_agent_that_never_got_a_prompt_is_not_unfinished(self):
         out = build(ov([agent("e", "idle", NOW - 90000, prompts=0)]), [], {}, SINCE, NOW)
