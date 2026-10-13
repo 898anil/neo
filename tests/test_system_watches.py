@@ -1,6 +1,7 @@
 """System watches: the ~/.neo launchd jobs listed on the Watches screen."""
 
 import json
+import os
 import plistlib
 import sys
 import tempfile
@@ -17,6 +18,11 @@ from cos import system_watches  # noqa: E402
 
 class SystemWatchesTest(unittest.TestCase):
     def setUp(self):
+        os.environ["NEO_SYSTEM_WATCHES"] = "1"
+        self.addCleanup(os.environ.__setitem__, "NEO_SYSTEM_WATCHES", "0")
+        cos = patch.dict(os.environ, {"COS_HOME": tempfile.mkdtemp()})  # never the live findings.json
+        cos.start()
+        self.addCleanup(cos.stop)
         self.home = Path(tempfile.mkdtemp())
         (self.home / "Library/LaunchAgents").mkdir(parents=True)
         (self.home / "Library/Logs").mkdir(parents=True)
@@ -92,7 +98,8 @@ class SystemWatchesTest(unittest.TestCase):
         self.assertEqual((row["about"], row["open"]), ("", 0))
 
     def test_listing_caches_and_survives_a_failure(self):
-        with patch.object(system_watches, "collect", return_value=[{"id": "a"}]) as c:
+        with patch.object(system_watches, "collect", return_value=[{"id": "a"}]) as c, \
+                patch("cos.watches.sync_system"):
             self.assertEqual(system_watches.listing(), [{"id": "a"}])
             system_watches.listing()
             self.assertEqual(c.call_count, 1)
@@ -122,6 +129,69 @@ class SystemWatchesTest(unittest.TestCase):
         with patch.object(system_watches, "listing", return_value=[{"id": "x"}]), \
                 patch.object(watches, "load", return_value=[]), patch.object(watches, "open_findings", return_value=[]):
             self.assertEqual(watches.listing()["system"], [{"id": "x"}])
+
+    def test_two_jobs_on_one_folder_share_a_row(self):
+        d = self.folder("security-drift")
+        self.job("security-drift", ["/py", str(d / "check.py")], StartInterval=3600)
+        self.job("security-drift-buckets", ["/py", str(d / "check.py"), "buckets"],
+                 StartCalendarInterval={"Hour": 9, "Minute": 30})
+        with patch.object(system_watches, "launchctl_status",
+                          return_value={"com.anil.neo-security-drift": 0, "com.anil.neo-security-drift-buckets": 2}):
+            (row,) = system_watches.collect()
+        self.assertEqual(row["schedule"], "Daily at 09:30; Every hour")  # sorted plist names
+        self.assertEqual(row["last_exit"], 2)
+
+
+class SyncFindingsTest(unittest.TestCase):
+    def setUp(self):
+        self.cos = tempfile.mkdtemp()
+        patcher = patch.dict(os.environ, {"COS_HOME": self.cos})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from cos import watches
+        self.w = watches
+
+    def rows(self, *keys, complete=True):
+        return [{"name": "Feed watch", "folder": "/x/.neo/feed-watch", "complete": complete,
+                 "breaches": [{"key": k, "detail": f"{k} is broken", "since": "2026-10-13T00:00:00+00:00"} for k in keys]}]
+
+    def cards(self):
+        return {f["key"]: f["status"] for f in self.w._findings().values()}
+
+    def test_breaches_become_cards_and_resolve_when_they_clear(self):
+        self.w.sync_system(self.rows("a", "b"))
+        self.assertEqual(self.cards(), {"a": "new", "b": "new"})
+        f = next(f for f in self.w._findings().values() if f["key"] == "a")
+        self.assertEqual((f["watch_id"], f["title"], f["watch"]), ("system:feed-watch", "Feed watch: a", "Feed watch"))
+        self.w.sync_system(self.rows("b"))
+        self.assertEqual(self.cards(), {"a": "resolved", "b": "new"})
+        self.w.sync_system(self.rows("a", "b"))  # recurs: a fresh card
+        self.assertEqual(self.cards(), {"a": "new", "b": "new"})
+
+    def test_dismissed_stays_dismissed_while_open_and_working_is_kept(self):
+        self.w.sync_system(self.rows("a", "b"))
+        ids = {f["key"]: f["id"] for f in self.w._findings().values()}
+        self.w.set_status(ids["a"], "dismissed")
+        self.w.set_status(ids["b"], "working")
+        self.w.sync_system(self.rows("a"))
+        self.assertEqual(self.cards(), {"a": "dismissed", "b": "working"})
+
+    def test_removed_job_cards_resolve(self):
+        self.w.sync_system(self.rows("a"))
+        other = [{"name": "Other", "folder": "/x/.neo/other", "breaches": []}]
+        neo = Path(tempfile.mkdtemp())
+        with patch.object(system_watches, "neo_dir", return_value=neo):
+            (neo / "feed-watch").mkdir()  # folder still there: only unreadable this time, keep the card
+            self.w.sync_system(other)
+            self.assertEqual(self.cards(), {"a": "new"})
+            (neo / "feed-watch").rmdir()  # really removed
+            self.w.sync_system(other)
+        self.assertEqual(self.cards(), {"a": "resolved"})
+
+    def test_cut_list_resolves_nothing(self):
+        self.w.sync_system(self.rows("a", "b"))
+        self.w.sync_system(self.rows("a", complete=False))
+        self.assertEqual(self.cards(), {"a": "new", "b": "new"})
 
 
 if __name__ == "__main__":

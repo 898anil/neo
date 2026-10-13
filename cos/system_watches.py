@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import os
 import plistlib
 import re
 import subprocess
@@ -23,7 +24,7 @@ from typing import Optional
 
 PREFIX = "com.anil.neo-"
 CACHE_SECONDS = 30
-MAX_OPEN = 20  # open breaches listed per job
+MAX_OPEN = 100  # open breaches listed per job (a longer list is cut and not synced as findings)
 _DIR = re.compile(r"/\.neo/([A-Za-z0-9_.-]+)(?=[/\s;'\"]|$)")
 
 log = logging.getLogger(__name__)
@@ -93,14 +94,17 @@ def open_breaches(folder: Path) -> list[dict]:
             state = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        rows = state.get("open") if isinstance(state, dict) else None
-        if not isinstance(rows, dict):
+        if not isinstance(state, dict):
             continue
         scope = path.parent.name if path.parent != folder else ""
-        for key, v in sorted(rows.items()):
-            if isinstance(v, dict) and isinstance(v.get("posted_at"), (int, float)):
-                found.append({"key": f"{scope}: {key}" if scope else key, "detail": str(v.get("detail", ""))[:300],
-                              "since": iso(v["posted_at"])})
+        rows = {}  # posted ("open") and confirmed-but-not-yet-posted ("held": paused or Slack failed)
+        for part, stamp in (("held", "since"), ("open", "posted_at")):
+            for key, v in (state.get(part) if isinstance(state.get(part), dict) else {}).items():
+                if isinstance(v, dict) and isinstance(v.get(stamp), (int, float)):
+                    rows[key] = (v, v[stamp])
+        for key, (v, stamp) in sorted(rows.items()):
+            found.append({"key": f"{scope}: {key}" if scope else key, "detail": str(v.get("detail", ""))[:300],
+                          "since": iso(stamp)})
     return found
 
 
@@ -112,17 +116,28 @@ SKIP = {".", "..", "lib", "worktrees"}
 
 
 def collect() -> list[dict]:
+    """One row per ~/.neo folder; several jobs on one folder (e.g. hourly + daily) share a row."""
     status = launchctl_status()
-    rows = []
+    rows: dict[str, dict] = {}
     for plist in sorted(agents_dir().glob(PREFIX + "*.plist")):
         try:
             row = _row(plist, status)
         except Exception:  # one odd job must not hide the others
             log.exception("system watches: skipping %s", plist.name)
             continue
-        if row:
-            rows.append(row)
-    return rows
+        if not row:
+            continue
+        same = rows.get(row["folder"])
+        if same is None:
+            rows[row["folder"]] = row
+            continue
+        same["id"] = min(same["id"], row["id"])
+        same["schedule"] = f"{same['schedule']}; {row['schedule']}"
+        if same["loaded"] is not None and row["loaded"] is not None:
+            same["loaded"] = same["loaded"] or row["loaded"]
+        same["last_exit"] = same["last_exit"] or row["last_exit"]  # a failure on either job shows
+        same["last_run"] = max(filter(None, [same["last_run"], row["last_run"]]), default=None)
+    return list(rows.values())
 
 
 def _row(plist: Path, status: Optional[dict[str, Optional[int]]]) -> Optional[dict]:
@@ -155,11 +170,19 @@ def _row(plist: Path, status: Optional[dict[str, Optional[int]]]) -> Optional[di
         "last_run": last_run,
         "open": len(breaches),
         "breaches": breaches[:MAX_OPEN],
+        "complete": len(breaches) <= MAX_OPEN,
     }
 
 
+def enabled() -> bool:
+    return os.environ.get("NEO_SYSTEM_WATCHES", "1") == "1"
+
+
 def listing() -> list[dict]:
-    """Cached for CACHE_SECONDS: the Watches screen polls this."""
+    """Cached for CACHE_SECONDS: the Watches screen polls this. Each refresh also turns open breaches
+    into findings (watches.sync_system), so they show as cards you can work on or dismiss."""
+    if not enabled():
+        return []
     with _lock:
         if time.time() - _cache["at"] > CACHE_SECONDS:
             try:
@@ -167,5 +190,11 @@ def listing() -> list[dict]:
             except Exception:  # never take the Watches screen down; keep the last good rows
                 log.exception("system watches: listing failed")
                 rows = _cache["rows"]
+            else:
+                from . import watches  # watches imports this module
+                try:
+                    watches.sync_system(rows)
+                except Exception:
+                    log.exception("system watches: syncing findings failed")
             _cache.update(at=time.time(), rows=rows)
         return _cache["rows"]
