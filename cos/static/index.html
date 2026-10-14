@@ -74,7 +74,8 @@
 
   .tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; background: var(--side);
     border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
-  .tabbar .row { max-width: 520px; margin: 0 auto; height: var(--tabbar); display: grid; grid-template-columns: 1fr 1fr 60px 1fr 1fr; align-items: center; }
+  .tabbar .row { max-width: 520px; margin: 0 auto; height: var(--tabbar); display: grid; grid-template-columns: repeat(5, 1fr) 60px; align-items: center; }
+  .tabbar .row > .fab { order: 1; } /* five tabs can't sit evenly around it, so it goes last */
   .tab { display: grid; justify-items: center; gap: 1px; font-size: 10.5px; font-weight: 500; color: var(--faint); padding: 6px 0; position: relative; }
   .tab svg { width: 24px; height: 24px; }
   .tab.on { color: var(--azure); }
@@ -331,9 +332,6 @@
   .ask .who a { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .ask .what { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .ask .acts .btn { height: 28px; padding: 0 10px; font-size: 13px; }
-  details.memory { margin: 4px 0 14px; }
-  details.memory > summary { cursor: pointer; color: var(--faint); font-size: 13px; list-style: none; }
-  details.memory > summary::-webkit-details-marker { display: none; }
   .memory-list { margin: 4px 0 8px; padding-left: 18px; font-size: 13.5px; line-height: 1.45; }
   .memory-list li { margin: 3px 0; }
   .ask details.info > summary { margin-top: 6px; color: var(--faint); font-size: 12.5px; cursor: pointer; list-style: none; }
@@ -611,6 +609,7 @@
     <button class="fab" id="fab" aria-label="New task"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
     <a class="tab" data-tab="work" href="#/work"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V10a3 3 0 0 0-3-3h-5M12 4.5L9.5 7 12 9.5"/></svg>PRs</a>
     <a class="tab" data-tab="runs" href="#/runs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg>History</a>
+    <a class="tab" data-tab="memory" href="#/memory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h10l3 3v15H6z"/><path d="M9 9h7M9 13h7M9 17h4"/></svg>Memory</a>
     <div class="rail" id="rail"></div>
   </div>
 </nav>
@@ -721,27 +720,30 @@ async function loadUsage() {
   try { usageData = await api("/api/usage"); } catch { /* keep the last one */ }
   return usageData;
 }
-let memoryData = null, memoryAt = 0;
+let memoryData = null, memoryAt = 0, memoryErr = null;
 async function loadMemory() {
   if (Date.now() - memoryAt < 30000) return memoryData;
   memoryAt = Date.now();
-  try { memoryData = await api("/api/memory"); } catch { /* keep the last one */ }
+  try { memoryData = await api("/api/memory"); memoryErr = null; } catch (err) { memoryErr = err.message; /* keep the last one */ }
   return memoryData;
 }
 // What neo learned from mistakes and from what you told it (cos/learn.py). Read-only here:
 // the files are plain Markdown on the Mac, edit or delete lines there.
-function memorySection(m) {
-  if (!m) return null;
-  const count = m.files.reduce((n, f) => n + f.entries.length, 0);
+function renderMemory(o) {
+  const m = memoryData;
+  const count = m ? m.files.reduce((n, f) => n + f.entries.length, 0) : 0;
   const label = { "me.md": "What you told me", "lessons.md": "Lessons from mistakes" };
-  return h("details", { class: "info memory", open: openInfo.has("memory"), ontoggle: (e) => { if (e.currentTarget.open) openInfo.add("memory"); else openInfo.delete("memory"); } },
-    h("summary", {}, count ? `What neo remembers (${count})` : "What neo remembers"),
-    count ? m.files.map((f) => [
-      h("h2", { class: "section" }, label[f.name] || `In ${f.name.replace(/^repos\//, "").replace(/\.md$/, "")}`),
-      h("ul", { class: "memory-list" }, f.entries.slice().reverse().map((e) => h("li", {}, e.text))),
-    ]) : h("p", { class: "empty" }, "Nothing yet. neo learns from mistakes in sessions you run and from what you tell it (@neo remember …)."),
-    h("p", { class: "empty" }, `Stored as Markdown in ${m.dir}`),
+  const page = h("div", { class: "wrap" },
+    h("header", { class: "hero" }, h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host), h("h1", {}, "Memory"),
+      m ? h("p", { class: "sub" }, count ? `${count} things neo remembers, newest first.` : "Nothing yet.") : null),
+    !m ? h("p", { class: "empty" }, memoryErr ? `Couldn't load memory: ${memoryErr}` : "Loading…")
+      : count ? m.files.filter((f) => f.entries.length).map((f) => [
+        h("h2", { class: "section" }, label[f.name] || `In ${f.name.replace(/^repos\//, "").replace(/\.md$/, "")}`),
+        h("ul", { class: "memory-list" }, f.entries.slice().reverse().map((e) => h("li", {}, e.text))),
+      ]) : h("p", { class: "empty" }, "neo learns from mistakes in sessions you run and from what you tell it (@neo remember …)."),
+    m ? h("p", { class: "empty" }, `Stored as Markdown in ${m.dir}`) : null,
   );
+  paint(page, "memory:" + o.host + memoryErr + JSON.stringify(memoryData));
 }
 function usageLine(u) {
   if (!u) return null;
@@ -1422,12 +1424,11 @@ function renderRuns(o) {
       results.length ? h("div", { class: "list" }, results.map(sessionRow)) : null,
       searchData.searched < searchData.total ? h("p", { class: "empty" }, `Searched the ${searchData.searched} most recent of ${searchData.total} sessions.`) : null,
     ] : [
-      memorySection(memoryData),
       segControl(HISTORY_FILTERS, () => historyFilter, (v) => { historyFilter = v; try { localStorage.setItem("historyFilter", v); } catch (e) {} paintedSig = ""; renderRuns(o); }),
       historyDays(o.runs.filter(HISTORY_MATCH[historyFilter])),
     ],
   );
-  paint(page, "runs:" + historyFilter + viewSig(o) + JSON.stringify(usageData) + JSON.stringify(memoryData) + searchQ + searchBusy + JSON.stringify(searchData && searchData.results.map((x) => x.path)));
+  paint(page, "runs:" + historyFilter + viewSig(o) + JSON.stringify(usageData) + searchQ + searchBusy + JSON.stringify(searchData && searchData.results.map((x) => x.path)));
 }
 
 // What a tab screen shows, as text. Polls repaint only when this changes, so nothing blinks,
@@ -1736,7 +1737,7 @@ function settingsSheet() {
     }), pauseHint)));
 }
 
-const RENDER = { home: (o) => renderHome(o), today: (o) => renderToday(o), runs: (o) => renderRuns(o), work: () => renderWork() };
+const RENDER = { home: (o) => renderHome(o), today: (o) => renderToday(o), runs: (o) => renderRuns(o), memory: (o) => renderMemory(o), work: () => renderWork() };
 async function tabLoop(kind, first) {
   // Show what we already know at once (no blank screen), then refresh in place.
   if (first && overview) { RENDER[kind](overview); applyRestore(false); }
@@ -1747,7 +1748,8 @@ async function tabLoop(kind, first) {
       if (!workData) renderWork(); // pull requests fill in when GitHub answers
       await loadWork().catch(() => null);
     }
-    if (kind === "runs") await Promise.all([loadUsage(), loadMemory()]);
+    if (kind === "runs") await loadUsage();
+    if (kind === "memory") await loadMemory();
     RENDER[kind](o);
     applyRestore(true);
     const live = document.getElementById("live"); if (live) live.classList.remove("stale");
@@ -2218,7 +2220,7 @@ function goBack() {
   location.hash = target;
 }
 
-function currentTab() { const r = location.hash; return r.startsWith("#/today") || r.startsWith("#/watches") ? "today" : r.startsWith("#/runs") ? "runs" : r.startsWith("#/work") ? "work" : "home"; }
+function currentTab() { const r = location.hash; return r.startsWith("#/today") || r.startsWith("#/watches") ? "today" : r.startsWith("#/runs") ? "runs" : r.startsWith("#/memory") ? "memory" : r.startsWith("#/work") ? "work" : "home"; }
 function route() {
   stopWork();
   document.querySelectorAll(".sheet, .scrim").forEach((n) => n.remove()); // navigating away closes the sheet
