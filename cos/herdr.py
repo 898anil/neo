@@ -12,10 +12,16 @@ import os
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from typing import Optional
 
 AGENT_NAME_MAX = 32
+# One start at a time per bot: every run's watcher may notice a dead server at once, and a second
+# start would kill the tmux session the first one just made.
+_START_LOCK = threading.Lock()
+_START_FAILED_AT: dict[str, float] = {}
+START_RETRY_SECONDS = 60.0
 
 
 class HerdrError(RuntimeError):
@@ -74,16 +80,16 @@ class Herdr:
 
     # --------------------------------------------------------------- session
 
-    def running(self) -> bool:
+    def running(self, timeout: float = 15) -> bool:
         try:
-            proc = self._run(["session", "list", "--json"], timeout=15)
+            proc = self._run(["session", "list", "--json"], timeout=timeout)
         except HerdrError:
             return False
         try:
-            sessions = json.loads(proc.stdout).get("sessions", [])
-        except json.JSONDecodeError:
+            sessions = json.loads(proc.stdout).get("sessions") or []
+        except (json.JSONDecodeError, AttributeError):
             return False
-        return any(s.get("name") == self.session and s.get("running") for s in sessions)
+        return any(isinstance(s, dict) and s.get("name") == self.session and s.get("running") for s in sessions)
 
     def ensure_server(self, wait_seconds: float = 15) -> None:
         """Start the session's server if needed.
@@ -94,22 +100,41 @@ class Herdr:
         """
         if self.running():
             return
+        with _START_LOCK:
+            if self.running(timeout=5):
+                return  # another watcher started it while we waited
+            failed_at = _START_FAILED_AT.get(self.session)
+            if failed_at is not None and time.monotonic() - failed_at < START_RETRY_SECONDS:
+                raise HerdrError("server_start_cooldown", f"herdr session '{self.session}' failed to start recently")
+            try:
+                self._start_server(wait_seconds)
+            except HerdrError:
+                _START_FAILED_AT[self.session] = time.monotonic()
+                raise
+            _START_FAILED_AT.pop(self.session, None)
+
+    def _start_server(self, wait_seconds: float) -> None:
         tmux = shutil.which("tmux")
         if not tmux:
             raise HerdrError("no_tmux", f"herdr session '{self.session}' is not running and tmux is not installed; run `herdr session attach {self.session}` once")
         name = f"herdr-{self.session}"
         # A stale tmux session from an earlier start would make new-session fail.
-        subprocess.run([tmux, "kill-session", "-t", name], check=False, capture_output=True)
-        subprocess.run(
-            [tmux, "new-session", "-d", "-s", name, "-x", "200", "-y", "50",
-             f"{shlex.quote(self.binary)} --session {shlex.quote(self.session)}"],
-            env=self.env,
-            check=False,
-            capture_output=True,
-        )
+        # Timeouts: callers hold _START_LOCK, so a hung tmux must not block every watcher.
+        try:
+            subprocess.run([tmux, "kill-session", "-t", name], check=False, capture_output=True, timeout=10)
+            subprocess.run(
+                [tmux, "new-session", "-d", "-s", name, "-x", "200", "-y", "50",
+                 f"{shlex.quote(self.binary)} --session {shlex.quote(self.session)}"],
+                env=self.env,
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise HerdrError("server_start_failed", f"tmux could not start herdr session '{self.session}': {exc}") from exc
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
-            if self.running():
+            if self.running(timeout=3):
                 return
             time.sleep(0.5)
         raise HerdrError("server_start_timeout", f"herdr session '{self.session}' did not start")

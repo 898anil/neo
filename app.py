@@ -37,7 +37,7 @@ import chief  # noqa: E402
 import commands  # noqa: E402
 import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
-from cos import brief as morning, fleet, settings, watches  # noqa: E402
+from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
 from cos import autonomy, learn  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, workdir  # noqa: E402
@@ -429,6 +429,14 @@ class LiveThread:
                 channel=self.channel, thread_ts=self.thread_ts,
                 text=clip(f":speech_balloon: _Sent from the dashboard or terminal:_\n{quoted}"),
             )
+        restart = (event.get("data") or {}).get("auto_restart")
+        if restart is not None:
+            # neo is about to send "continue" for an API error, or has stopped trying.
+            icon = ":warning:" if restart == "exhausted" else ":arrows_counterclockwise:"
+            await self.client.chat_postMessage(
+                channel=self.channel, thread_ts=self.thread_ts, text=clip(f"{icon} _{event.get('body', '')}_"),
+            )
+            return
         if self.reporter is None and event["kind"] == "status" and state not in ("working", "blocked"):
             # Between turns: no progress message to update.
             if state == "closed":
@@ -556,6 +564,11 @@ async def maybe_auto_rca(client, channel: str, msg: dict, via: str) -> None:
         if skip not in ("already handled", "not a new top-level post"):
             log.info("auto RCA skipped %s in %s (%s): %s", msg.get("ts"), channel, via, skip)
         return
+    if pause.is_paused():  # the alert still shows on the dashboard; no RCA is posted into its thread
+        log.info("auto RCA skipped %s in %s (%s): notifications paused", msg["ts"], channel, via)
+        ALERT_GATE.release(text)
+        chief.alert_loop(channel, msg["ts"], text, thread_url(channel, msg["ts"]))
+        return
     log.info("auto RCA for alert %s in %s (%s)", msg["ts"], channel, via)
     req = commands.parse(AUTO_RCA_PROMPT)
     transcript = await _thread_transcript(client, channel, msg["ts"], "")
@@ -628,6 +641,9 @@ async def monitor_agents(client) -> None:
         log.info("agent notifications off (set ALLOWED_USER_IDS or NEO_NOTIFY_USER)")
         return
     previous: Optional[dict[str, dict]] = None
+    # Approvals and questions that came up while notifications were paused, sent once the pause
+    # ends if the agent is still waiting: key -> "blocked" | "asks"
+    held: dict[str, str] = {}
     working_since: dict[str, float] = {}
     stuck_told: set[str] = set()
     while True:
@@ -646,7 +662,8 @@ async def monitor_agents(client) -> None:
                     if row["status"] in ("working", "unknown") and row.get("last_active"):
                         quiet = time.time() - row["last_active"]
                         episode = f"{key}@{row.get('seq')}"
-                        if quiet > STUCK_MINUTES * 60 and episode not in stuck_told and previous is not None:
+                        if (quiet > STUCK_MINUTES * 60 and episode not in stuck_told and previous is not None
+                                and not pause.is_paused()):  # told after the pause if it is still stuck
                             stuck_told.add(episode)
                             await client.chat_postMessage(channel=NOTIFY_CHANNEL or NOTIFY_USER, text=clip(
                                 f"{'<@' + NOTIFY_USER + '> ' if NOTIFY_CHANNEL else ''}:hourglass: *{row['title']}* has shown no activity for "
@@ -690,6 +707,19 @@ async def monitor_agents(client) -> None:
                             message = _notification(row, "asks")
                         elif worked >= NOTIFY_MIN_WORK_SECONDS:
                             message = _notification(row, "done")
+                    paused = pause.is_paused()
+                    if message and paused:
+                        log.info("agent notification for %s held back: notifications paused", key)
+                        if row["status"] == "blocked" or row["asks"]:
+                            held[key] = "blocked" if row["status"] == "blocked" else "asks"
+                        message = None
+                    elif not message and not paused and key in held:
+                        kind = held.pop(key)
+                        if kind == "blocked" and row["status"] == "blocked":
+                            screen = await asyncio.to_thread(Herdr(row["session"]).read, row["pane_id"], 14, "detection")
+                            message = _notification(row, "blocked", screen)
+                        elif kind == "asks" and ready and row["asks"]:
+                            message = _notification(row, "asks")
                     if message:
                         target = {"runtime": "agent", "session": row["session"], "pane_id": row["pane_id"]}
                         if NOTIFY_CHANNEL:
@@ -700,6 +730,8 @@ async def monitor_agents(client) -> None:
                             await sessions.set_thread(f"dm:{resp['ts']}", target)  # DM replies (see handle_dm)
                 except Exception:  # noqa: BLE001 - one agent's failure must not re-notify the others
                     log.exception("agent monitor failed for %s", key)
+            for gone in set(held) - set(current):
+                held.pop(gone)
             previous = current
         except Exception:  # noqa: BLE001 - keep monitoring
             log.exception("agent monitor pass failed")
@@ -730,6 +762,9 @@ async def brief_scheduler(client) -> None:
     loop = asyncio.get_running_loop()
 
     def posted(result: dict) -> None:
+        if pause.is_paused():
+            log.info("morning brief written but not posted: notifications paused")
+            return
         text = (result or {}).get("text") or "The brief could not be written; open the run in History."
         link = f"\n\n[Open the dashboard]({DASHBOARD_URL})" if DASHBOARD_URL else ""
         mention = f"<@{NOTIFY_USER}> " if NOTIFY_CHANNEL and NOTIFY_USER else ""
@@ -744,7 +779,7 @@ async def brief_scheduler(client) -> None:
                 today = now.strftime("%Y-%m-%d")
                 already = any(m.get("kind") == "brief" and m.get("source") == "schedule" and m["created_at"][:10] >= today
                               for m in list_runs(60))
-                if not already:
+                if not already and not pause.is_paused():  # held back while paused; written if the pause ends today
                     log.info("writing the morning brief")
                     await asyncio.to_thread(morning.start, "schedule", posted)
         except Exception:  # noqa: BLE001 - try again next minute
@@ -843,6 +878,9 @@ def watch_checked(client, loop):
         where = NOTIFY_CHANNEL or NOTIFY_USER
         if not where:
             return
+        if pause.is_paused():
+            log.info("watch %s findings not posted: notifications paused (still on the dashboard)", watch["id"])
+            return
         mention = f"<@{NOTIFY_USER}> " if NOTIFY_CHANNEL and NOTIFY_USER else ""
         if meta["status"] != "done":
             earlier = [m for m in list_runs(300) if m.get("kind") == "watch" and m.get("watch_id") == watch["id"] and m["id"] < meta["id"]]
@@ -859,6 +897,31 @@ def watch_checked(client, loop):
                     "Reply `@neo live fix 1` (or any instruction) in this thread to start an agent on one.")
         asyncio.run_coroutine_threadsafe(post_markdown(client, where, None, text), loop)
     return notify
+
+
+async def held_scheduler(client) -> None:
+    """Once notifications are back on, post what the scheduled ~/.neo jobs held back while paused."""
+    while True:
+        try:
+            if not pause.is_paused():
+                for item in await asyncio.to_thread(pause.take_held):
+                    try:
+                        await client.chat_postMessage(channel=item["channel"], thread_ts=item.get("thread_ts") or None,
+                                                      text=clip(f"_(held while notifications were paused)_\n{item['text']}"))
+                    except Exception as exc:  # noqa: BLE001 - keep it for the next pass, post the others
+                        try:
+                            kept = await asyncio.to_thread(pause.hold_again, item)
+                        except OSError:
+                            log.exception("held message for %s could not be put back", item["channel"])
+                            continue
+                        if kept:
+                            log.warning("held message for %s not posted (%s); trying again next minute", item["channel"], exc)
+                        else:
+                            log.error("held message for %s dropped after %d failed posts: %s",
+                                      item["channel"], pause.MAX_HELD_ATTEMPTS, exc)
+        except Exception:  # noqa: BLE001 - try again next minute
+            log.exception("posting held messages failed")
+        await asyncio.sleep(60)
 
 
 async def watch_scheduler(client) -> None:
@@ -949,6 +1012,20 @@ async def handle_control(client, channel: str, thread_ts: str, entry: Optional[d
         return
     if req.command == "watches":
         await post_markdown(client, channel, thread_ts, await asyncio.to_thread(watches_digest))
+        return
+    if req.command == "pause":
+        try:
+            seconds = pause.parse_duration(req.prompt) if req.prompt else None
+        except ValueError:
+            await say("Say `@neo pause` (until `@neo resume`), or a length like `@neo pause 30m`, `2h`, `1d`.")
+            return
+        await asyncio.to_thread(pause.pause, seconds)
+        await say(f":zipper_mouth_face: {pause.describe()} I still answer when you mention me. "
+                  "`@neo resume` to turn them back on.")
+        return
+    if req.command == "resume":
+        was = await asyncio.to_thread(pause.resume)
+        await say(":bell: Notifications are back on." if was else "Notifications were not paused.")
         return
 
     live = await live_for(client, channel, thread_ts, entry)
@@ -1041,6 +1118,12 @@ async def handle_mention(event: dict, client) -> None:
         except Exception as exc:  # noqa: BLE001 - always answer in the thread
             log.exception("%s failed for thread=%s", req.command, thread_ts)
             await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: `{req.command}` failed: `{type(exc).__name__}: {exc}`")
+        return
+
+    if req.command == "resume" and entry and not pause.is_paused():
+        req = commands.Request("run", prompt="resume")  # "carry on" for this thread's run
+    if req.command in ("pause", "resume"):
+        await handle_control(client, channel, thread_ts, entry, req)
         return
 
     if entry and entry.get("runtime") == "agent" and req.command != "help":
@@ -1232,6 +1315,7 @@ async def main() -> None:
     briefs = asyncio.create_task(brief_scheduler(app.client))  # noqa: F841
     alerts = asyncio.create_task(auto_rca(app.client))  # noqa: F841
     watchers = asyncio.create_task(watch_scheduler(app.client))  # noqa: F841
+    held = asyncio.create_task(held_scheduler(app.client))  # noqa: F841
     chief_jobs = chief.start(app.client, NOTIFY_CHANNEL, NOTIFY_USER, DASHBOARD_URL)  # noqa: F841
     RESUMED.extend(await finish_adopted_slack_runs(app.client))  # hold the tasks so they are not collected
     await resume_live_runs(app.client)

@@ -154,6 +154,9 @@ class LoopsTest(unittest.TestCase):
             self.assertFalse(self.loops.check_running())
         with patch.object(self.loops, "list_runs", return_value=[{**rows[0], "pid": os.getpid()}]):
             self.assertTrue(self.loops.check_running())
+        # waiting to auto-restart after an API error: no pid, but its owner is alive
+        with patch.object(self.loops, "list_runs", return_value=[{**rows[0], "pid": None, "retry_owner": os.getpid()}]):
+            self.assertTrue(self.loops.check_running())
 
 
     def test_repeat_regression_report_does_not_reset_the_clock(self):

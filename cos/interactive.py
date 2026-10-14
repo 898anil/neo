@@ -22,7 +22,10 @@ from typing import Callable, Optional
 from . import conclusion
 from .events import TRANSCRIPT_NORMALIZERS
 from .herdr import Herdr, HerdrError, agent_session_id
-from .runner import CLAUDE_MODE_FLAGS, MODES, Run
+from .runner import (
+    AUTO_RESTART_DELAYS, AUTO_RESTART_PROMPT, CLAUDE_MODE_FLAGS, MAX_AUTO_RESTARTS_PER_PROMPT, MODES, Run,
+    is_transient_engine_error,
+)
 
 log = logging.getLogger("cos.interactive")
 
@@ -80,6 +83,20 @@ def find_transcript(engine: str, session_id: Optional[str], cwd: str, started_at
     return None
 
 
+def engine_error_text(engine: str, raw: dict) -> Optional[str]:
+    """The text of an API error the engine wrote to its transcript, or None for other records.
+    Claude marks a request it gave up on with isApiErrorMessage; Codex logs an "error" event
+    (its "stream_error" events are its own retries in progress, not a stop)."""
+    if engine == "claude" and raw.get("type") == "assistant" and raw.get("isApiErrorMessage"):
+        content = (raw.get("message") or {}).get("content")
+        if isinstance(content, str):
+            return content
+        return "\n".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
+    if engine == "codex" and raw.get("type") == "event_msg" and (raw.get("payload") or {}).get("type") == "error":
+        return str((raw.get("payload") or {}).get("message", ""))
+    return None
+
+
 class InteractiveRun:
     def __init__(self, run: Run, herdr: Herdr, on_event: Optional[Callable[[dict], None]] = None):
         self.run = run
@@ -97,6 +114,16 @@ class InteractiveRun:
         self._started_at = time.time()
         # Set when the engine's own transcript says a turn completed (Codex task_complete).
         self._turn_completed = False
+        # A transient API error the agent stopped on, with nothing after it yet; and how many
+        # times in a row we have sent "continue" for one (reset once a turn ends cleanly).
+        self._engine_error: Optional[str] = None
+        self._auto_restarts = 0
+        self._restarts_since_human = 0  # never reset by progress: see MAX_AUTO_RESTARTS_PER_PROMPT
+        self._gave_up = False
+        self._restart_at: Optional[float] = None
+        # send() runs on Slack's thread and on this watcher's: one prompt at a time into the pane.
+        self._send_lock = threading.RLock()
+        self._polled_ok = False  # set by _watch after each good herdr read; resets the failure count
 
     # ------------------------------------------------------------ lifecycle
 
@@ -255,16 +282,25 @@ class InteractiveRun:
                 return "closed"
             raise
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, via: str = "slack") -> None:
         """Submit a prompt. herdr refuses (agent_blocked) while an approval is pending."""
+        with self._send_lock:
+            self._send(text, via)
+
+    def _send(self, text: str, via: str) -> None:
         meta = self.run.meta()
         turn = (meta.get("turns") or 0) + 1
         # Record the prompt before sending it, so it always precedes the "working" state
         # the watcher will see; listeners start a new turn on it.
         self.run.update_meta(turns=turn, status="running")
         self._turn_completed = False  # a new turn has not completed yet
+        self._engine_error, self._restart_at = None, None
+        if via == "auto-restart":
+            self._restarts_since_human += 1
+        else:
+            self._auto_restarts, self._restarts_since_human, self._gave_up = 0, 0, False
         self._sent_prompts.append(text.strip())
-        self._emit({"kind": "prompt", "title": "You", "body": text, "data": {"via": "slack"}})
+        self._emit({"kind": "prompt", "title": "You", "body": text, "data": {"via": via}})
         try:
             self.herdr.prompt(self.name, text)
         except HerdrError as exc:
@@ -445,13 +481,23 @@ class InteractiveRun:
                 continue
             if not isinstance(raw, dict):
                 continue
+            error = engine_error_text(self.engine, raw)
+            if error is not None:
+                self._engine_error = error if is_transient_engine_error(error) else None
             for event in normalize(raw):
+                if error is None and event["kind"] in ("prompt", "text", "tool_use", "tool_result"):
+                    self._engine_error = None  # the agent moved on by itself
+                    if event["kind"] == "tool_result":
+                        # A finished tool call is real progress and ends the streak. Text is not:
+                        # a response cut off mid-stream leaves partial text before its error.
+                        self._auto_restarts, self._gave_up = 0, False
                 if event["kind"] == "prompt":
                     self._turn_completed = False
                     if event["body"].strip() in self._sent_prompts:
                         self._sent_prompts.remove(event["body"].strip())
                         continue  # already recorded when we sent it
                     # Typed in the dashboard or the terminal: a new turn all the same.
+                    self._auto_restarts, self._restarts_since_human, self._gave_up, self._restart_at = 0, 0, False, None
                     turns = (self.run.meta().get("turns") or 0) + 1
                     self.run.update_meta(turns=turns, status="running")
                     event["data"] = {**(event.get("data") or {}), "via": "elsewhere"}
@@ -463,6 +509,44 @@ class InteractiveRun:
                     self._turn_completed = False
                 self._emit(event)
         self.run.update_meta(transcript_offset=self._offset)
+
+    def _maybe_auto_restart(self) -> None:
+        """The agent is idle. If it stopped on a transient API error, send "continue" after a
+        back-off: at most len(AUTO_RESTART_DELAYS) times in a row without progress, and at most
+        MAX_AUTO_RESTARTS_PER_PROMPT times between two human prompts."""
+        with self._send_lock:  # a Slack prompt in between must not see a half-made decision
+            if self._engine_error is None:
+                if self._restart_at is None and self._turn_completed:
+                    self._auto_restarts, self._gave_up = 0, False  # a clean finish ends the streak
+                self._restart_at = None
+                return
+            if (self._auto_restarts >= len(AUTO_RESTART_DELAYS)
+                    or self._restarts_since_human >= MAX_AUTO_RESTARTS_PER_PROMPT):
+                if not self._gave_up:
+                    self._gave_up, self._restart_at = True, None
+                    self._emit({"kind": "error", "title": "Auto-restart gave up",
+                                "body": f"Still failing after {self._restarts_since_human} restarts: {self._engine_error}",
+                                "data": {"auto_restart": "exhausted"}})
+                return
+            if self._restart_at is None:
+                delay = AUTO_RESTART_DELAYS[self._auto_restarts]
+                self._restart_at = time.monotonic() + delay
+                self._emit({"kind": "status", "title": "Auto-restart",
+                            "body": f"{self.engine} API error; sending \"{AUTO_RESTART_PROMPT}\" in {delay:.0f}s "
+                                    f"({self._restarts_since_human + 1}/{MAX_AUTO_RESTARTS_PER_PROMPT})",
+                            "data": {"auto_restart": self._restarts_since_human + 1, "error": self._engine_error[:500]}})
+                return
+            if time.monotonic() < self._restart_at:
+                return
+            self._auto_restarts += 1
+            error = self._engine_error
+            log.warning("run %s: %s stopped on an API error; sending %r (%d/%d)", self.run.id, self.engine,
+                        AUTO_RESTART_PROMPT, self._restarts_since_human + 1, MAX_AUTO_RESTARTS_PER_PROMPT)
+            try:
+                self._send(AUTO_RESTART_PROMPT, via="auto-restart")
+            except HerdrError:
+                # send() recorded "Prompt not delivered"; try again after the next back-off.
+                self._engine_error, self._restart_at = error, None
 
     def _last_text(self) -> str:
         last = ""
@@ -487,6 +571,24 @@ class InteractiveRun:
                 if self._watch():
                     return
                 failures = 0
+            except HerdrError as exc:
+                if self._polled_ok:  # herdr answered since the last failure: a fresh outage
+                    failures, self._polled_ok = 0, False
+                failures += 1
+                if exc.code != "server_not_running":
+                    log.exception("watcher error for run %s (attempt %d)", self.run.id, failures)
+                else:
+                    # After a reboot nothing starts herdr; without this every watcher retries forever.
+                    if failures == 1:
+                        log.warning("run %s: herdr session '%s' is down; starting it", self.run.id, self.herdr.session)
+                    try:
+                        self.herdr.ensure_server()  # herdr restores its panes; the next poll picks this run up
+                    except HerdrError as start_exc:
+                        level = logging.DEBUG if start_exc.code == "server_start_cooldown" else logging.WARNING
+                        log.log(level, "run %s: herdr did not start (attempt %d): %s", self.run.id, failures, start_exc)
+                    except Exception:  # a failed restart must not end the watcher
+                        log.exception("run %s: herdr start failed (attempt %d)", self.run.id, failures)
+                self._stop.wait(min(30, POLL_SECONDS * 2 ** min(failures, 5)))
             except Exception:  # keep watching; one bad read must not end the run's record
                 failures += 1
                 log.exception("watcher error for run %s (attempt %d)", self.run.id, failures)
@@ -499,6 +601,7 @@ class InteractiveRun:
         while not self._stop.is_set():
             self._tail()
             state = self.status()
+            self._polled_ok = True
             if state == "closed":
                 self.run.update_meta(status="closed")
                 self._emit({"kind": "status", "title": "closed", "body": "agent is gone from herdr", "data": {"status": "closed"}})
@@ -510,6 +613,7 @@ class InteractiveRun:
                 # own turn-complete event in its transcript is authoritative.
                 state = "done"
             if state == "done" and self._status == "done" or state == "idle" and self._status == "done":
+                self._maybe_auto_restart()
                 self._stop.wait(POLL_SECONDS)
                 continue
             if state != self._status:
@@ -526,5 +630,7 @@ class InteractiveRun:
                     data["turn_completed"] = True
                 self.run.update_meta(status=STATUS_MAP.get(state, "running"), agent_status=state)
                 self._emit({"kind": "status", "title": state, "body": body, "data": data})
+            if state in READY_STATES:
+                self._maybe_auto_restart()  # after the idle event, so Slack shows the error first
             self._stop.wait(POLL_SECONDS)
         return False

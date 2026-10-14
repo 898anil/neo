@@ -103,7 +103,11 @@ def repo_dir(name_with_owner: str) -> Optional[str]:
     if time.time() - _repo_dirs["at"] > 600:
         found = {}
         root = Path(workdir())
-        for child in sorted(root.iterdir()) if root.is_dir() else []:
+        try:
+            children = sorted(root.iterdir()) if root.is_dir() else []
+        except OSError:  # e.g. EINTR listing ~/Documents under launchd: keep the last map, retry next call
+            return _repo_dirs["map"].get(name_with_owner)
+        for child in children:
             if not (child / ".git").exists():
                 continue
             try:

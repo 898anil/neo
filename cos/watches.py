@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import system_watches
 from .config import workdir
 from .runner import Run, cos_home, list_runs, now_iso
 
@@ -405,7 +406,56 @@ def finish(watch: dict, run: Run, started: str) -> list[dict]:
     return new
 
 
+SYSTEM = "system:"  # watch_id prefix of findings from neo's launchd watches (cos/system_watches.py)
+
+
+def sync_system(rows: list[dict]) -> None:
+    """Mirror the system watches' open breaches into findings: a new breach becomes a "new" card, a
+    breach that cleared is marked "resolved" (unless an agent is working on it). A dismissed card stays
+    dismissed while its breach is open (neowatch then stops posting it) and comes back if it recurs."""
+    with _lock:
+        store = _findings()
+        now = now_iso()
+        changed = False
+        live: set[str] = set()
+        checked: set[str] = set()  # watches whose full breach list we have
+        present = {SYSTEM + Path(row["folder"]).name for row in rows}
+        for row in rows:
+            wid = SYSTEM + Path(row["folder"]).name
+            if row.get("complete", True):
+                checked.add(wid)
+            for b in row.get("breaches") or []:
+                key = str(b.get("key", ""))
+                if not key.strip() or len(key) > 200:  # neowatch could not match a cut key to mute it
+                    continue
+                fid = finding_id(wid, key)
+                live.add(fid)
+                what = str(b.get("detail") or "")[:4000]
+                f = store.get(fid)
+                if f is None or f.get("status") == "resolved":
+                    store[fid] = {"id": fid, "watch_id": wid, "watch": row["name"], "key": key,
+                                  "title": f"{row['name']}: {key}"[:200], "what": what, "evidence": "", "link": "",
+                                  "repo": "", "next_step": "", "severity": "medium", "status": "new",
+                                  "first_seen": b.get("since") or now, "last_seen": now,
+                                  "times_seen": (f or {}).get("times_seen", 0) + 1, "run_id": None, "work": None}
+                    changed = True
+                elif f.get("what") != what:
+                    f.update(what=what, last_seen=now)
+                    changed = True
+        for fid, f in store.items():
+            wid = str(f.get("watch_id", ""))
+            gone = (rows and wid not in present  # its job was removed, not just unreadable this time
+                    and not (system_watches.neo_dir() / wid[len(SYSTEM):]).is_dir())
+            if (wid.startswith(SYSTEM) and (wid in checked or gone) and fid not in live
+                    and f.get("status") in ("new", "dismissed")):
+                f.update(status="resolved", status_at=now)
+                changed = True
+        if changed:
+            _write("findings.json", store)
+
+
 def open_findings() -> list[dict]:
+    system_watches.listing()  # cached; brings system watch breaches into the store
     rank = {s: i for i, s in enumerate(SEVERITIES)}
     rows = [f for f in _findings().values() if f["status"] in OPEN]
     rows.sort(key=lambda f: f["last_seen"], reverse=True)
@@ -481,4 +531,4 @@ def listing() -> dict:
             "open": sum(1 for f in store.values() if f["watch_id"] == w["id"] and f["status"] in OPEN),
             "last_run": {k: last.get(k) for k in ("id", "status", "created_at", "watch_summary", "watch_found", "watch_new", "cost_usd")} if last else None,
         })
-    return {"watches": rows, "findings": open_findings(), "templates": templates()}
+    return {"watches": rows, "findings": open_findings(), "templates": templates(), "system": system_watches.listing()}

@@ -6,6 +6,7 @@ Grammar (after the @neo mention is stripped):
     keys <key> [<key> ...]                        raw keys to a live agent (e.g. `keys 2 enter`)
     default [claude|codex]                        show or set the agent used when you name none
     watches                                       what your watches found
+    pause [30m|2h|1d] | resume                    stop / restart the messages neo posts on its own
     help
 """
 
@@ -19,6 +20,7 @@ from typing import Optional
 
 from cos.autonomy import parse_apply
 from cos.learn import parse_remember
+from cos.pause import DURATION
 
 ENGINES = ("claude", "codex")
 CONTROL = ("stop", "status", "close", "approve", "deny", "help")
@@ -33,6 +35,8 @@ HELP = (
     "`@neo cwd=~/path/to/repo <task>` choose the working folder\n"
     "`@neo default codex` / `@neo default claude` set the agent used when you name none\n"
     "`@neo watches` what your watches (Sentry, production errors, ...) found and haven't been handled\n"
+    "`@neo pause` / `@neo pause 2h` stop the messages I post on my own (notifications, briefs, digests, "
+    "watch findings, auto RCA) until `@neo resume`; replies to you still come through\n"
     "`@neo remember <rule>` / `@neo remember in <repo>: <rule>` add to neo's memory; `@neo memory` show it\n"
     "`@neo apply 1 3` / `@neo apply all` in the nightly autonomy review thread: save the proposals you pick\n"
     "In a thread: reply `@neo <message>` to continue, `@neo stop` to interrupt, "
@@ -69,6 +73,13 @@ def parse(text: str) -> Request:
         return Request("watches")
     if head == "memory" and len(words) == 1:
         return Request("memory")
+    if head == "resume" and len(words) == 1:
+        return Request("resume")
+    if head == "pause" and len(words) == 1:
+        return Request("pause")
+    # `pause 2h`; anything else after `pause` is a task ("pause the deploy").
+    if head == "pause" and 2 <= len(words) <= 3 and DURATION.match("".join(words[1:]).lower()):
+        return Request("pause", prompt="".join(words[1:]).lower())  # `pause 2h`, `pause 2 hours`
     if parse_apply(text) is not None:  # `apply 1 3` in an autonomy review thread
         return Request("apply", prompt=text.strip())
     remembered = parse_remember(text)
