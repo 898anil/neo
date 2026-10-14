@@ -123,6 +123,7 @@ class InteractiveRun:
         self._restart_at: Optional[float] = None
         # send() runs on Slack's thread and on this watcher's: one prompt at a time into the pane.
         self._send_lock = threading.RLock()
+        self._polled_ok = False  # set by _watch after each good herdr read; resets the failure count
 
     # ------------------------------------------------------------ lifecycle
 
@@ -570,6 +571,24 @@ class InteractiveRun:
                 if self._watch():
                     return
                 failures = 0
+            except HerdrError as exc:
+                if self._polled_ok:  # herdr answered since the last failure: a fresh outage
+                    failures, self._polled_ok = 0, False
+                failures += 1
+                if exc.code != "server_not_running":
+                    log.exception("watcher error for run %s (attempt %d)", self.run.id, failures)
+                else:
+                    # After a reboot nothing starts herdr; without this every watcher retries forever.
+                    if failures == 1:
+                        log.warning("run %s: herdr session '%s' is down; starting it", self.run.id, self.herdr.session)
+                    try:
+                        self.herdr.ensure_server()  # herdr restores its panes; the next poll picks this run up
+                    except HerdrError as start_exc:
+                        level = logging.DEBUG if start_exc.code == "server_start_cooldown" else logging.WARNING
+                        log.log(level, "run %s: herdr did not start (attempt %d): %s", self.run.id, failures, start_exc)
+                    except Exception:  # a failed restart must not end the watcher
+                        log.exception("run %s: herdr start failed (attempt %d)", self.run.id, failures)
+                self._stop.wait(min(30, POLL_SECONDS * 2 ** min(failures, 5)))
             except Exception:  # keep watching; one bad read must not end the run's record
                 failures += 1
                 log.exception("watcher error for run %s (attempt %d)", self.run.id, failures)
@@ -582,6 +601,7 @@ class InteractiveRun:
         while not self._stop.is_set():
             self._tail()
             state = self.status()
+            self._polled_ok = True
             if state == "closed":
                 self.run.update_meta(status="closed")
                 self._emit({"kind": "status", "title": "closed", "body": "agent is gone from herdr", "data": {"status": "closed"}})
