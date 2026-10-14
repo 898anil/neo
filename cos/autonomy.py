@@ -167,19 +167,13 @@ def collect(since: datetime, root: Optional[Path] = None) -> dict:
     return {"runs": runs, "steps": steps, "failed": failed, "blocks": dict(blocks.most_common(10))}
 
 
-def _is_lesson(entry: dict, path: Path) -> bool:
-    """Only lessons neo captured itself get merged: never the owner's rules or hand-written notes."""
-    if path.name == learn.LESSONS and path.parent == learn.memory_dir():
-        return True
-    return entry.get("meta", "").split()[1:2] == ["lesson"]  # meta: "<date> <kind> <source>"
-
-
 def duplicate_groups(path: Path) -> list[list[dict]]:
     """Lessons in one memory file that only repeat a newer one, oldest first, newest last. An older
-    lesson joins a group only when it adds nothing to the group's newest wording itself, so different
-    lessons can't chain into one and a detailed lesson is never folded into a shorter one."""
+    lesson joins a group only when it adds nothing to the group's newest wording itself (no detail
+    such as a version, path or flag), so different lessons can't chain into one. Only entries
+    captured as lessons count: the owner's rules and hand-written notes are never merged."""
     groups: list[list[dict]] = []
-    for e in reversed([e for e in learn.entries(path) if _is_lesson(e, path)]):  # newest first
+    for e in reversed([e for e in learn.entries(path) if learn.is_lesson(e)]):  # newest first
         for members in groups:
             if learn.adds_little(e["text"], members[-1]["text"]):
                 members.insert(0, e)
@@ -212,7 +206,7 @@ def merge_detail(proposals: list[dict], limit: int = 3500) -> list[str]:
     lines = [f"*{p['n']}. what `apply {p['n']}` deletes* (kept wording in bold)"]
     for m in p["merges"]:
         lines.append(f"`{m['file']}` *{_slack(m['text'], 100)}*")
-        lines += [f"   ✗ {_slack(d, 100)}" for d in m["drop"]]
+        lines += [f"   drop: {_slack(d, 100)}" for d in m["drop"]]
     chunks, cur = [], ""
     for line in lines:
         if cur and len(cur) + len(line) + 1 > limit:
@@ -324,7 +318,9 @@ def nightly(now: Optional[datetime] = None, hours: int = 24) -> Optional[str]:
     with _locked():
         history = _history({"date": now.date().isoformat(), "runs": data["runs"], "stepped": stepped,
                             "buckets": dict(counts), "failed": len(data["failed"]), "blocks": sum(data["blocks"].values())})
-        save({"date": now.date().isoformat(), "proposals": proposals, "applied": [], "slack_ts": None})
+        old = load()
+        past = [t for t in [*old.get("past_threads", []), old.get("slack_ts")] if t][-60:]
+        save({"date": now.date().isoformat(), "proposals": proposals, "applied": [], "slack_ts": None, "past_threads": past})
     if not data["runs"] and not stepped and not proposals:
         return None
     return render(data, proposals, history)
@@ -367,8 +363,10 @@ def mark_posted(ts: Optional[str]) -> None:
 
 
 def is_review_thread(thread_ts: Optional[str]) -> bool:
-    ts = load().get("slack_ts")
-    return bool(ts) and thread_ts == ts
+    """Is this the thread of an autonomy review, today's or an earlier one? (An earlier one gets told
+    its numbers are stale rather than handed to an agent.)"""
+    state = load()
+    return bool(thread_ts) and thread_ts in [state.get("slack_ts"), *state.get("past_threads", [])]
 
 
 def parse_apply(text: str) -> Optional[list[int] | str]:
@@ -384,11 +382,11 @@ def apply(which: list[int] | str, thread_ts: Optional[str]) -> str:
     to say in Slack."""
     with _locked():
         state = load()
+        if not state.get("slack_ts") or thread_ts != state["slack_ts"]:
+            return "Those numbers belong to an earlier autonomy review. Reply `apply` in the latest review's thread."
         proposals = state.get("proposals") or []
         if not proposals:
-            return "There is no autonomy review with proposals to apply yet."
-        if not state.get("slack_ts") or thread_ts != state["slack_ts"]:
-            return f"Those numbers belong to the {state.get('date')} autonomy review. Reply `apply` in that review's thread."
+            return "This autonomy review has no proposals to apply."
         by_n = {p["n"]: p for p in proposals}
         chosen = sorted(by_n) if which == "all" else list(dict.fromkeys(which))
         source = f"autonomy:{state.get('date')}"
@@ -403,12 +401,15 @@ def apply(which: list[int] | str, thread_ts: Optional[str]) -> str:
             elif p["kind"] == "owner_action":
                 out.append(f"{n}: only you can do this one: {_slack(p['text'])}")
             elif p["kind"] == "merge":
-                removed = 0
+                per_file: dict[Path, list[str]] = {}
                 for m in p["merges"]:
                     rel = Path(m["file"])
                     if rel.is_absolute() or ".." in rel.parts:
                         continue
-                    removed += learn.remove(root / rel, m["drop"], keep=m["text"])
+                    present = {learn._norm(e["text"]) for e in learn.entries(root / rel)}
+                    if learn._norm(m["text"]) in present:  # a hand edit since the review must not leave no copy
+                        per_file.setdefault(root / rel, []).extend(m["drop"])
+                removed = sum(learn.remove(path, drops) for path, drops in per_file.items())
                 out.append(f"{n}: removed {removed} repeated lesson(s) from memory")
                 state.setdefault("applied", []).append(n)
             else:
