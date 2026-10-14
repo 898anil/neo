@@ -21,7 +21,7 @@ final class EnvFileTests: XCTestCase {
         var env = EnvFile(text: "# mine\nNEO_GITHUB_ORG=acme\nNEO_OWNER_NAME=Old\n")
         env["NEO_OWNER_NAME"] = "New Name"
         env["NEO_MODE"] = "full"
-        XCTAssertEqual(env.text, "# mine\nNEO_GITHUB_ORG=acme\nNEO_OWNER_NAME=\"New Name\"\nNEO_MODE=full\n")
+        XCTAssertEqual(env.text, "# mine\nNEO_GITHUB_ORG=acme\nNEO_OWNER_NAME='New Name'\nNEO_MODE=full\n")
     }
 
     func testEmptyValueRemovesKey() {
@@ -98,5 +98,11 @@ final class EnvFileTests: XCTestCase {
         let a = Backend.randomToken(), b = Backend.randomToken()
         XCTAssertEqual(a.count, 48)
         XCTAssertNotEqual(a, b)
+    }
+
+    func testQuotesSurviveARoundTrip() {
+        var env = EnvFile()
+        env["NEO_OWNER_NAME"] = "Alex \"AJ\" Doe"
+        XCTAssertEqual(EnvFile(text: env.text)["NEO_OWNER_NAME"], "Alex \"AJ\" Doe")
     }
 }

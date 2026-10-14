@@ -27,9 +27,9 @@ final class Backend {
     private var loginPath: String?
     /// Only one start / restart at a time: each one awaits, and two interleaved would spawn two children.
     private var transition: Task<Void, Never>?
-    /// The dashboard trusts plain localhost unless COS_TOKEN is set, and any local process can reach
-    /// localhost. So the app always sets a token: neo.env's COS_TOKEN, or a random one per launch.
-    private let launchToken = Backend.randomToken()
+    /// The dashboard trusts plain localhost unless COS_TOKEN is set, and any local process (or other
+    /// account) can reach localhost. So the app always sets a token: neo.env's COS_TOKEN, else one kept
+    /// in Application Support (0600) so the browser's 30-day cookie and Slack links keep working.
     private(set) var token = ""
 
     var dashboardURL: URL { URL(string: "http://127.0.0.1:\(port)/")! }
@@ -58,10 +58,12 @@ final class Backend {
     }
 
     func start() async {
+        wantRunning = true
         await serialized { await self.launch() }
     }
 
     func restart() async {
+        wantRunning = true
         await serialized {
             await self.terminateChild()
             await self.launch()
@@ -87,26 +89,25 @@ final class Backend {
         process = nil
     }
 
+    /// Chains each start/restart after the previous one, so they never interleave.
     private func serialized(_ work: @escaping @MainActor () async -> Void) async {
-        while let running = transition { await running.value }
-        let task = Task { await work() }
+        let previous = transition
+        let task = Task { await previous?.value; await work() }
         transition = task
         await task.value
-        transition = nil
+        if transition == task { transition = nil }
     }
 
     private func terminateChild() async {
         guard let p = process else { return }
-        wantRunning = false  // so exited() does not treat this as a crash
+        process = nil  // exited() ignores a child that is no longer ours, so this is not a crash
         p.terminate()
         await Task.detached { p.waitUntilExit() }.value
-        if process === p { process = nil }
     }
 
     private func launch() async {
         configured = NeoSettings.isConfigured
-        wantRunning = true
-        guard process == nil else { return }
+        guard wantRunning, process == nil else { return }
         state = .starting
         if loginPath == nil { await refreshTools() }
         // stop() may have been pressed while we were looking for the tools.
@@ -117,6 +118,10 @@ final class Backend {
             return
         }
         let settings = NeoSettings.load()
+        if let problem = settings.problem {  // neo.env can be edited by hand
+            state = .failed("Settings need fixing: \(problem)")
+            return
+        }
         port = Self.freePort(preferred: settings.port)
         slackMode = settings.slackEnabled
 
@@ -156,8 +161,10 @@ final class Backend {
         }
         env["LANG"] = env["LANG"] ?? "en_US.UTF-8"
         // Every neo setting from neo.env (the file the Settings window writes, plus anything added by hand).
-        for (key, value) in EnvFile.load(Paths.envFile).values { env[key] = value }
-        token = env["COS_TOKEN"].flatMap { $0.isEmpty ? nil : $0 } ?? launchToken
+        for (key, value) in EnvFile.load(Paths.envFile).values where !key.hasPrefix("SLACK_") {
+            env[key] = value  // Slack tokens come only from the keychain, below
+        }
+        token = env["COS_TOKEN"].flatMap { $0.isEmpty ? nil : $0 } ?? Self.storedToken()
         env["COS_TOKEN"] = token
         env["PATH"] = loginPath ?? Tools.loginPath()
         env["COS_HOME"] = Paths.home.path
@@ -240,6 +247,19 @@ final class Backend {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         return result == 0
+    }
+
+    /// The dashboard token kept across launches, created on first use.
+    nonisolated static func storedToken() -> String {
+        let url = Paths.home.appendingPathComponent("dashboard.token")
+        if let saved = try? String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           saved.count >= 32 {
+            return saved
+        }
+        let fresh = randomToken()
+        try? FileManager.default.createDirectory(at: Paths.home, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: url.path, contents: Data(fresh.utf8), attributes: [.posixPermissions: 0o600])
+        return fresh
     }
 
     nonisolated static func randomToken() -> String {

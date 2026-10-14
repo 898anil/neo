@@ -50,7 +50,7 @@ struct EnvFile: Equatable {
             let index = lines.lastIndex { Self.parse($0)?.0 == key }
             // One line per key: a pasted newline would otherwise start a second, unintended setting.
             let cleaned = (newValue ?? "").components(separatedBy: .newlines).joined()
-                .replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: .whitespaces)
             switch (index, cleaned.isEmpty) {
             case let (i?, true): lines.remove(at: i)
             case let (i?, false): lines[i] = "\(key)=\(Self.quote(cleaned))"
@@ -82,8 +82,12 @@ struct EnvFile: Equatable {
         return (key, value)
     }
 
+    /// Quoted when needed, the way python-dotenv reads it back: single quotes are literal, so a value
+    /// with a double quote is single-quoted; one with both kinds loses its single quotes.
     private static func quote(_ value: String) -> String {
-        value.contains(where: { $0 == " " || $0 == "#" }) ? "\"\(value)\"" : value
+        guard value.contains(where: { " #\"'$".contains($0) }) else { return value }
+        if !value.contains("'") { return "'\(value)'" }
+        return "\"\(value.replacingOccurrences(of: "'", with: ""))\""
     }
 }
 

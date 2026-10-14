@@ -97,7 +97,7 @@ def exit_with_parent() -> None:
     """When an app runs neo as its child (NEO_PARENT_PID, the Mac app), exit once that app is gone,
     even if it crashed or was force-quit, so no orphan keeps the port or a second Slack connection."""
     try:
-        parent = int(os.environ.get("NEO_PARENT_PID") or 0)
+        parent = int(os.environ.pop("NEO_PARENT_PID", None) or 0)  # agents we start must not inherit it
     except ValueError:
         return
     if parent <= 1:
