@@ -322,3 +322,17 @@ class RecentTurnsTest(unittest.TestCase):
         from cos.fleet import recent_turns
         events = [{"kind": "prompt", "body": "q"}, {"kind": "text", "body": "a"}]
         self.assertEqual(recent_turns(events), events)
+
+
+class RepoDirUnreadableTest(unittest.TestCase):
+    def setUp(self):
+        from cos import work
+        self.work = work
+        work._repo_dirs.update(map={"acme/app": "/old/app"}, at=0.0)
+
+    def test_unreadable_work_folder_keeps_last_map(self):
+        # launchd's python sometimes gets EINTR listing ~/Documents; the dashboard must still load.
+        with patch.object(Path, "iterdir", side_effect=InterruptedError(4, "Interrupted system call")):
+            self.assertEqual(self.work.repo_dir("acme/app"), "/old/app")
+            self.assertIsNone(self.work.repo_dir("acme/other"))
+        self.assertEqual(self.work._repo_dirs["at"], 0.0)  # not cached: retried on the next call
