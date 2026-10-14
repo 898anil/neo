@@ -48,7 +48,9 @@ struct EnvFile: Equatable {
         get { values[key] }
         set {
             let index = lines.lastIndex { Self.parse($0)?.0 == key }
-            let cleaned = newValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // One line per key: a pasted newline would otherwise start a second, unintended setting.
+            let cleaned = (newValue ?? "").components(separatedBy: .newlines).joined()
+                .replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespaces)
             switch (index, cleaned.isEmpty) {
             case let (i?, true): lines.remove(at: i)
             case let (i?, false): lines[i] = "\(key)=\(Self.quote(cleaned))"
@@ -131,6 +133,26 @@ struct NeoSettings: Equatable {
 
     var slackEnabled: Bool { !slackBotToken.isEmpty && !slackAppToken.isEmpty }
 
+    /// Slack member ids (U… or W…), comma separated. Empty means none.
+    var slackUserIdList: [String] {
+        slackUserIds.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// Why these settings cannot be saved, or nil. Slack without an allow-list would let anyone in
+    /// the workspace (guests and Slack Connect users included) run agents on this Mac.
+    var problem: String? {
+        if slackBotToken.isEmpty != slackAppToken.isEmpty { return "Slack needs both tokens, or neither." }
+        guard slackEnabled else { return nil }
+        if !slackBotToken.hasPrefix("xoxb-") { return "The bot token starts with xoxb-." }
+        if !slackAppToken.hasPrefix("xapp-") { return "The app token starts with xapp-." }
+        let ids = slackUserIdList
+        if ids.isEmpty { return "Add your Slack member id, so only you can start agents on this Mac." }
+        if let bad = ids.first(where: { $0.range(of: "^[UW][A-Z0-9]{6,}$", options: .regularExpression) == nil }) {
+            return "\(bad) is not a Slack member id (they look like U0123ABCD)."
+        }
+        return nil
+    }
+
     static func load() -> NeoSettings {
         let env = EnvFile.load(Paths.envFile)
         var s = NeoSettings()
@@ -154,10 +176,11 @@ struct NeoSettings: Equatable {
         env["NEO_DEFAULT_ENGINE"] = engine
         env["NEO_MODE"] = mode
         env["NEO_DASHBOARD_PORT"] = String(port)
-        env["ALLOWED_USER_IDS"] = slackUserIds
+        env["ALLOWED_USER_IDS"] = slackUserIdList.joined(separator: ",")
         for key in Self.slackSecretKeys { env[key] = nil }  // never on disk
+        guard Keychain.set("SLACK_BOT_TOKEN", slackBotToken), Keychain.set("SLACK_APP_TOKEN", slackAppToken) else {
+            throw NSError(domain: "Neo", code: 1, userInfo: [NSLocalizedDescriptionKey: "the keychain refused the Slack tokens"])
+        }
         try env.save(Paths.envFile)
-        Keychain.set("SLACK_BOT_TOKEN", slackBotToken)
-        Keychain.set("SLACK_APP_TOKEN", slackAppToken)
     }
 }

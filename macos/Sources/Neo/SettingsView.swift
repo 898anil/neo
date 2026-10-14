@@ -63,11 +63,8 @@ struct SettingsView: View {
                 SecureField("Bot token (xoxb-…)", text: $settings.slackBotToken)
                 SecureField("App token (xapp-…)", text: $settings.slackAppToken)
                 TextField("Allowed Slack user ids", text: $settings.slackUserIds, prompt: Text("U0123ABC, comma separated"))
-                if !settings.slackBotToken.isEmpty || !settings.slackAppToken.isEmpty, !settings.slackEnabled {
-                    Text("Both tokens are needed.").foregroundStyle(.orange)
-                } else if settings.slackEnabled, settings.slackUserIds.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Text("Add your Slack user id: without it anyone in the workspace can run agents on this Mac.")
-                        .foregroundStyle(.red)
+                if let problem = settings.problem {
+                    Text(problem).foregroundStyle(.red)
                 }
             } header: {
                 Text("Slack (optional)")
@@ -100,6 +97,7 @@ struct SettingsView: View {
                 if !firstRun { Button("Cancel") { dismissWindow() } }
                 Button(firstRun ? "Start neo" : "Save") { save() }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(settings.problem != nil)
             }
             .padding()
             .background(.bar)
@@ -125,6 +123,10 @@ struct SettingsView: View {
     }
 
     private func save() {
+        if let problem = settings.problem {
+            error = problem
+            return
+        }
         do {
             try settings.save()
         } catch {

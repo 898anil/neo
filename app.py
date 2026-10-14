@@ -40,7 +40,7 @@ from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
 from cos import learn  # noqa: E402
-from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, workdir  # noqa: E402
+from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
 from cos.runner import ENGINES, MODES, Run, cos_home, list_runs, pid_alive  # noqa: E402
@@ -84,7 +84,10 @@ _EDIT_INTERVAL = 1.5
 # Most thread replies to pull in as context (oldest kept if a thread is longer).
 _THREAD_CONTEXT_LIMIT = 50
 
-app = AsyncApp(token=os.environ["SLACK_BOT_TOKEN"])
+# Taken out of the environment: every agent this process starts inherits it, and agents read
+# untrusted text (threads, web pages, repos) that could ask them to print it.
+SLACK_APP_TOKEN = os.environ.pop("SLACK_APP_TOKEN", "")
+app = AsyncApp(token=os.environ.pop("SLACK_BOT_TOKEN"))
 
 # The bot's own user id, resolved at startup so its messages can be labelled as
 # the assistant's when reconstructing a thread transcript.
@@ -1188,6 +1191,7 @@ def _start_dashboard() -> None:
 
 async def main() -> None:
     global BOT_USER_ID
+    exit_with_parent()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if MODE not in MODES:
         raise SystemExit(f"NEO_MODE must be one of {MODES}")
@@ -1219,7 +1223,7 @@ async def main() -> None:
     chief_jobs = chief.start(app.client, NOTIFY_CHANNEL, NOTIFY_USER, DASHBOARD_URL)  # noqa: F841
     RESUMED.extend(await finish_adopted_slack_runs(app.client))  # hold the tasks so they are not collected
     await resume_live_runs(app.client)
-    handler = AsyncSocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
+    handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
     await handler.start_async()
 
 

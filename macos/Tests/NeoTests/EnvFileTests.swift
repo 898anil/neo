@@ -52,6 +52,7 @@ final class EnvFileTests: XCTestCase {
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
         _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(busy, $0, len) } }
         _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(busy, $0, &len) } }
+        XCTAssertEqual(listen(busy, 1), 0)
         let port = Int(UInt16(bigEndian: addr.sin_port))
         XCTAssertFalse(Backend.isFree(port))
         XCTAssertNotEqual(Backend.freePort(preferred: port), port)
@@ -61,5 +62,41 @@ final class EnvFileTests: XCTestCase {
         let path = Tools.loginPath()
         XCTAssertTrue(path.contains("/usr/bin"))
         XCTAssertTrue(path.contains("/opt/homebrew/bin"))
+    }
+
+    func testNewlinesCannotInjectASecondSetting() {
+        var env = EnvFile()
+        env["NEO_OWNER_NAME"] = "Alex\nCOS_TOKEN=x"
+        XCTAssertNil(env["COS_TOKEN"])
+        XCTAssertEqual(env.values.count, 1)
+    }
+
+    func testSlackNeedsAnAllowList() {
+        var s = NeoSettings()
+        XCTAssertNil(s.problem)
+        s.slackBotToken = "xoxb-1"
+        XCTAssertNotNil(s.problem)  // one token only
+        s.slackAppToken = "xapp-1"
+        XCTAssertNotNil(s.problem)  // no allowed users
+        s.slackUserIds = "U0123ABCD, nope"
+        XCTAssertNotNil(s.problem)
+        s.slackUserIds = "U0123ABCD, W0999ZZZZ"
+        XCTAssertNil(s.problem)
+        XCTAssertEqual(s.slackUserIdList, ["U0123ABCD", "W0999ZZZZ"])
+    }
+
+    @MainActor
+    func testLinksOnlyLeaveTheAppForSafeSchemesOnAClick() {
+        typealias C = WebView.Coordinator
+        XCTAssertTrue(C.shouldOpenExternally(URL(string: "https://github.com/x")!, userClicked: true))
+        XCTAssertFalse(C.shouldOpenExternally(URL(string: "https://github.com/x")!, userClicked: false))
+        XCTAssertFalse(C.shouldOpenExternally(URL(string: "file:///tmp/x.command")!, userClicked: true))
+        XCTAssertFalse(C.shouldOpenExternally(URL(string: "smb://host/share")!, userClicked: true))
+    }
+
+    func testRandomTokenIsLongAndFresh() {
+        let a = Backend.randomToken(), b = Backend.randomToken()
+        XCTAssertEqual(a.count, 48)
+        XCTAssertNotEqual(a, b)
     }
 }

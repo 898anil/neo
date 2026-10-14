@@ -12,7 +12,7 @@ struct DashboardView: View {
         Group {
             switch backend.state {
             case .running:
-                WebView(url: backend.dashboardURL)
+                WebView(url: backend.signedInURL)
             case .starting:
                 ProgressView("Starting neo…").frame(maxWidth: .infinity, maxHeight: .infinity)
             case .stopped:
@@ -70,7 +70,15 @@ struct WebView: NSViewRepresentable {
 
         private func isDashboard(_ url: URL?) -> Bool {
             guard let url else { return false }
-            return url.host == home.host && url.port == home.port
+            return url.scheme == home.scheme && url.host == home.host && url.port == home.port
+        }
+
+        /// Schemes the system may open for a link the user clicked. Anything else (file:, smb:,
+        /// custom app schemes) is refused: the page shows agent and Slack text we do not control.
+        static let externalSchemes: Set<String> = ["http", "https", "mailto", "slack", "claude", "x-github-client"]
+
+        static func shouldOpenExternally(_ url: URL, userClicked: Bool) -> Bool {
+            userClicked && externalSchemes.contains(url.scheme?.lowercased() ?? "")
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
@@ -79,15 +87,23 @@ struct WebView: NSViewRepresentable {
             if isDashboard(url) || url.scheme == "about" || url.scheme == "blob" || url.scheme == "data" {
                 return decisionHandler(.allow)
             }
-            NSWorkspace.shared.open(url)
+            let mainFrame = action.targetFrame?.isMainFrame ?? true
+            if mainFrame, Self.shouldOpenExternally(url, userClicked: action.navigationType == .linkActivated) {
+                NSWorkspace.shared.open(url)
+            }
             decisionHandler(.cancel)
         }
 
         // target=_blank / window.open: open outside, never in a second web view.
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if let url = action.request.url {
-                if isDashboard(url) { webView.load(action.request) } else { NSWorkspace.shared.open(url) }
+            guard let url = action.request.url else { return nil }
+            if isDashboard(url) {
+                webView.load(action.request)
+            } else if Self.shouldOpenExternally(url, userClicked: action.navigationType == .linkActivated
+                                                || action.navigationType == .other) {
+                // window.open from a click handler arrives as .other; the scheme list still applies.
+                NSWorkspace.shared.open(url)
             }
             return nil
         }
@@ -122,8 +138,11 @@ struct WebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            // The server can restart under us; try again shortly.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [home] in webView.load(URLRequest(url: home)) }
+            // The server can restart under us; try again shortly. A cancelled load is the user moving on.
+            guard (error as NSError).code != NSURLErrorCancelled else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [home, weak webView] in
+                webView?.load(URLRequest(url: home))
+            }
         }
     }
 }

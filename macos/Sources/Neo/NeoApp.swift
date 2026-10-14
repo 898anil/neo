@@ -93,7 +93,7 @@ struct MenuContent: View {
         Divider()
         Button("Open neo") { show("dashboard") }
             .keyboardShortcut("o")
-        Button("Open in browser") { NSWorkspace.shared.open(backend.dashboardURL) }
+        Button("Open in browser") { NSWorkspace.shared.open(backend.signedInURL) }
             .disabled(backend.state != .running)
         Divider()
         if backend.state == .running || backend.state == .starting {

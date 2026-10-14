@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import Security
 
 /// Runs neo on this Mac as a child process: the dashboard alone (`python -m cos serve`), or the
 /// Slack bot, which serves the same dashboard, when Slack tokens are set. Restarts it if it dies.
@@ -24,8 +25,21 @@ final class Backend {
     private var wantRunning = false
     private var crashes: [Date] = []
     private var loginPath: String?
+    /// Only one start / restart at a time: each one awaits, and two interleaved would spawn two children.
+    private var transition: Task<Void, Never>?
+    /// The dashboard trusts plain localhost unless COS_TOKEN is set, and any local process can reach
+    /// localhost. So the app always sets a token: neo.env's COS_TOKEN, or a random one per launch.
+    private let launchToken = Backend.randomToken()
+    private(set) var token = ""
 
     var dashboardURL: URL { URL(string: "http://127.0.0.1:\(port)/")! }
+
+    /// The dashboard with the token; the server answers by setting a cookie, so later requests carry it.
+    var signedInURL: URL {
+        var parts = URLComponents(url: dashboardURL, resolvingAgainstBaseURL: false)!
+        parts.queryItems = [URLQueryItem(name: "token", value: token)]
+        return parts.url!
+    }
 
     var statusLine: String {
         switch state {
@@ -44,11 +58,59 @@ final class Backend {
     }
 
     func start() async {
+        await serialized { await self.launch() }
+    }
+
+    func restart() async {
+        await serialized {
+            await self.terminateChild()
+            await self.launch()
+        }
+    }
+
+    func stop() {
+        wantRunning = false
+        process?.terminate()
+        process = nil
+        state = .stopped
+    }
+
+    /// Stop the child synchronously when the app quits, so no orphan keeps the port. (If the app
+    /// crashes instead, the child sees NEO_PARENT_PID disappear and exits on its own.)
+    func shutdown() {
+        wantRunning = false
+        guard let p = process else { return }
+        p.terminate()
+        let deadline = Date().addingTimeInterval(3)
+        while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+        process = nil
+    }
+
+    private func serialized(_ work: @escaping @MainActor () async -> Void) async {
+        while let running = transition { await running.value }
+        let task = Task { await work() }
+        transition = task
+        await task.value
+        transition = nil
+    }
+
+    private func terminateChild() async {
+        guard let p = process else { return }
+        wantRunning = false  // so exited() does not treat this as a crash
+        p.terminate()
+        await Task.detached { p.waitUntilExit() }.value
+        if process === p { process = nil }
+    }
+
+    private func launch() async {
         configured = NeoSettings.isConfigured
         wantRunning = true
         guard process == nil else { return }
         state = .starting
         if loginPath == nil { await refreshTools() }
+        // stop() may have been pressed while we were looking for the tools.
+        guard wantRunning, process == nil else { return }
         guard let python = Paths.bundledPython, let code = Paths.bundledCode,
               FileManager.default.isExecutableFile(atPath: python.path) else {
             state = .failed("This copy of Neo is incomplete (no bundled Python). Reinstall it.")
@@ -86,34 +148,6 @@ final class Backend {
         await waitUntilServing(p)
     }
 
-    func stop() {
-        wantRunning = false
-        process?.terminate()
-        process = nil
-        state = .stopped
-    }
-
-    func restart() async {
-        if let p = process {
-            wantRunning = false
-            p.terminate()
-            await Task.detached { p.waitUntilExit() }.value
-            process = nil
-        }
-        await start()
-    }
-
-    /// Stop the child synchronously when the app quits, so no orphan keeps the port.
-    func shutdown() {
-        wantRunning = false
-        guard let p = process else { return }
-        p.terminate()
-        let deadline = Date().addingTimeInterval(3)
-        while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
-        process = nil
-    }
-
     private func environment(_ settings: NeoSettings) -> [String: String] {
         let inherited = ProcessInfo.processInfo.environment
         var env: [String: String] = [:]
@@ -123,12 +157,15 @@ final class Backend {
         env["LANG"] = env["LANG"] ?? "en_US.UTF-8"
         // Every neo setting from neo.env (the file the Settings window writes, plus anything added by hand).
         for (key, value) in EnvFile.load(Paths.envFile).values { env[key] = value }
+        token = env["COS_TOKEN"].flatMap { $0.isEmpty ? nil : $0 } ?? launchToken
+        env["COS_TOKEN"] = token
         env["PATH"] = loginPath ?? Tools.loginPath()
         env["COS_HOME"] = Paths.home.path
         env["NEO_MEMORY_DIR"] = env["NEO_MEMORY_DIR"] ?? Paths.memory.path
         env["NEO_DASHBOARD_HOST"] = "127.0.0.1"
         env["NEO_DASHBOARD_PORT"] = String(port)
         env["NEO_DASHBOARD_URL"] = env["NEO_DASHBOARD_URL"] ?? dashboardURL.absoluteString
+        env["NEO_PARENT_PID"] = String(getpid())
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
         for tool in tools where tool.found {
@@ -145,10 +182,10 @@ final class Backend {
     private func waitUntilServing(_ p: Process) async {
         // The Slack bot connects to Slack before it serves the dashboard, so allow it longer.
         let deadline = Date().addingTimeInterval(slackMode ? 90 : 30)
-        let probe = dashboardURL.appendingPathComponent("api/runs")
+        var request = URLRequest(url: dashboardURL.appendingPathComponent("api/runs"))
+        request.timeoutInterval = 2
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         while Date() < deadline, process === p, p.isRunning {
-            var request = URLRequest(url: probe)
-            request.timeoutInterval = 2
             if let (_, response) = try? await URLSession.shared.data(for: request),
                (response as? HTTPURLResponse)?.statusCode == 200 {
                 state = .running
@@ -182,15 +219,19 @@ final class Backend {
     }
 
     /// The preferred port, or the next free one (another neo or app may hold it).
-    static func freePort(preferred: Int) -> Int {
+    nonisolated static func freePort(preferred: Int) -> Int {
         for candidate in preferred..<(preferred + 50) where isFree(candidate) { return candidate }
         return preferred
     }
 
-    static func isFree(_ port: Int) -> Bool {
+    /// Can a server listen here? SO_REUSEADDR like Python's server, so our own previous run's
+    /// TIME_WAIT connections do not push the dashboard to a new port on every restart.
+    nonisolated static func isFree(_ port: Int) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = in_port_t(UInt16(port).bigEndian)
@@ -199,5 +240,11 @@ final class Backend {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         return result == 0
+    }
+
+    nonisolated static func randomToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 24)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
     }
 }

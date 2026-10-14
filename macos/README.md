@@ -71,8 +71,12 @@ Tokens are kept in your login keychain, not on disk.
 | Log | `~/Library/Logs/Neo/neo.log` |
 | Slack tokens | login keychain, service `dev.neo.mac` |
 
-The dashboard listens on `127.0.0.1` only (port 8790, or the next free one). To reach it from your
+The dashboard listens on `127.0.0.1` only (port 8790, or the next free one) and asks for a token, so
+other programs and other accounts on the Mac cannot start agents through it. The app makes a new token
+each launch (or uses `COS_TOKEN` from `neo.env`); *Open in browser* signs you in. To reach it from your
 phone, see *Dashboard access* in the main README.
+
+Agents neo starts do not see the Slack tokens: neo removes them from its environment at startup.
 
 Uninstall: quit neo, delete `/Applications/Neo.app`, and optionally the folders above.
 

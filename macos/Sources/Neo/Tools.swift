@@ -20,9 +20,13 @@ enum Tools {
     /// PATH from the user's login shell, plus the usual install folders, without duplicates.
     static func loginPath() -> String {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let marker = "__NEO_PATH__"
-        let fromShell = run(shell, ["-l", "-c", "printf '\(marker)%s' \"$PATH\""], timeout: 8)
-            .flatMap { $0.components(separatedBy: marker).last } ?? ""
+        // `env` prints PATH the same way in every shell (fish keeps $PATH as a list); the marker
+        // skips anything a login script prints first.
+        let marker = "__NEO_ENV__"
+        let fromShell = run(shell, ["-l", "-c", "echo \(marker); /usr/bin/env"], timeout: 8)
+            .flatMap { $0.components(separatedBy: marker).last }?
+            .split(separator: "\n").first { $0.hasPrefix("PATH=") }
+            .map { String($0.dropFirst(5)) } ?? ""
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let parts = fromShell.split(separator: ":").map(String.init)
             + extraDirs.map { $0.replacingOccurrences(of: "~", with: home) }
@@ -74,15 +78,30 @@ enum Tools {
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
+        // Collect output as it arrives, so a chatty command cannot fill the pipe and stall, and a
+        // background child of a login script holding the pipe open cannot block us past the deadline.
+        let buffer = OutputBuffer()
+        out.fileHandleForReading.readabilityHandler = { buffer.append($0.availableData) }
         do { try process.run() } catch { return nil }
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
         if process.isRunning {
             process.terminate()
+            out.fileHandleForReading.readabilityHandler = nil
             return nil
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
+        Thread.sleep(forTimeInterval: 0.05)  // let the handler take the last chunk
+        out.fileHandleForReading.readabilityHandler = nil
+        let data = buffer.data
         guard process.terminationStatus == 0 else { return nil }
         return String(data: data, encoding: .utf8)
     }
+}
+
+private final class OutputBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = Data()
+
+    func append(_ chunk: Data) { lock.lock(); stored.append(chunk); lock.unlock() }
+    var data: Data { lock.lock(); defer { lock.unlock() }; return stored }
 }
