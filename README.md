@@ -14,6 +14,15 @@ It uses what the tools already do natively and adds only the glue:
 | Remote access | Tailscale |
 | Chat + push notifications | Slack (Socket Mode: no public URL) |
 
+## Screenshots
+
+The dashboard home, shown with demo data: what needs a decision, what changed since you last
+looked, what is in flight, and the alert-to-fix loop.
+
+| Light | Dark | Phone |
+|---|---|---|
+| ![Home, light](docs/screenshots/home-light.png) | ![Home, dark](docs/screenshots/home-dark.png) | ![Home on a phone](docs/screenshots/phone.png) |
+
 ## Using it
 
 **From Slack** (any channel @neo is in):

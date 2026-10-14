@@ -39,7 +39,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import learn  # noqa: E402
+from cos import autonomy, learn  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -818,6 +818,9 @@ async def handle_memory(client, channel: str, thread_ts: str, user: Optional[str
         if channel != user and not channel.startswith("D"):
             await say(":brain: Sent you my memory in a DM.")
         return
+    if req.command == "apply":
+        await say(await asyncio.to_thread(autonomy.apply, autonomy.parse_apply(req.prompt), thread_ts))
+        return
     where = await asyncio.to_thread(learn.add, req.prompt, "rule", req.repo, f"slack:{channel}/{thread_ts}")
     if not where:
         await say(":brain: I already remember that (or there was nothing to remember).")
@@ -826,6 +829,14 @@ async def handle_memory(client, channel: str, thread_ts: str, user: Optional[str
     if req.repo and where.startswith("repos/") and not await asyncio.to_thread(_known_repo, req.repo):
         note = f"\n_I don't see a repository named {req.repo} under {WORKDIR}; I'll use this note when an agent works in one with that name._"
     await say(f":brain: Saved to `{where}`. Every agent I start from now on will know it.{note}")
+
+
+async def route_apply(req, thread_ts: str):
+    """`apply 1 3` is for the autonomy review's thread only; anywhere else it is a reply to that thread's
+    agent (e.g. picking from the fixes it offered)."""
+    if req.command == "apply" and not await asyncio.to_thread(autonomy.is_review_thread, thread_ts):
+        return commands.Request("run", prompt=req.prompt)
+    return req
 
 
 def _known_repo(name: str) -> bool:
@@ -1089,7 +1100,8 @@ async def handle_mention(event: dict, client) -> None:
     log.info("mention: user=%s channel=%s thread=%s command=%s engine=%s live=%s",
              user, channel, thread_ts, req.command, req.engine, req.live)
 
-    if req.command in ("remember", "memory"):
+    req = await route_apply(req, thread_ts)
+    if req.command in ("remember", "memory", "apply"):
         try:
             await handle_memory(client, channel, thread_ts, user, req)
         except Exception as exc:  # noqa: BLE001 - always answer in the thread

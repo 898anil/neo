@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from cos.autonomy import parse_apply
 from cos.learn import parse_remember
 from cos.pause import DURATION
 
@@ -37,6 +38,7 @@ HELP = (
     "`@neo pause` / `@neo pause 2h` stop the messages I post on my own (notifications, briefs, digests, "
     "watch findings, auto RCA) until `@neo resume`; replies to you still come through\n"
     "`@neo remember <rule>` / `@neo remember in <repo>: <rule>` add to neo's memory; `@neo memory` show it\n"
+    "`@neo apply 1 3` / `@neo apply all` in the nightly autonomy review thread: save the proposals you pick\n"
     "In a thread: reply `@neo <message>` to continue, `@neo stop` to interrupt, "
     "`@neo status`, and for live runs `@neo approve` / `@neo deny` / `@neo keys ...` / `@neo close`.\n"
     "*On the go*: when any agent on the machine (yours included) needs approval, asks you something, "
@@ -78,6 +80,8 @@ def parse(text: str) -> Request:
     # `pause 2h`; anything else after `pause` is a task ("pause the deploy").
     if head == "pause" and 2 <= len(words) <= 3 and DURATION.match("".join(words[1:]).lower()):
         return Request("pause", prompt="".join(words[1:]).lower())  # `pause 2h`, `pause 2 hours`
+    if parse_apply(text) is not None:  # `apply 1 3` in an autonomy review thread
+        return Request("apply", prompt=text.strip())
     remembered = parse_remember(text)
     if remembered:
         return Request("remember", prompt=remembered[0], repo=remembered[1])
