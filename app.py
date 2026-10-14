@@ -43,7 +43,7 @@ from cos import learn  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
-from cos.runner import ENGINES, MODES, Run, list_runs, pid_alive  # noqa: E402
+from cos.runner import ENGINES, MODES, Run, cos_home, list_runs, pid_alive  # noqa: E402
 
 # Only these Slack user ids may trigger the bot. This is the security gate:
 # a triggered session runs an agent on this machine with tool access, so never
@@ -543,7 +543,7 @@ AUTO_RCA_CHANNELS = [c.strip() for c in os.environ.get("NEO_AUTO_RCA_CHANNELS", 
 AUTO_RCA_DAILY_MAX = int(os.environ.get("NEO_AUTO_RCA_DAILY_MAX", "10"))
 AUTO_RCA_POLL_SECONDS = 300
 AUTO_RCA_PROMPT = "An alert just arrived in this thread. Find the root cause (follow your RCA method) and say whether anyone needs to act."
-ALERT_GATE = AlertGate(os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_rca.json"), AUTO_RCA_DAILY_MAX)
+ALERT_GATE = AlertGate(str(cos_home() / "auto_rca.json"), AUTO_RCA_DAILY_MAX)
 
 
 async def maybe_auto_rca(client, channel: str, msg: dict, via: str) -> None:

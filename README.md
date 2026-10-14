@@ -3,6 +3,13 @@
 Run Claude Code and Codex on an always-on Mac (the Mac mini), drive them from Slack,
 and see every agent on that machine in one dashboard -- from your phone.
 
+**On a Mac and just want to try it?** Install the [neo app](macos/README.md): a menu bar app with the
+dashboard in a window, no Slack, Python or setup scripts needed.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/898anil/neo/main/macos/install.sh | bash
+```
+
 It uses what the tools already do natively and adds only the glue:
 
 | Need | Native feature used |
