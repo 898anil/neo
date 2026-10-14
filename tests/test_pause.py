@@ -85,6 +85,17 @@ class HeldMessagesTest(unittest.TestCase):
             self.assertEqual(json.loads(held.read_text()),
                              [{"channel": "C1", "thread_ts": "1.2", "text": "regressed", "_attempts": 1}])
 
+    def test_a_half_written_held_file_is_put_back_for_the_next_pass(self):
+        jobs = Path(tempfile.mkdtemp())
+        (jobs / "w").mkdir()
+        held = jobs / "w" / "held.json"
+        held.write_text('[{"channel": "C1", "te')
+        with patch.dict(os.environ, {"NEO_JOBS_DIR": str(jobs)}):
+            self.assertEqual(pause.take_held(), [])
+            self.assertTrue(held.exists())
+            held.write_text(json.dumps([{"channel": "C1", "text": "done"}]))
+            self.assertEqual([m["text"] for m in pause.take_held()], ["done"])
+
     def test_a_message_that_never_posts_is_dropped(self):
         jobs = Path(tempfile.mkdtemp())
         (jobs / "w").mkdir()

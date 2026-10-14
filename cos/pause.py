@@ -13,6 +13,7 @@ The bot posts those once the pause ends (take_held).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -88,6 +89,7 @@ def apply(choice: Optional[str]) -> dict:
     return state()
 
 
+log = logging.getLogger(__name__)
 MAX_HELD_ATTEMPTS = 5  # posts of one held message before it is dropped
 
 
@@ -106,6 +108,9 @@ def take_held() -> list[dict]:
             held = json.loads(taking.read_text())
             taking.unlink()
         except (OSError, ValueError):
+            if taking.exists() and not path.exists():
+                os.replace(taking, path)  # half-written or unreadable: put it back, try again next pass
+            log.warning("held file %s unreadable; trying again next pass", path)
             continue
         out += [{**m, "_held_in": str(path)} for m in held if isinstance(m, dict) and m.get("channel") and m.get("text")] \
             if isinstance(held, list) else []

@@ -909,7 +909,12 @@ async def held_scheduler(client) -> None:
                         await client.chat_postMessage(channel=item["channel"], thread_ts=item.get("thread_ts") or None,
                                                       text=clip(f"_(held while notifications were paused)_\n{item['text']}"))
                     except Exception as exc:  # noqa: BLE001 - keep it for the next pass, post the others
-                        if await asyncio.to_thread(pause.hold_again, item):
+                        try:
+                            kept = await asyncio.to_thread(pause.hold_again, item)
+                        except OSError:
+                            log.exception("held message for %s could not be put back", item["channel"])
+                            continue
+                        if kept:
                             log.warning("held message for %s not posted (%s); trying again next minute", item["channel"], exc)
                         else:
                             log.error("held message for %s dropped after %d failed posts: %s",
