@@ -362,6 +362,15 @@ def mark_posted(ts: Optional[str]) -> None:
             save(state)
 
 
+def withdraw_merge() -> None:
+    """The list of lessons a merge would delete didn't reach Slack: take the merge off the table."""
+    with _locked():
+        state = load()
+        if state:
+            state["proposals"] = [p for p in state.get("proposals", []) if p.get("kind") != "merge"]
+            save(state)
+
+
 def is_review_thread(thread_ts: Optional[str]) -> bool:
     """Is this the thread of an autonomy review, today's or an earlier one? (An earlier one gets told
     its numbers are stale rather than handed to an agent.)"""
