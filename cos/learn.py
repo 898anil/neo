@@ -44,6 +44,7 @@ HEADINGS = {ME: "# What you told me", LESSONS: "# Lessons from mistakes"}
 _ENTRY_RE = re.compile(r"^- (?P<text>.+?)(?:\s*<!--\s*(?P<meta>.*?)\s*-->)?\s*$")
 _REPO_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _COMMENT_RE = re.compile(r"<!-*|-*->")
+_DETAIL_RE = re.compile(r"[\d/._`-]")
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{3,}")
 RULE_OVERLAP = 0.6  # share of a rule's words that must come from the owner's own messages
 LESSON_OVERLAP = 0.75  # a lesson sharing this share of the shorter one's words with a stored one is a repeat
@@ -132,37 +133,42 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "") -> O
 
 
 def adds_little(new: str, old: str) -> bool:
-    """Does `new` say nothing `old` doesn't? At least LESSON_OVERLAP of new's words are already in old.
-    Automatic capture re-learns the same mistake in new words ("Shell is zsh ..." nine times); a longer
-    lesson that adds detail to a short one still counts as new."""
+    """Does `new` say nothing `old` doesn't? At least LESSON_OVERLAP of new's words are already in old,
+    and none of the rest is a detail (a version, path, flag, host name). Automatic capture re-learns the
+    same mistake in new words ("Shell is zsh ..." nine times); "... exit node dev-exit-1" is new."""
     wn, wo = _words(new), _words(old)
-    return len(wn) >= LESSON_MIN_WORDS and len(wo) >= LESSON_MIN_WORDS and len(wn & wo) / len(wn) >= LESSON_OVERLAP
+    if len(wn) < LESSON_MIN_WORDS or len(wo) < LESSON_MIN_WORDS:
+        return False
+    extra = wn - wo
+    return len(wn & wo) / len(wn) >= LESSON_OVERLAP and not any(_DETAIL_RE.search(w) for w in extra)
 
 
-def remove(path: Path, texts: list[str], keep: Optional[str] = None) -> int:
-    """Delete the entries with these texts from one memory file (one per text). Returns how many went.
-    With `keep`, nothing is deleted unless that wording is still in the file, so a hand edit since the
-    texts were picked can't leave no version of the note. The old file is kept as <name>.bak-<time>."""
+def is_lesson(entry: dict) -> bool:
+    """Was this entry captured as a lesson (meta "<date> lesson <source>")? Rules and hand notes aren't."""
+    return entry.get("meta", "").split()[1:2] == ["lesson"]
+
+
+def remove(path: Path, texts: list[str]) -> int:
+    """Delete the lessons with these texts from one memory file (one line per text; rules and hand
+    notes are never touched). Returns how many went. The old file is kept as <name>.bak-<time>."""
     drop = Counter(_norm(t) for t in texts)
     with _locked():
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except OSError:
             return 0
-        if keep is not None and not any(_norm(e["text"]) == _norm(keep) for e in entries(path)):
-            return 0
         kept, removed = [], 0
         for line in lines:
             m = _ENTRY_RE.match(line.strip())
             key = _norm(m.group("text")) if m else None
-            if key and drop[key] > 0 and key != _norm(keep or ""):
+            if key and drop[key] > 0 and is_lesson({"meta": m.group("meta") or ""}):
                 drop[key] -= 1
                 removed += 1
                 continue
             kept.append(line)
         if removed:
             real = path.resolve()  # write through a symlink, as add() does
-            shutil.copy2(real, real.with_name(f"{real.name}.bak-{int(time.time())}"))
+            shutil.copy2(real, real.with_name(f"{real.name}.bak-{time.time_ns()}"))
             tmp = real.with_name(real.name + ".tmp")
             tmp.write_text("".join(kept), encoding="utf-8")
             shutil.copymode(real, tmp)
