@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -89,3 +91,21 @@ def owner_fields() -> dict:
     profile = owner_profile()
     return {"owner": name, "Owner": name[:1].upper() + name[1:],
             "owner_intro": f"{name}, {profile}" if profile else name}
+
+
+def exit_with_parent() -> None:
+    """When an app runs neo as its child (NEO_PARENT_PID, the Mac app), exit once that app is gone,
+    even if it crashed or was force-quit, so no orphan keeps the port or a second Slack connection."""
+    try:
+        parent = int(os.environ.pop("NEO_PARENT_PID", None) or 0)  # agents we start must not inherit it
+    except ValueError:
+        return
+    if parent <= 1:
+        return
+
+    def watch() -> None:
+        while os.getppid() == parent:
+            time.sleep(2)
+        os._exit(0)
+
+    threading.Thread(target=watch, daemon=True, name="parent-watch").start()

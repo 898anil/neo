@@ -1,0 +1,54 @@
+name: macOS app
+
+on:
+  pull_request:
+    paths: ["macos/**", "cos/**", "app.py", "commands.py", "sessions.py", "chief.py", "prompts/**", ".github/workflows/macos-app.yml"]
+  push:
+    tags: ["app-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bd01e18f51369d5a26f1651c3cb451d3417e3bba # v6.3.1
+      - name: Swift tests
+        run: swift test --package-path macos
+      - name: Build Apple silicon
+        run: ARCH=arm64 macos/scripts/build-app.sh
+      - name: Build Intel
+        run: ARCH=x86_64 macos/scripts/build-app.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: neo-mac
+          path: |
+            macos/dist/*.dmg
+            macos/dist/*.dmg.sha256
+          if-no-files-found: error
+
+  release:
+    # Only tags publish, and only this job can write to the repository.
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: neo-mac
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "neo for Mac ${GITHUB_REF_NAME#app-v}" \
+            --notes "Install: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/macos/install.sh | bash\`, or download the DMG for your Mac (arm64 = Apple silicon, x86_64 = Intel). See [macos/README.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/macos/README.md)."
