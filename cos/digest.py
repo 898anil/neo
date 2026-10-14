@@ -45,14 +45,16 @@ def _rows(props: dict, most: int) -> dict:
 
 SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["kind", "state", "state_note", "intent", "outcome", "needs_you", "plan", "chain", "numbers",
-                 "changes", "checks", "timeline", "next", "confidence", "confidence_why", "evidence"],
+    "required": ["kind", "state", "state_note", "intent", "outcome_result", "outcome_headline", "needs_you", "plan",
+                 "chain", "numbers", "changes", "checks", "timeline", "next", "confidence", "confidence_why", "evidence"],
     "properties": {
         "kind": {"type": "string", "enum": KINDS},
         "state": {"type": "string", "enum": ["working", "needs_you", "blocked", "done", "failed", "stopped"]},
         "state_note": _S, "intent": _S, "needs_you": _S, "next": _S, "confidence_why": _S,
-        "outcome": {"type": "object", "required": ["result", "headline"], "additionalProperties": False, "properties": {
-            "result": {"type": "string", "enum": ["worked", "partial", "failed", "unclear", "pending"]}, "headline": _S}},
+        # Flat on purpose: as a nested object, outcome was where the model's StructuredOutput call most often broke
+        # into XML parameters, and the next key (needs_you) came out as a call to a tool by that name. make() nests it.
+        "outcome_result": {"type": "string", "enum": ["worked", "partial", "failed", "unclear", "pending"]},
+        "outcome_headline": _S,
         "plan": _rows({"step": _S, "status": {"type": "string", "enum": ["done", "doing", "todo", "failed", "skipped"]}, "note": _S}, 8),
         "chain": {"type": "object", "required": ["title", "nodes"], "additionalProperties": False, "properties": {
             "title": _S, "nodes": _rows({"label": _S, "detail": _S, "tone": _TONE, "via": _S}, 6)}},
@@ -80,8 +82,8 @@ Write for a phone screen: plain words, no markdown, no emoji, no sentence over 1
   blocked (stuck on something else: CI, a reviewer, access), done, failed, stopped (ended before finishing).
   state_note: at most 6 words of detail, e.g. "CI running on #8935" or "waiting on a review".
 - intent: what {owner} asked for or what the task is for, in one sentence of at most 18 words. The goal, not the steps.
-- outcome: result worked | partial | failed | unclear | pending (still going), and headline: the single most
-  useful fact about what came of it, at most 14 words. For an rca this is the root cause; for an investigation
+- outcome_result: worked | partial | failed | unclear | pending (still going), and outcome_headline: the single
+  most useful fact about what came of it, at most 14 words. For an rca this is the root cause; for an investigation
   the answer; for a fix what changed and whether it is proven.
 - needs_you: what {owner} must decide or do, at most 16 words; empty when nothing is needed.
 - plan: the agent's steps as a checklist, in order, at most 8, each at most 8 words, with status done | doing |
@@ -205,6 +207,7 @@ def make(title: str, material: str, needs_you: str = "", timeout: int = 420) -> 
     out = raw.get("structured_output") if isinstance(raw, dict) else None
     if not isinstance(out, dict) or out.get("kind") not in KINDS or not str(out.get("intent") or "").strip():
         return None
+    out["outcome"] = {"result": out.pop("outcome_result", ""), "headline": out.pop("outcome_headline", "")}
     return out
 
 
