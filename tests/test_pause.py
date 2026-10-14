@@ -81,8 +81,22 @@ class HeldMessagesTest(unittest.TestCase):
             self.assertEqual([(m["channel"], m["text"]) for m in items], [("C1", "regressed")])
             self.assertFalse(held.exists())
             self.assertEqual(pause.take_held(), [])
-            pause.hold_again(items[0])  # the post failed
-            self.assertEqual(json.loads(held.read_text()), [{"channel": "C1", "thread_ts": "1.2", "text": "regressed"}])
+            self.assertTrue(pause.hold_again(items[0]))  # the post failed
+            self.assertEqual(json.loads(held.read_text()),
+                             [{"channel": "C1", "thread_ts": "1.2", "text": "regressed", "_attempts": 1}])
+
+    def test_a_message_that_never_posts_is_dropped(self):
+        jobs = Path(tempfile.mkdtemp())
+        (jobs / "w").mkdir()
+        held = jobs / "w" / "held.json"
+        held.write_text(json.dumps([{"channel": "CGONE", "text": "x"}]))
+        with patch.dict(os.environ, {"NEO_JOBS_DIR": str(jobs)}):
+            for _ in range(pause.MAX_HELD_ATTEMPTS - 1):
+                (item,) = pause.take_held()
+                self.assertTrue(pause.hold_again(item))
+            (item,) = pause.take_held()
+            self.assertFalse(pause.hold_again(item))
+            self.assertEqual(pause.take_held(), [])
 
 
 class PauseCommandTest(unittest.TestCase):

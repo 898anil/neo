@@ -260,8 +260,9 @@ def _open_for_check(now: float) -> list[dict]:
 
 
 def check_running() -> bool:
-    return any(m.get("kind") == "loops" and m.get("status") == "running" and pid_alive(m.get("pid"))
-               for m in list_runs(40))
+    # retry_owner: a run waiting to auto-restart after an API error has no pid but is still live
+    return any(m.get("kind") == "loops" and m.get("status") == "running"
+               and (pid_alive(m.get("pid")) or pid_alive(m.get("retry_owner"))) for m in list_runs(40))
 
 
 def start_check() -> Optional[dict]:

@@ -88,6 +88,9 @@ def apply(choice: Optional[str]) -> dict:
     return state()
 
 
+MAX_HELD_ATTEMPTS = 5  # posts of one held message before it is dropped
+
+
 def jobs_dir() -> Path:
     return Path(os.environ.get("NEO_JOBS_DIR", Path.home() / ".neo"))
 
@@ -97,9 +100,11 @@ def take_held() -> list[dict]:
     Each item keeps its source file under "_held_in", so a failed post can be put back (hold_again)."""
     out = []
     for path in sorted(jobs_dir().glob("*/held.json")):
+        taking = path.with_suffix(".taking")
         try:
-            held = json.loads(path.read_text())
-            path.unlink()
+            os.replace(path, taking)  # a job appending right now writes a fresh held.json, not the one we read
+            held = json.loads(taking.read_text())
+            taking.unlink()
         except (OSError, ValueError):
             continue
         out += [{**m, "_held_in": str(path)} for m in held if isinstance(m, dict) and m.get("channel") and m.get("text")] \
@@ -107,12 +112,19 @@ def take_held() -> list[dict]:
     return out
 
 
-def hold_again(item: dict) -> None:
-    """Put a held message whose post failed back, to try again on the next pass."""
+def hold_again(item: dict) -> bool:
+    """Put a held message whose post failed back, to try again on the next pass. False when it has
+    failed MAX_HELD_ATTEMPTS times (a channel the bot can't post to): it is dropped instead."""
+    attempts = int(item.get("_attempts") or 0) + 1
+    if attempts >= MAX_HELD_ATTEMPTS:
+        return False
     path = Path(item["_held_in"])
     try:
         held = json.loads(path.read_text())
     except (OSError, ValueError):
         held = []
-    held.append({k: v for k, v in item.items() if k != "_held_in"})
-    path.write_text(json.dumps(held, indent=2))
+    held.append({**{k: v for k, v in item.items() if k != "_held_in"}, "_attempts": attempts})
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(held, indent=2))
+    os.replace(tmp, path)
+    return True
