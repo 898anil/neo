@@ -151,16 +151,35 @@ class DigestTest(unittest.TestCase):
                 start.assert_not_called()
 
     def test_build_stores_the_structured_fields(self):
-        out = {"structured_output": {**SAMPLE, "kind": "rca"}}
+        flat = {k: v for k, v in SAMPLE.items() if k != "outcome"}
+        out = {"structured_output": {**flat, "kind": "rca", "outcome_result": "partial", "outcome_headline": "h"}}
         with patch.object(self.d.cards, "load_events", return_value=[{"kind": "text", "body": "found it"}]), \
              patch.object(self.d.subprocess, "run", return_value=Proc(json.dumps(out))) as run:
             got = self.d.build(target())
         self.assertEqual((got["kind"], got["data"]["intent"]), ("rca", SAMPLE["intent"]))
         self.assertEqual(self.d.get("run:r1")["source_mtime"], NOW - 100)
+        self.assertEqual(got["data"]["outcome"], {"result": "partial", "headline": "h"})
         cmd = run.call_args[0][0]
         self.assertIn(self.d.MODEL, cmd)
         self.assertEqual(cmd[cmd.index("--tools") + 1], "")
         self.assertEqual(json.loads(cmd[cmd.index("--json-schema") + 1]), self.d.SCHEMA)
+
+    def test_schema_is_flat_where_the_call_broke_and_outcome_is_nested_back(self):
+        # A nested outcome object made the model's StructuredOutput call fall into XML parameters, and the next
+        # key came out as a call to a tool named needs_you ("No such tool available: needs_you").
+        self.assertNotIn("outcome", self.d.SCHEMA["properties"])
+        flat = {k: v for k, v in SAMPLE.items() if k != "outcome"}
+        flat.update(outcome_result="partial", outcome_headline="Gate written; tests not run yet")
+        self.assertEqual(set(flat), set(self.d.SCHEMA["required"]))
+        self.assertEqual(set(self.d.SCHEMA["required"]), set(self.d.SCHEMA["properties"]))
+        with patch.object(self.d.subprocess, "run", return_value=Proc(json.dumps({"structured_output": flat}))):
+            got = self.d.make("t", "log")
+        self.assertEqual(got, SAMPLE)
+        missing = {k: v for k, v in flat.items() if not k.startswith("outcome_")}
+        with patch.object(self.d.subprocess, "run", return_value=Proc(json.dumps({"structured_output": missing}))):
+            got = self.d.make("t", "log")
+        self.assertEqual(got["outcome"], {"result": "", "headline": ""})
+        self.assertNotIn("outcome_result", got)
 
     def test_status_draws_structured_digests_and_still_serves_old_html_cleaned(self):
         self.d.put("run:r1", {"kind": "fix", "data": SAMPLE, "source_mtime": NOW - 100, "made_at": NOW, "version": self.d.VERSION})
