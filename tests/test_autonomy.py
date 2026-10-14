@@ -100,7 +100,7 @@ class AutonomyTest(unittest.TestCase):
             text = autonomy.nightly(NOW)
         self.assertIn("stepped in 1 times across 1 runs", text)
         self.assertIn("1. rule: Merge once code review", text)
-        self.assertIn("2. tidy memory: fold 1 repeated lines into 1", text)
+        self.assertIn("2. tidy memory: drop 1 lessons that repeat a newer one (1 kept)", text)
         self.assertIn("@neo apply", text)
         self.assertFalse((learn.memory_dir() / learn.ME).exists())
         self.assertEqual(len(learn.entries(lessons)), 2)
@@ -113,6 +113,7 @@ class AutonomyTest(unittest.TestCase):
         lessons.parent.mkdir(parents=True)
         lessons.write_text("# Lessons from mistakes\n\n- old wording of the zsh lesson <!-- x -->\n- keep me <!-- y -->\n"
                            "- new wording of the zsh lesson <!-- z -->\n")
+        os.chmod(lessons, 0o600)
         autonomy.save({"date": "2026-10-14", "slack_ts": "111.1", "applied": [], "proposals": [
             {"n": 1, "kind": "rule", "text": "Merge once review approves and CI is green"},
             {"n": 2, "kind": "merge", "text": "fold 1", "merges": [
@@ -123,30 +124,94 @@ class AutonomyTest(unittest.TestCase):
         self.assertFalse((learn.memory_dir() / learn.ME).exists())  # wrong thread: nothing saved
         out = autonomy.apply("all", thread_ts="111.1")
         self.assertIn("1: saved to `me.md`", out)
-        self.assertIn("2: removed 1 repeated line", out)
+        self.assertIn("2: removed 1 repeated lesson", out)
         self.assertIn("3: only you can do this one", out)
         self.assertEqual([e["text"] for e in learn.entries(lessons)], ["keep me", "new wording of the zsh lesson"])
-        self.assertTrue(lessons.with_name("lessons.md.bak").exists())
+        self.assertTrue(list(lessons.parent.glob("lessons.md.bak-*")))
         self.assertIn("1: already applied", autonomy.apply([1], thread_ts="111.1"))
+        self.assertEqual(os.stat(lessons).st_mode & 0o777, 0o600)
+
+    def write_memory(self, name, lines):
+        from cos import learn
+        path = learn.memory_dir() / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"- {t}\n" for t in lines))
+        return path
 
     def test_two_different_lessons_do_not_chain_into_one_group(self):
-        from cos import autonomy, learn
-        path = learn.memory_dir() / learn.LESSONS
-        path.parent.mkdir(parents=True)
+        from cos import autonomy
         lines = ["dashboard index.html is served live from disk edit a copy first",
                  "dashboard index.html is served live from disk edit a copy",
                  "restart when idle must ignore runs with no pid served live",
                  "restart when idle must ignore runs with no pid"]
-        path.write_text("".join(f"- {t}\n" for t in lines))
-        groups = autonomy.duplicate_groups(path)
+        groups = autonomy.duplicate_groups(self.write_memory("lessons.md", lines))
         self.assertEqual(sorted(len(g) for g in groups), [2, 2])
         self.assertEqual({g[-1]["text"] for g in groups}, {lines[1], lines[3]})
+
+    def test_a_detailed_lesson_is_never_folded_into_a_short_newer_one(self):
+        from cos import autonomy
+        path = self.write_memory("lessons.md", [
+            "Doppler secrets need the DNS flag when running local e2e tests against staging",
+            "Doppler",
+            "Prod kubectl needs the prod exit node set first; it reverts to dev between commands, so re-set it",
+            "Prod kubectl needs the prod exit node"])
+        self.assertEqual(autonomy.duplicate_groups(path), [])
+
+    def test_owner_rules_and_hand_notes_in_repo_files_are_never_merged(self):
+        from cos import autonomy
+        same = "Run migrations with make migrate in the backend, never alembic directly"
+        path = self.write_memory("repos/backend.md", [f"{same} <!-- 2026-10-01 rule slack:1 -->", f"{same} please",
+                                                      f"{same} <!-- 2026-10-02 lesson run:a -->",
+                                                      f"{same} today <!-- 2026-10-03 lesson run:b -->"])
+        groups = autonomy.duplicate_groups(path)
+        self.assertEqual([[e["meta"] for e in g] for g in groups], [["2026-10-02 lesson run:a", "2026-10-03 lesson run:b"]])
+
+    def test_merge_keeps_everything_when_the_kept_wording_was_edited_away(self):
+        from cos import learn
+        path = self.write_memory("lessons.md", ["old copy of the zsh word split lesson", "something else entirely"])
+        self.assertEqual(learn.remove(path, ["old copy of the zsh word split lesson"], keep="new zsh word split lesson"), 0)
+        self.assertEqual(len(learn.entries(path)), 2)
+
+    def test_merge_detail_lists_every_deleted_line_in_slack_sized_parts(self):
+        from cos import autonomy
+        merges = [{"file": "lessons.md", "text": f"keep {i}", "drop": [f"drop {i} " + "x" * 80] * 3} for i in range(40)]
+        chunks = autonomy.merge_detail([{"n": 4, "kind": "merge", "merges": merges}])
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(c) <= 3500 for c in chunks))
+        self.assertEqual(sum(c.count("✗") for c in chunks), 120)
+
+    def test_model_text_cannot_ping_the_channel_or_hide_a_link(self):
+        from cos import autonomy
+        data = {"runs": 1, "steps": [], "failed": [], "blocks": {}}
+        text = autonomy.render(data, [{"n": 1, "kind": "rule", "text": "<!channel> see <https://evil|docs>", "why": "x"}], [])
+        self.assertNotIn("<!channel>", text)
+        self.assertNotIn("<https://evil", text)
+        self.assertIn("&lt;!channel&gt;", text)
+
+    def test_history_keeps_one_row_per_day(self):
+        from cos import autonomy
+        with patch.object(autonomy, "draft", return_value=[]):
+            autonomy.nightly(NOW)
+            autonomy.nightly(NOW + timedelta(hours=1))
+        rows = (Path(os.environ["NEO_AUTONOMY_DIR"]) / "history.jsonl").read_text().splitlines()
+        self.assertEqual(len(rows), 1)
+
+    def test_apply_needs_the_posted_review_thread(self):
+        from cos import autonomy, learn
+        autonomy.save({"date": "2026-10-14", "slack_ts": None, "applied": [],
+                       "proposals": [{"n": 1, "kind": "rule", "text": "Merge once review approves"}]})
+        self.assertFalse(autonomy.is_review_thread("123.4"))
+        self.assertIn("belong to the", autonomy.apply("all", thread_ts="123.4"))
+        self.assertFalse((learn.memory_dir() / learn.ME).exists())
+        autonomy.mark_posted("123.4")
+        self.assertTrue(autonomy.is_review_thread("123.4"))
+        self.assertFalse(autonomy.is_review_thread("999.9"))
 
     def test_wrong_thread_is_refused(self):
         from cos import autonomy
         autonomy.save({"date": "2026-10-14", "slack_ts": "111.1", "applied": [],
                        "proposals": [{"n": 1, "kind": "rule", "text": "x"}]})
-        self.assertIn("belong to the 2026-10-14 review", autonomy.apply([1], thread_ts="999.9"))
+        self.assertIn("belong to the 2026-10-14 autonomy review", autonomy.apply([1], thread_ts="999.9"))
 
     def test_learn_skips_a_reworded_lesson_but_not_a_reworded_rule(self):
         from cos import learn
@@ -154,6 +219,8 @@ class AutonomyTest(unittest.TestCase):
                          "lessons.md")
         self.assertIsNone(learn.add("The shell is zsh, which doesn't word-split unquoted variables: use arrays in loops", "lesson"))
         self.assertEqual(learn.add("Auto mode blocks Doppler writes; give the owner the command", "lesson"), "lessons.md")
+        self.assertEqual(learn.add("Shell is zsh, which does not word-split unquoted variables. Use arrays in loops; "
+                                   "check the backup exists before editing files", "lesson"), "lessons.md")  # adds detail
         self.assertEqual(learn.add("Use arrays in zsh loops", "rule"), "me.md")
         self.assertEqual(learn.add("Use arrays in zsh loops always", "rule"), "me.md")
 

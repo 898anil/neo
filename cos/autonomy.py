@@ -5,7 +5,8 @@ replied to (runs/<id>/meta.json + events.jsonl) and sorts each owner follow-up i
 a go-ahead neo should not have needed, a push along the ship chain, a nudge, a correction, a restart,
 or a real new ask. It also counts failed runs and permission blocks. One Claude call with no tools
 then drafts at most a few proposals: a standing rule, a lesson, or something only the owner can
-change (a permission, a credential). Near-duplicate lessons are grouped into "merge" proposals.
+change (a permission, a credential). Lessons that only repeat a newer one are proposed for deletion,
+with every line listed under the digest.
 
 Nothing changes on its own: the digest goes to Slack and the owner replies `@neo apply 1 3` (or
 `apply all`) in that thread, which runs apply() below. Each night's numbers go to history.jsonl,
@@ -14,6 +15,7 @@ so "times you stepped in per run" can be tracked over weeks.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -21,6 +23,7 @@ import re
 import subprocess
 import tempfile
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -35,7 +38,6 @@ HUMAN_SOURCES = ("slack", "cli", "dashboard")
 AUTO_PROMPTS = ("An alert just arrived in this thread.",)  # neo's own follow-ups, not the owner's
 MAX_PROPOSALS = 5
 MAX_SAMPLES = 60  # follow-ups shown to the model
-DUP_OVERLAP = 0.7  # lessons sharing this share of the shorter one's words are proposed for merging
 
 # Checked in order; the first match wins. A short reply that only says "go" is a go-ahead.
 BUCKETS = (
@@ -101,9 +103,10 @@ def bucket(text: str) -> str:
 
 def _ts(value: object) -> Optional[datetime]:
     try:
-        return datetime.fromisoformat(str(value))
+        at = datetime.fromisoformat(str(value))
     except ValueError:
         return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
 
 
 def _events(path: Path) -> list[dict]:
@@ -164,24 +167,30 @@ def collect(since: datetime, root: Optional[Path] = None) -> dict:
     return {"runs": runs, "steps": steps, "failed": failed, "blocks": dict(blocks.most_common(10))}
 
 
+def _is_lesson(entry: dict, path: Path) -> bool:
+    """Only lessons neo captured itself get merged: never the owner's rules or hand-written notes."""
+    if path.name == learn.LESSONS and path.parent == learn.memory_dir():
+        return True
+    return entry.get("meta", "").split()[1:2] == ["lesson"]  # meta: "<date> <kind> <source>"
+
+
 def duplicate_groups(path: Path) -> list[list[dict]]:
-    """Entries of one memory file that say the same thing, oldest first in each group. An entry joins a
-    group only when it matches the group's newest entry itself, so two lessons can't chain into one."""
-    groups: list[tuple[set, list[dict]]] = []
-    for e in reversed(learn.entries(path)):  # newest first: each group is led by its newest wording
-        words = learn._words(e["text"])
-        for lead, members in groups:
-            small = min(len(lead), len(words))
-            if small and len(lead & words) / small >= DUP_OVERLAP:
+    """Lessons in one memory file that only repeat a newer one, oldest first, newest last. An older
+    lesson joins a group only when it adds nothing to the group's newest wording itself, so different
+    lessons can't chain into one and a detailed lesson is never folded into a shorter one."""
+    groups: list[list[dict]] = []
+    for e in reversed([e for e in learn.entries(path) if _is_lesson(e, path)]):  # newest first
+        for members in groups:
+            if learn.adds_little(e["text"], members[-1]["text"]):
                 members.insert(0, e)
                 break
         else:
-            groups.append((words, [e]))
-    return [members for _, members in groups if len(members) > 1]
+            groups.append([e])
+    return [g for g in groups if len(g) > 1]
 
 
 def merge_proposal() -> list[dict]:
-    """One proposal that folds every group of near-identical entries into its newest wording."""
+    """One proposal that drops every lesson repeating a newer one."""
     root = learn.memory_dir()
     merges = []
     for path in [root / learn.LESSONS, *sorted((root / "repos").glob("*.md"))]:
@@ -191,8 +200,26 @@ def merge_proposal() -> list[dict]:
     if not merges:
         return []
     dropped = sum(len(m["drop"]) for m in merges)
-    return [{"kind": "merge", "merges": merges, "text": f"fold {dropped} repeated lines into {len(merges)} (newest wording kept)",
+    return [{"kind": "merge", "merges": merges, "text": f"drop {dropped} lessons that repeat a newer one ({len(merges)} kept)",
              "why": "repeats use up the memory space every agent's brief gets"}]
+
+
+def merge_detail(proposals: list[dict], limit: int = 3500) -> list[str]:
+    """Every line a merge proposal would delete, as Slack-sized replies for under the digest."""
+    p = next((p for p in proposals if p["kind"] == "merge"), None)
+    if not p:
+        return []
+    lines = [f"*{p['n']}. what `apply {p['n']}` deletes* (kept wording in bold)"]
+    for m in p["merges"]:
+        lines.append(f"`{m['file']}` *{_slack(m['text'], 100)}*")
+        lines += [f"   ✗ {_slack(d, 100)}" for d in m["drop"]]
+    chunks, cur = [], ""
+    for line in lines:
+        if cur and len(cur) + len(line) + 1 > limit:
+            chunks.append(cur)
+            cur = ""
+        cur = f"{cur}\n{line}" if cur else line
+    return chunks + [cur]
 
 
 def material(data: dict) -> str:
@@ -231,15 +258,26 @@ def draft(data: dict, timeout: int = 300) -> list[dict]:
 
 
 def _history(entry: Optional[dict] = None) -> list[dict]:
+    """Nightly numbers, one row per date (a second run on the same day replaces the first)."""
     path = autonomy_dir() / "history.jsonl"
-    if entry:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
     try:
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     except (OSError, ValueError):
-        return []
+        rows = []
+    if entry:
+        rows = [r for r in rows if r.get("date") != entry["date"]] + [entry]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        tmp.replace(path)
+    return rows
+
+
+def _slack(text: object, limit: int = 400) -> str:
+    """Model and log text in a Slack message: no mentions, no masked links, one line, clipped."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def render(data: dict, proposals: list[dict], history: list[dict]) -> str:
@@ -264,13 +302,12 @@ def render(data: dict, proposals: list[dict], history: list[dict]) -> str:
         lines.append("*Proposals*")
         for p in proposals:
             if p["kind"] == "merge":
-                biggest = max(p["merges"], key=lambda m: len(m["drop"]))
-                lines.append(f"{p['n']}. tidy memory: {p['text']}, e.g. {len(biggest['drop']) + 1}x _{biggest['text'][:90]}_")
+                lines.append(f"{p['n']}. tidy memory: {p['text']}. Every line it deletes is listed in the reply below.")
             elif p["kind"] == "owner_action":
-                lines.append(f"{p['n']}. needs you: {p['text']} ({p.get('why', '')})")
+                lines.append(f"{p['n']}. needs you: {_slack(p['text'])} ({_slack(p.get('why'), 200)})")
             else:
-                where = f" in {p['repo']}" if p.get("repo") else ""
-                lines.append(f"{p['n']}. {p['kind']}{where}: {p['text']} ({p.get('why', '')})")
+                where = f" in {_slack(p['repo'], 60)}" if p.get("repo") else ""
+                lines.append(f"{p['n']}. {p['kind']}{where}: {_slack(p['text'])} ({_slack(p.get('why'), 200)})")
         lines.append("Reply `@neo apply 1 2` (or `@neo apply all`) here to save the ones you want. Nothing changes until you do.")
     return "\n".join(lines)
 
@@ -284,9 +321,10 @@ def nightly(now: Optional[datetime] = None, hours: int = 24) -> Optional[str]:
     proposals = (draft(data) if stepped or data["failed"] or data["blocks"] else []) + merge_proposal()
     for n, p in enumerate(proposals, 1):
         p["n"] = n
-    history = _history({"date": now.date().isoformat(), "runs": data["runs"], "stepped": stepped,
-                        "buckets": dict(counts), "failed": len(data["failed"]), "blocks": sum(data["blocks"].values())})
-    save({"date": now.date().isoformat(), "proposals": proposals, "applied": [], "slack_ts": None})
+    with _locked():
+        history = _history({"date": now.date().isoformat(), "runs": data["runs"], "stepped": stepped,
+                            "buckets": dict(counts), "failed": len(data["failed"]), "blocks": sum(data["blocks"].values())})
+        save({"date": now.date().isoformat(), "proposals": proposals, "applied": [], "slack_ts": None})
     if not data["runs"] and not stepped and not proposals:
         return None
     return render(data, proposals, history)
@@ -307,11 +345,30 @@ def save(state: dict) -> None:
     tmp.replace(path)
 
 
+@contextmanager
+def _locked():
+    """One writer of proposals.json at a time: the nightly job, its post, and `apply` from Slack."""
+    autonomy_dir().mkdir(parents=True, exist_ok=True)
+    with open(autonomy_dir() / ".lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def mark_posted(ts: Optional[str]) -> None:
-    state = load()
-    if state and ts:
-        state["slack_ts"] = ts
-        save(state)
+    """Tie the saved proposals to the digest's Slack thread; `apply` works only there."""
+    with _locked():
+        state = load()
+        if state and ts:
+            state["slack_ts"] = ts
+            save(state)
+
+
+def is_review_thread(thread_ts: Optional[str]) -> bool:
+    ts = load().get("slack_ts")
+    return bool(ts) and thread_ts == ts
 
 
 def parse_apply(text: str) -> Optional[list[int] | str]:
@@ -322,33 +379,41 @@ def parse_apply(text: str) -> Optional[list[int] | str]:
     return "all" if m.group(1).lower() == "all" else [int(x) for x in re.findall(r"\d+", m.group(1))]
 
 
-def apply(which: list[int] | str, thread_ts: Optional[str] = None) -> str:
-    """Save the chosen proposals of the latest review. Returns what to say in Slack."""
-    state = load()
-    proposals = state.get("proposals") or []
-    if not proposals:
-        return "There is no autonomy review with proposals to apply yet."
-    if thread_ts and state.get("slack_ts") and thread_ts != state["slack_ts"]:
-        return f"Those numbers belong to the {state.get('date')} review. Reply `apply` in that review's thread."
-    by_n = {p["n"]: p for p in proposals}
-    chosen = sorted(by_n) if which == "all" else list(dict.fromkeys(which))
-    source = f"autonomy:{state.get('date')}"
-    out = []
-    for n in chosen:
-        p = by_n.get(n)
-        if p is None:
-            out.append(f"{n}: no such proposal")
-        elif n in state.get("applied", []):
-            out.append(f"{n}: already applied")
-        elif p["kind"] == "owner_action":
-            out.append(f"{n}: only you can do this one: {p['text']}")
-        elif p["kind"] == "merge":
-            removed = sum(learn.remove(learn.memory_dir() / m["file"], m["drop"]) for m in p["merges"])
-            out.append(f"{n}: removed {removed} repeated line(s) from memory")
-            state.setdefault("applied", []).append(n)
-        else:
-            where = learn.add(p["text"], p["kind"], repo=p.get("repo") or None, source=f"{source}#{n}")
-            out.append(f"{n}: saved to `{where}`" if where else f"{n}: already in memory")
-            state.setdefault("applied", []).append(n)
-    save(state)
+def apply(which: list[int] | str, thread_ts: Optional[str]) -> str:
+    """Save the chosen proposals of the latest review, asked for in that review's thread. Returns what
+    to say in Slack."""
+    with _locked():
+        state = load()
+        proposals = state.get("proposals") or []
+        if not proposals:
+            return "There is no autonomy review with proposals to apply yet."
+        if not state.get("slack_ts") or thread_ts != state["slack_ts"]:
+            return f"Those numbers belong to the {state.get('date')} autonomy review. Reply `apply` in that review's thread."
+        by_n = {p["n"]: p for p in proposals}
+        chosen = sorted(by_n) if which == "all" else list(dict.fromkeys(which))
+        source = f"autonomy:{state.get('date')}"
+        root = learn.memory_dir()
+        out = []
+        for n in chosen:
+            p = by_n.get(n)
+            if p is None:
+                out.append(f"{n}: no such proposal")
+            elif n in state.get("applied", []):
+                out.append(f"{n}: already applied")
+            elif p["kind"] == "owner_action":
+                out.append(f"{n}: only you can do this one: {_slack(p['text'])}")
+            elif p["kind"] == "merge":
+                removed = 0
+                for m in p["merges"]:
+                    rel = Path(m["file"])
+                    if rel.is_absolute() or ".." in rel.parts:
+                        continue
+                    removed += learn.remove(root / rel, m["drop"], keep=m["text"])
+                out.append(f"{n}: removed {removed} repeated lesson(s) from memory")
+                state.setdefault("applied", []).append(n)
+            else:
+                where = learn.add(p["text"], p["kind"], repo=p.get("repo") or None, source=f"{source}#{n}")
+                out.append(f"{n}: saved to `{where}`" if where else f"{n}: already in memory")
+                state.setdefault("applied", []).append(n)
+        save(state)
     return ":brain: " + "\n".join(out)

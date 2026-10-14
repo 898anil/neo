@@ -26,7 +26,9 @@ import fcntl
 import os
 import re
 import subprocess
+import shutil
 import threading
+import time
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -111,7 +113,7 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "") -> O
         path = memory_dir() / (ME if kind == "rule" else LESSONS)
     meta = " ".join(x for x in (date.today().isoformat(), kind, _clean(source)[:80]) if x)
     with _locked():
-        if any(_norm(e["text"]) == _norm(text) or (kind == "lesson" and _same_lesson(e["text"], text)) for e in entries(path)):
+        if any(_norm(e["text"]) == _norm(text) or (kind == "lesson" and adds_little(text, e["text"])) for e in entries(path)):
             return None
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -129,36 +131,41 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "") -> O
     return str(path.relative_to(memory_dir()))
 
 
-def _same_lesson(a: str, b: str) -> bool:
-    """Automatic capture re-learns the same mistake in new words ("Shell is zsh ..." nine times)."""
-    wa, wb = _words(a), _words(b)
-    small = min(len(wa), len(wb))
-    return small >= LESSON_MIN_WORDS and len(wa & wb) / small >= LESSON_OVERLAP
+def adds_little(new: str, old: str) -> bool:
+    """Does `new` say nothing `old` doesn't? At least LESSON_OVERLAP of new's words are already in old.
+    Automatic capture re-learns the same mistake in new words ("Shell is zsh ..." nine times); a longer
+    lesson that adds detail to a short one still counts as new."""
+    wn, wo = _words(new), _words(old)
+    return len(wn) >= LESSON_MIN_WORDS and len(wo) >= LESSON_MIN_WORDS and len(wn & wo) / len(wn) >= LESSON_OVERLAP
 
 
-def remove(path: Path, texts: list[str]) -> int:
+def remove(path: Path, texts: list[str], keep: Optional[str] = None) -> int:
     """Delete the entries with these texts from one memory file (one per text). Returns how many went.
-    The previous file is kept next to it as <name>.bak."""
+    With `keep`, nothing is deleted unless that wording is still in the file, so a hand edit since the
+    texts were picked can't leave no version of the note. The old file is kept as <name>.bak-<time>."""
     drop = Counter(_norm(t) for t in texts)
     with _locked():
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except OSError:
             return 0
+        if keep is not None and not any(_norm(e["text"]) == _norm(keep) for e in entries(path)):
+            return 0
         kept, removed = [], 0
         for line in lines:
             m = _ENTRY_RE.match(line.strip())
             key = _norm(m.group("text")) if m else None
-            if key and drop[key] > 0:
+            if key and drop[key] > 0 and key != _norm(keep or ""):
                 drop[key] -= 1
                 removed += 1
                 continue
             kept.append(line)
         if removed:
             real = path.resolve()  # write through a symlink, as add() does
-            real.with_name(real.name + ".bak").write_text("".join(lines), encoding="utf-8")
+            shutil.copy2(real, real.with_name(f"{real.name}.bak-{int(time.time())}"))
             tmp = real.with_name(real.name + ".tmp")
             tmp.write_text("".join(kept), encoding="utf-8")
+            shutil.copymode(real, tmp)
             tmp.replace(real)
     return removed
 

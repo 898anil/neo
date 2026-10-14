@@ -796,6 +796,14 @@ async def handle_memory(client, channel: str, thread_ts: str, user: Optional[str
     await say(f":brain: Saved to `{where}`. Every agent I start from now on will know it.{note}")
 
 
+async def route_apply(req, thread_ts: str):
+    """`apply 1 3` is for the autonomy review's thread only; anywhere else it is a reply to that thread's
+    agent (e.g. picking from the fixes it offered)."""
+    if req.command == "apply" and not await asyncio.to_thread(autonomy.is_review_thread, thread_ts):
+        return commands.Request("run", prompt=req.prompt)
+    return req
+
+
 def _known_repo(name: str) -> bool:
     root = Path(WORKDIR)
     return any(p.name == name for p in [root, *root.glob("*"), *root.glob("*/*")] if (p / ".git").exists())
@@ -1023,6 +1031,7 @@ async def handle_mention(event: dict, client) -> None:
     log.info("mention: user=%s channel=%s thread=%s command=%s engine=%s live=%s",
              user, channel, thread_ts, req.command, req.engine, req.live)
 
+    req = await route_apply(req, thread_ts)
     if req.command in ("remember", "memory", "apply"):
         try:
             await handle_memory(client, channel, thread_ts, user, req)

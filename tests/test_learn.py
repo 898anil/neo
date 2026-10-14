@@ -313,6 +313,21 @@ class SlackMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c for c, t in client.posts if "db-7" in t], ["UOWNER"])
         self.assertTrue(any(c == "C1" and "DM" in t for c, t in client.posts))
 
+    async def test_apply_runs_only_in_the_review_thread_and_only_for_the_owner(self):
+        import commands
+        from cos import autonomy
+        with patch.dict(os.environ, {"NEO_AUTONOMY_DIR": str(self.dir / "review")}):
+            autonomy.save({"date": "2026-10-14", "slack_ts": "5.5", "applied": [],
+                           "proposals": [{"n": 1, "kind": "rule", "text": "Merge once review approves"}]})
+            req = commands.parse("apply all")
+            self.assertEqual((await self.app.route_apply(req, "9.9")).command, "run")  # an agent's thread: its reply
+            self.assertEqual((await self.app.route_apply(req, "5.5")).command, "apply")
+            client = self.Client()
+            await self.app.handle_memory(client, "C1", "5.5", "USTRANGER", req)
+            self.assertFalse((self.dir / "me.md").exists())
+            await self.app.handle_memory(client, "C1", "5.5", "UOWNER", req)
+            self.assertIn("Merge once review approves", (self.dir / "me.md").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
