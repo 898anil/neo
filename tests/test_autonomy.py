@@ -204,6 +204,19 @@ class AutonomyTest(unittest.TestCase):
                          [["Before kubectl against prod, enable the Tailscale exit node first",
                            "Before kubectl against prod, enable the Tailscale exit node dev-exit-1 first"]])
 
+    def test_a_full_stop_is_not_a_detail_but_a_flag_or_version_is(self):
+        from cos import learn
+        old = "Shell is zsh which does not split unquoted variables so use arrays in loops"
+        self.assertTrue(learn.adds_little(old + ".", old))
+        self.assertFalse(learn.adds_little(old + " with --base-ref", old))
+        self.assertFalse(learn.adds_little(old + " on v0.1223.9", old))
+
+    def test_a_withdrawn_merge_cannot_be_applied(self):
+        from cos import autonomy
+        self.review([{"n": 1, "kind": "merge", "text": "t", "merges": []}, {"n": 2, "kind": "rule", "text": "x"}])
+        autonomy.withdraw_merge()
+        self.assertIn("1: no such proposal", autonomy.apply([1], "1.1"))
+
     def test_apply_in_an_older_review_thread_is_told_it_is_stale_not_run_as_a_task(self):
         from cos import autonomy
         self.review([{"n": 1, "kind": "rule", "text": "x"}])
