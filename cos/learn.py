@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import threading
+from collections import Counter
 from datetime import date
 from pathlib import Path
 from contextlib import contextmanager
@@ -43,6 +44,8 @@ _REPO_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _COMMENT_RE = re.compile(r"<!-*|-*->")
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{3,}")
 RULE_OVERLAP = 0.6  # share of a rule's words that must come from the owner's own messages
+LESSON_OVERLAP = 0.75  # a lesson sharing this share of the shorter one's words with a stored one is a repeat
+LESSON_MIN_WORDS = 5  # shorter lessons are too short to judge by overlap
 _lock = threading.RLock()
 
 
@@ -108,7 +111,7 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "") -> O
         path = memory_dir() / (ME if kind == "rule" else LESSONS)
     meta = " ".join(x for x in (date.today().isoformat(), kind, _clean(source)[:80]) if x)
     with _locked():
-        if any(_norm(e["text"]) == _norm(text) for e in entries(path)):
+        if any(_norm(e["text"]) == _norm(text) or (kind == "lesson" and _same_lesson(e["text"], text)) for e in entries(path)):
             return None
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -124,6 +127,40 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "") -> O
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"{lead}- {text} <!-- {meta} -->\n")
     return str(path.relative_to(memory_dir()))
+
+
+def _same_lesson(a: str, b: str) -> bool:
+    """Automatic capture re-learns the same mistake in new words ("Shell is zsh ..." nine times)."""
+    wa, wb = _words(a), _words(b)
+    small = min(len(wa), len(wb))
+    return small >= LESSON_MIN_WORDS and len(wa & wb) / small >= LESSON_OVERLAP
+
+
+def remove(path: Path, texts: list[str]) -> int:
+    """Delete the entries with these texts from one memory file (one per text). Returns how many went.
+    The previous file is kept next to it as <name>.bak."""
+    drop = Counter(_norm(t) for t in texts)
+    with _locked():
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except OSError:
+            return 0
+        kept, removed = [], 0
+        for line in lines:
+            m = _ENTRY_RE.match(line.strip())
+            key = _norm(m.group("text")) if m else None
+            if key and drop[key] > 0:
+                drop[key] -= 1
+                removed += 1
+                continue
+            kept.append(line)
+        if removed:
+            real = path.resolve()  # write through a symlink, as add() does
+            real.with_name(real.name + ".bak").write_text("".join(lines), encoding="utf-8")
+            tmp = real.with_name(real.name + ".tmp")
+            tmp.write_text("".join(kept), encoding="utf-8")
+            tmp.replace(real)
+    return removed
 
 
 def repo_of(cwd: Optional[str]) -> Optional[str]:

@@ -39,7 +39,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import learn  # noqa: E402
+from cos import autonomy, learn  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -783,6 +783,9 @@ async def handle_memory(client, channel: str, thread_ts: str, user: Optional[str
         if channel != user and not channel.startswith("D"):
             await say(":brain: Sent you my memory in a DM.")
         return
+    if req.command == "apply":
+        await say(await asyncio.to_thread(autonomy.apply, autonomy.parse_apply(req.prompt), thread_ts))
+        return
     where = await asyncio.to_thread(learn.add, req.prompt, "rule", req.repo, f"slack:{channel}/{thread_ts}")
     if not where:
         await say(":brain: I already remember that (or there was nothing to remember).")
@@ -1020,7 +1023,7 @@ async def handle_mention(event: dict, client) -> None:
     log.info("mention: user=%s channel=%s thread=%s command=%s engine=%s live=%s",
              user, channel, thread_ts, req.command, req.engine, req.live)
 
-    if req.command in ("remember", "memory"):
+    if req.command in ("remember", "memory", "apply"):
         try:
             await handle_memory(client, channel, thread_ts, user, req)
         except Exception as exc:  # noqa: BLE001 - always answer in the thread
