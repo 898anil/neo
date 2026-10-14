@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
-_STORE_PATH = Path(__file__).with_name("sessions.json")
+from cos.runner import cos_home
+
+_STORE_PATH = cos_home() / "sessions.json"
 _lock = asyncio.Lock()
 
 

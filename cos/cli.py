@@ -101,8 +101,10 @@ def cmd_tail(args) -> int:
 
 
 def cmd_serve(args) -> int:
+    from .config import exit_with_parent
     from .server import serve
 
+    exit_with_parent()
     serve(args.host, args.port)
     return 0
 
