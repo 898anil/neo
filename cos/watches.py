@@ -493,15 +493,7 @@ def finding_cwd(f: dict) -> str:
     from .work import repo_dir
 
     repo = (f.get("repo") or "").strip()
-    if "/" in repo:
-        found = repo_dir(repo)
-        if found:
-            return found
-    if repo:
-        candidate = Path(workdir()) / repo.split("/")[-1]
-        if (candidate / ".git").exists():
-            return str(candidate)
-    return workdir()
+    return (repo_dir(repo) if repo else None) or workdir()  # cached: never touches the disk per finding
 
 
 def task_prompt(f: dict) -> str:

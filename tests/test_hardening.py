@@ -328,11 +328,38 @@ class RepoDirUnreadableTest(unittest.TestCase):
     def setUp(self):
         from cos import work
         self.work = work
-        work._repo_dirs.update(map={"acme/app": "/old/app"}, at=0.0)
+        work._repo_dirs.update(map={"acme/app": "/old/app"}, names={"app": "/old/app"}, at=0.0, scanning=False)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = patch.object(work, "workdir", return_value=tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def wait_for_scan(self):
+        deadline = time.time() + 5
+        while self.work._repo_dirs["scanning"] and time.time() < deadline:
+            time.sleep(0.01)
 
     def test_unreadable_work_folder_keeps_last_map(self):
         # launchd's python sometimes gets EINTR listing ~/Documents; the dashboard must still load.
         with patch.object(Path, "iterdir", side_effect=InterruptedError(4, "Interrupted system call")):
             self.assertEqual(self.work.repo_dir("acme/app"), "/old/app")
             self.assertIsNone(self.work.repo_dir("acme/other"))
-        self.assertEqual(self.work._repo_dirs["at"], 0.0)  # not cached: retried on the next call
+            self.wait_for_scan()
+        self.assertEqual(self.work.repo_dir("acme/app"), "/old/app")
+        self.assertGreater(self.work._repo_dirs["at"], 0.0)  # the miss is cached: no rescan on every poll
+
+    def test_hung_work_folder_does_not_block_the_caller(self):
+        # Or the listing never returns (macOS privacy waiting on ~/Documents): every dashboard poll hung.
+        release = threading.Event()
+        with patch.object(Path, "iterdir", side_effect=lambda *a: release.wait(10) and iter(())):
+            started = time.time()
+            self.assertEqual(self.work.repo_dir("acme/app"), "/old/app")
+            self.assertEqual(self.work.repo_dir("acme/app"), "/old/app")  # still one scan, not two
+            self.assertLess(time.time() - started, 1)
+            release.set()
+            self.wait_for_scan()
+
+    def test_falls_back_to_a_folder_named_like_the_repo(self):
+        self.assertEqual(self.work.repo_dir("someone-else/app"), "/old/app")
+        self.assertIsNone(self.work.repo_dir("someone-else/app", by_name=False))
