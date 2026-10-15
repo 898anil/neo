@@ -751,7 +751,7 @@ function reviewSection(rv) {
   if (!rv) return null;
   const open = rv.proposals.filter((p) => !p.applied && p.kind !== "owner_action");
   const counts = Object.entries(rv.buckets).map(([k, v]) => `${v} ${k}`).join(" · ");
-  const extra = [rv.failed ? `${rv.failed} runs failed` : "", rv.blocks ? `${rv.blocks} permission blocks` : ""].filter(Boolean).join(", ");
+  const extra = [rv.failed ? `${rv.failed} run${rv.failed === 1 ? "" : "s"} failed` : "", rv.blocks ? `${rv.blocks} permission block${rv.blocks === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ");
   const card = (p) => h("div", { class: "proposal" },
     h("div", { class: "kind" }, `${p.n}. ${PROPOSAL_KIND[p.kind] || p.kind}${p.repo ? ` · ${p.repo}` : ""}`),
     h("div", {}, p.kind === "merge" ? `Drop ${p.text.replace(/^drop /, "")}` : p.text),

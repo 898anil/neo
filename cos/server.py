@@ -553,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
                                         and all(isinstance(n, int) and not isinstance(n, bool) and 0 < n < 100 for n in which))):
                 return self._error(HTTPStatus.BAD_REQUEST, "which must be \"all\" or a list of proposal numbers")
             if not isinstance(shown, str) or not shown:
-                return self._error(HTTPStatus.BAD_REQUEST, "the id of the review shown is required")
+                return self._error(HTTPStatus.BAD_REQUEST, "the id of the review shown is required; reload the page")
             try:
                 return self._json({"results": autonomy.apply_from_dashboard(which, shown), "review": autonomy.view()})
             except ValueError as exc:
