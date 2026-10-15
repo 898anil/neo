@@ -32,9 +32,20 @@ REASON = (
 )
 
 
-def concluded(text: str) -> bool:
+def status_of(text: str) -> dict | None:
+    """{"state": one of STATES, "line": what follows the state} from the reply's closing Status line, or None."""
     tail = [line for line in (text or "").splitlines() if line.strip()][-TAIL_LINES:]
-    return any(_STATUS_RE.match(line) for line in tail)
+    for line in reversed(tail):
+        found = _STATUS_RE.match(line)
+        if found:
+            state = re.sub(r"[ \t_-]+", "-", found.group(1).lower())
+            rest = line[found.end():].strip(" \t*_`")
+            return {"state": state, "line": re.sub(r"^[:\-–—\s]+", "", rest).strip()}
+    return None
+
+
+def concluded(text: str) -> bool:
+    return status_of(text) is not None
 
 
 def decide(payload: dict) -> dict | None:

@@ -469,6 +469,8 @@ class Run:
                 cost_usd=round(cost, 4),
                 raw_offset=offset,
                 last_turn_seconds=round(time.time() - started, 1),
+                # The agent's own Status line for this turn (cos/conclusion.py); home sorts the run by it.
+                conclusion=conclusion.status_of(last_text) if status == "done" else None,
             )
         return final
 
