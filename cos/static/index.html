@@ -334,6 +334,13 @@
   .ask .acts .btn { height: 28px; padding: 0 10px; font-size: 13px; }
   .memory-list { margin: 4px 0 8px; padding-left: 18px; font-size: 13.5px; line-height: 1.45; }
   .memory-list li { margin: 3px 0; }
+  .proposal { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+  .proposal .kind { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  .proposal .why { font-size: 13px; color: var(--muted); margin: 4px 0 0; }
+  .proposal .act { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .proposal details { font-size: 13px; margin-top: 6px; }
+  .proposal details li { margin: 2px 0; }
+  .proposal .kept { font-weight: 600; }
   .ask details.info > summary { margin-top: 6px; color: var(--faint); font-size: 12.5px; cursor: pointer; list-style: none; }
   .ask details.info > summary:hover { color: var(--text); }
   .ask details.info > summary::-webkit-details-marker { display: none; }
@@ -727,6 +734,41 @@ async function loadMemory() {
   try { memoryData = await api("/api/memory"); memoryErr = null; } catch (err) { memoryErr = err.message; /* keep the last one */ }
   return memoryData;
 }
+// The latest nightly autonomy review (cos/autonomy.py): what you had to step in on, and the
+// proposals it drafted. Apply here does the same as `@neo apply N` in the review's Slack thread.
+const PROPOSAL_KIND = { rule: "Rule", lesson: "Lesson", owner_action: "Needs you", merge: "Tidy memory" };
+async function applyProposals(review, which, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/memory/apply", { method: "POST", body: JSON.stringify({ date: review.date, which }) });
+    toast(r.results.map((x) => `${x.n}: ${x.message}`).join(" · ") || "Nothing to apply");
+    memoryAt = 0; await loadMemory(); refresh();
+  } catch (err) { toast(err.message); if (btn) btn.disabled = false; }
+}
+function reviewSection(rv) {
+  if (!rv) return null;
+  const open = rv.proposals.filter((p) => !p.applied && p.kind !== "owner_action");
+  const counts = Object.entries(rv.buckets).map(([k, v]) => `${v} ${k}`).join(" · ");
+  const extra = [rv.failed ? `${rv.failed} runs failed` : "", rv.blocks ? `${rv.blocks} permission blocks` : ""].filter(Boolean).join(", ");
+  const card = (p) => h("div", { class: "proposal" },
+    h("div", { class: "kind" }, `${p.n}. ${PROPOSAL_KIND[p.kind] || p.kind}${p.repo ? ` · ${p.repo}` : ""}`),
+    h("div", {}, p.kind === "merge" ? `Drop ${p.text.replace(/^drop /, "")}` : p.text),
+    p.why ? h("p", { class: "why" }, p.why) : null,
+    p.kind === "merge" ? h("details", {}, h("summary", {}, "What it deletes"),
+      p.merges.map((m) => h("div", {}, h("div", { class: "kept" }, `${m.file}: keeps “${m.text}”`),
+        h("ul", { class: "memory-list" }, m.drop.map((d) => h("li", {}, d)))))) : null,
+    h("div", { class: "act" },
+      p.applied ? "Applied"
+        : p.kind === "owner_action" ? "Only you can do this one"
+        : h("button", { class: "btn go", onclick: (e) => applyProposals(rv, [p.n], e.currentTarget) }, "Apply")));
+  return [
+    h("h2", { class: "section" }, `Autonomy review, ${rv.date}`),
+    h("p", { class: "sub" }, `You stepped in ${rv.stepped} times across ${rv.runs} runs.` + (counts ? ` ${counts}.` : "") + (extra ? ` ${extra}.` : "")),
+    rv.proposals.length ? rv.proposals.map(card) : h("p", { class: "empty" }, "No proposals in this review."),
+    open.length > 1 ? h("p", { class: "note" },
+      h("button", { class: "btn", onclick: (e) => applyProposals(rv, open.map((p) => p.n), e.currentTarget) }, `Apply all ${open.length}`)) : null,
+  ];
+}
 // What neo learned from mistakes and from what you told it (cos/learn.py). Read-only here:
 // the files are plain Markdown on the Mac, edit or delete lines there.
 function renderMemory(o) {
@@ -736,6 +778,7 @@ function renderMemory(o) {
   const page = h("div", { class: "wrap" },
     h("header", { class: "hero" }, h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host), h("h1", {}, "Memory"),
       m ? h("p", { class: "sub" }, count ? `${count} things neo remembers, newest first.` : "Nothing yet.") : null),
+    m ? reviewSection(m.review) : null,
     !m ? h("p", { class: "empty" }, memoryErr ? `Couldn't load memory: ${memoryErr}` : "Loading…")
       : count ? m.files.filter((f) => f.entries.length).map((f) => [
         h("h2", { class: "section" }, label[f.name] || `In ${f.name.replace(/^repos\//, "").replace(/\.md$/, "")}`),

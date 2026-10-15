@@ -109,6 +109,37 @@ class ConditionalGetTest(unittest.TestCase):
         self.assertEqual(self.get({"If-None-Match": '"stale"'})[0], 200)
 
 
+class MemoryApplyTest(ConditionalGetTest):
+    def post(self, body):
+        import http.client
+        import json
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", "/api/memory/apply", body=json.dumps(body), headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        data = json.loads(resp.read() or b"{}")
+        conn.close()
+        return resp.status, data
+
+    def test_apply_validates_and_applies_the_shown_review(self):
+        from unittest.mock import patch
+        from cos import autonomy
+        with patch.dict(os.environ, {"NEO_AUTONOMY_DIR": os.path.join(self.tmp.name, "review"),
+                                     "NEO_MEMORY_DIR": os.path.join(self.tmp.name, "memory")}):
+            autonomy.save({"date": "2026-10-14", "slack_ts": "1.1", "applied": [],
+                           "proposals": [{"n": 1, "kind": "rule", "text": "Merge once review approves"}]})
+            self.assertEqual(self.post({"which": ["1"], "date": "2026-10-14"})[0], 400)
+            self.assertEqual(self.post({"which": [True], "date": "2026-10-14"})[0], 400)
+            self.assertEqual(self.post({"which": [1]})[0], 400)
+            self.assertEqual(self.post({"which": [1], "date": "2026-10-01"})[0], 409)
+            status, data = self.post({"which": [1], "date": "2026-10-14"})
+            self.assertEqual(status, 200)
+            self.assertEqual(data["results"], [{"n": 1, "message": "saved to me.md"}])
+            self.assertTrue(data["review"]["proposals"][0]["applied"])
+
+    def test_unchanged_poll_is_an_empty_304(self):
+        pass  # covered by the parent class
+
+
 class ClipLastTextTest(unittest.TestCase):
     def test_overview_keeps_both_ends_of_a_long_last_text(self):
         text = "A" * 5000 + "Pick one?\n1. yes\n2. no"

@@ -262,6 +262,31 @@ class AutonomyTest(unittest.TestCase):
         self.assertTrue(autonomy.is_review_thread("123.4"))
         self.assertFalse(autonomy.is_review_thread("999.9"))
 
+    def test_dashboard_apply_needs_the_review_it_showed_and_view_marks_applied(self):
+        from cos import autonomy, learn
+        autonomy._history({"date": "2026-10-14", "runs": 10, "stepped": 3, "buckets": {"go_ahead": 2, "nudge": 1, "new_ask": 4},
+                           "failed": 1, "blocks": 0})
+        autonomy.save({"date": "2026-10-14", "slack_ts": None, "applied": [], "proposals": [
+            {"n": 1, "kind": "rule", "text": "Merge once review approves", "why": "asked 5 times", "evidence": ["r1"]},
+            {"n": 2, "kind": "owner_action", "text": "Allow `gh pr merge`"}]})
+        v = autonomy.view()
+        self.assertEqual((v["runs"], v["stepped"], v["posted"]), (10, 3, False))
+        self.assertEqual(v["buckets"], {"go-aheads": 2, "nudges": 1})
+        self.assertEqual([(p["n"], p["applied"]) for p in v["proposals"]], [(1, False), (2, False)])
+        self.assertNotIn("evidence", v["proposals"][0])
+        with self.assertRaises(ValueError):
+            autonomy.apply_from_dashboard([1], "2026-10-13")  # page showed an older review
+        self.assertFalse((learn.memory_dir() / learn.ME).exists())
+        out = autonomy.apply_from_dashboard("all", "2026-10-14")  # works before the Slack post too
+        self.assertEqual(out, [{"n": 1, "message": "saved to me.md"},
+                               {"n": 2, "message": "only you can do this one: Allow `gh pr merge`".replace("`", "")}])
+        self.assertTrue(autonomy.view()["proposals"][0]["applied"])
+        self.assertEqual(autonomy.apply_from_dashboard([1], "2026-10-14"), [{"n": 1, "message": "already applied"}])
+
+    def test_view_is_none_before_any_review(self):
+        from cos import autonomy
+        self.assertIsNone(autonomy.view())
+
     def test_wrong_thread_is_refused(self):
         from cos import autonomy
         autonomy.save({"date": "2026-10-14", "slack_ts": "111.1", "applied": [],

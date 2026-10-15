@@ -393,37 +393,69 @@ def apply(which: list[int] | str, thread_ts: Optional[str]) -> str:
         state = load()
         if not state.get("slack_ts") or thread_ts != state["slack_ts"]:
             return "Those numbers belong to an earlier autonomy review. Reply `apply` in the latest review's thread."
-        proposals = state.get("proposals") or []
-        if not proposals:
+        if not state.get("proposals"):
             return "This autonomy review has no proposals to apply."
-        by_n = {p["n"]: p for p in proposals}
-        chosen = sorted(by_n) if which == "all" else list(dict.fromkeys(which))
-        source = f"autonomy:{state.get('date')}"
-        root = learn.memory_dir()
-        out = []
-        for n in chosen:
-            p = by_n.get(n)
-            if p is None:
-                out.append(f"{n}: no such proposal")
-            elif n in state.get("applied", []):
-                out.append(f"{n}: already applied")
-            elif p["kind"] == "owner_action":
-                out.append(f"{n}: only you can do this one: {_slack(p['text'])}")
-            elif p["kind"] == "merge":
-                per_file: dict[Path, list[str]] = {}
-                for m in p["merges"]:
-                    rel = Path(m["file"])
-                    if rel.is_absolute() or ".." in rel.parts:
-                        continue
-                    present = {learn._norm(e["text"]) for e in learn.entries(root / rel)}
-                    if learn._norm(m["text"]) in present:  # a hand edit since the review must not leave no copy
-                        per_file.setdefault(root / rel, []).extend(m["drop"])
-                removed = sum(learn.remove(path, drops) for path, drops in per_file.items())
-                out.append(f"{n}: removed {removed} repeated lesson(s) from memory")
-                state.setdefault("applied", []).append(n)
-            else:
-                where = learn.add(p["text"], p["kind"], repo=p.get("repo") or None, source=f"{source}#{n}")
-                out.append(f"{n}: saved to `{where}`" if where else f"{n}: already in memory")
-                state.setdefault("applied", []).append(n)
-        save(state)
-    return ":brain: " + "\n".join(out)
+        out = _apply(state, which, _slack)
+    return ":brain: " + "\n".join(f"{n}: {line}" for n, line in out)
+
+
+def apply_from_dashboard(which: list[int] | str, date: str) -> list[dict]:
+    """The dashboard's Apply button. `date` is the review the page showed: a newer review since then
+    numbers its proposals differently, so it is refused rather than applying the wrong one."""
+    with _locked():
+        state = load()
+        if not state.get("proposals") or state.get("date") != date:
+            raise ValueError("This review has been replaced by a newer one. Reload the page.")
+        return [{"n": n, "message": line.replace("`", "")} for n, line in _apply(state, which, lambda t: str(t or ""))]
+
+
+def _apply(state: dict, which: list[int] | str, fmt) -> list[tuple[int, str]]:
+    """Apply proposals in the locked, loaded state and save it. `fmt` makes proposal text safe for
+    where the result is shown (Slack escaping, or plain text for the dashboard)."""
+    by_n = {p["n"]: p for p in state.get("proposals") or []}
+    chosen = sorted(by_n) if which == "all" else list(dict.fromkeys(which))
+    source = f"autonomy:{state.get('date')}"
+    root = learn.memory_dir()
+    out = []
+    for n in chosen:
+        p = by_n.get(n)
+        if p is None:
+            out.append((n, "no such proposal"))
+        elif n in state.get("applied", []):
+            out.append((n, "already applied"))
+        elif p["kind"] == "owner_action":
+            out.append((n, f"only you can do this one: {fmt(p['text'])}"))
+        elif p["kind"] == "merge":
+            per_file: dict[Path, list[str]] = {}
+            for m in p["merges"]:
+                rel = Path(m["file"])
+                if rel.is_absolute() or ".." in rel.parts:
+                    continue
+                present = {learn._norm(e["text"]) for e in learn.entries(root / rel)}
+                if learn._norm(m["text"]) in present:  # a hand edit since the review must not leave no copy
+                    per_file.setdefault(root / rel, []).extend(m["drop"])
+            removed = sum(learn.remove(path, drops) for path, drops in per_file.items())
+            out.append((n, f"removed {removed} repeated lesson(s) from memory"))
+            state.setdefault("applied", []).append(n)
+        else:
+            where = learn.add(p["text"], p["kind"], repo=p.get("repo") or None, source=f"{source}#{n}")
+            out.append((n, f"saved to `{where}`" if where else "already in memory"))
+            state.setdefault("applied", []).append(n)
+    save(state)
+    return out
+
+
+def view() -> Optional[dict]:
+    """The latest review for the dashboard's Memory tab: its numbers and proposals, each marked
+    applied or not. None before the first review."""
+    state = load()
+    if not state.get("date"):
+        return None
+    row = next((r for r in reversed(_history()) if r.get("date") == state["date"]), {})
+    applied = set(state.get("applied") or [])
+    keep = ("n", "kind", "text", "why", "repo", "merges")
+    return {"date": state["date"], "runs": row.get("runs", 0), "stepped": row.get("stepped", 0),
+            "buckets": {LABELS[b]: row.get("buckets", {}).get(b, 0) for b in STEP_IN if row.get("buckets", {}).get(b)},
+            "failed": row.get("failed", 0), "blocks": row.get("blocks", 0), "posted": bool(state.get("slack_ts")),
+            "proposals": [{**{k: p[k] for k in keep if k in p}, "applied": p["n"] in applied}
+                          for p in state.get("proposals") or []]}
