@@ -22,7 +22,7 @@ from pathlib import Path
 STATES = ("done", "answered", "needs-you", "blocked", "failed", "waiting")
 # "*Status:* done — merged #12", "Status: needs you - pick A or B", "## **Status**: waiting on CI".
 _STATUS_RE = re.compile(r"^[ \t*_>`#-]*status[ \t*_`]*[:\-–—][ \t*_`]*(?:\W+[ \t]*)?"
-                        r"(done|answered|needs[ \t_-]?you|blocked|failed|waiting)\b", re.I)
+                        r"(done|answered|needs[ \t_-]?you|blocked|failed|waiting)(?![\w-])", re.I)
 TAIL_LINES = 3  # the line must close the reply, not sit in a list with more plans after it
 REASON = (
     "You stopped without a conclusion. If this task still has work you can do, and the user did not ask you "
@@ -32,9 +32,22 @@ REASON = (
 )
 
 
-def concluded(text: str) -> bool:
+def status_of(text: str) -> dict | None:
+    """{"state": one of STATES, "line": what follows the state} from the reply's closing Status line, or None."""
     tail = [line for line in (text or "").splitlines() if line.strip()][-TAIL_LINES:]
-    return any(_STATUS_RE.match(line) for line in tail)
+    for line in reversed(tail):
+        if line.lstrip().startswith("```"):
+            return None  # the reply ends in a code block: a Status line there is an example, not this reply's
+        found = _STATUS_RE.match(line)
+        if found:
+            state = re.sub(r"[ \t_-]+", "-", found.group(1).lower())
+            rest = line[found.end():].strip(" \t*_`")
+            return {"state": state, "line": re.sub(r"^[:\-–—.\s]+", "", rest).strip()}
+    return None
+
+
+def concluded(text: str) -> bool:
+    return status_of(text) is not None
 
 
 def decide(payload: dict) -> dict | None:

@@ -227,6 +227,54 @@ class HomeTest(unittest.TestCase):
         out = build(ov([a]), [], c, SINCE, NOW, seen={"agent:s": NOW, "waiting:agent:s": NOW}.get)
         self.assertEqual([(m["line"], m["result"]) for m in out["in_flight"]], [("Waiting for CI", None)])
 
+    def test_status_line_needs_you_goes_to_decide_without_a_card(self):
+        a = agent("n", "idle", NOW - 300, last_text="Built it.\n\nStatus: needs-you — pick A or B for the retry policy")
+        out = build(ov([a]), [], {}, SINCE, NOW)
+        self.assertEqual([(d["key"], d["question"]) for d in out["decide"]], [("agent:n", "pick A or B for the retry policy")])
+        # Done closes it until the agent stops again
+        out = build(ov([a]), [], {}, SINCE, NOW, seen={"agent:n": NOW, "waiting:agent:n": NOW}.get)
+        self.assertEqual(out["decide"], [])
+
+    def test_status_line_on_a_slack_run_still_surfaces(self):
+        t = {**task("s", updated=NOW - 300), "source": "slack",
+             "conclusion": {"state": "needs-you", "line": "Sachin to approve backie#12"}}
+        f = {**task("f", updated=NOW - 300), "source": "slack", "conclusion": {"state": "failed", "line": "CI red on lint"}}
+        w = {**task("w", updated=NOW - 300), "source": "slack", "conclusion": {"state": "waiting", "line": "on CI"}}
+        out = build(ov(tasks=[t, f, w]), [], {}, SINCE, NOW)
+        self.assertEqual([(d["key"], d["question"]) for d in out["decide"]], [("run:s", "Sachin to approve backie#12")])
+        self.assertEqual([(u["key"], u["line"], u["result"]) for u in out["unfinished"]], [("run:f", "CI red on lint", "failed")])
+        self.assertEqual([(o["key"], o["line"]) for o in out["others"]], [("run:w", "on CI")])
+
+    def test_status_done_is_a_conclusion_so_an_idle_agent_is_not_unfinished(self):
+        a = agent("d", "idle", NOW - 7200, last_text="Merged.\nStatus: done — merged #12")
+        out = build(ov([a]), [], {}, SINCE, NOW)
+        self.assertEqual((out["unfinished"], [m["key"] for m in out["in_flight"]]), ([], ["agent:d"]))
+
+    def test_card_question_wins_over_the_status_line(self):
+        a = agent("c", "idle", NOW - 600, last_text="Status: needs-you — decide")
+        out = build(ov([a]), [], {"agent:c": card(needs_you="Merge #12 now?")}, SINCE, NOW)
+        self.assertEqual([d["question"] for d in out["decide"]], ["Merge #12 now?"])
+
+    def test_unread_card_from_an_older_stop_loses_to_the_latest_status_line(self):
+        old = {"agent:x": card(needs_you="Merge #12 now?", source_mtime=NOW - 4000, made_at=NOW - 3900)}
+        done = agent("x", "idle", NOW - 300, last_text="Status: done — merged #12")
+        out = build(ov([done]), [], old, SINCE, NOW)
+        self.assertEqual((out["decide"], out["unfinished"]), ([], []))
+        waiting = agent("x", "idle", NOW - 300, last_text="Status: waiting — on CI")
+        out = build(ov([waiting]), [], old, SINCE, NOW)
+        self.assertEqual(([d["key"] for d in out["decide"]], [(o["key"], o["line"]) for o in out["others"]]),
+                         ([], [("agent:x", "on CI")]))
+
+    def test_status_failed_shows_failed_even_if_the_card_says_worked(self):
+        a = agent("f", "idle", NOW - 600, last_text="Status: failed — tests red")
+        out = build(ov([a]), [], {"agent:f": card(result="worked", did="")}, SINCE, NOW)
+        self.assertEqual([(u["key"], u["result"]) for u in out["unfinished"]], [("agent:f", "failed")])
+
+    def test_working_agent_ignores_its_previous_status_line(self):
+        a = agent("w", "working", NOW - 10, last_text="Status: needs-you — old ask")
+        out = build(ov([a]), [], {}, SINCE, NOW)
+        self.assertEqual((out["decide"], [m["key"] for m in out["in_flight"]]), ([], ["agent:w"]))
+
     def test_idle_agent_that_never_got_a_prompt_is_not_unfinished(self):
         out = build(ov([agent("e", "idle", NOW - 90000, prompts=0)]), [], {}, SINCE, NOW)
         self.assertEqual((out["unfinished"], [m["key"] for m in out["in_flight"]]), ([], ["agent:e"]))

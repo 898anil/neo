@@ -288,6 +288,7 @@ def _last_text_for(engine: str, path: Path, mtime: float) -> tuple[str, bool]:
             if event["kind"] == "prompt":
                 done = False
                 prompts += 1
+                last = ""  # what it said before this prompt is not this turn's reply (home reads its Status line)
             elif event["kind"] == "result":
                 done = True
             if event["kind"] in ("text", "result") and event.get("body"):

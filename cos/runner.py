@@ -345,7 +345,7 @@ class Run:
             turn = meta["turns"] + 1
             self._cancelled = False
             self._last_error, self._turn_answered = None, False
-            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None, "retry_owner": None})
+            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None, "retry_owner": None, "conclusion": None})
 
         engine, mode, cwd = meta["engine"], meta["mode"], meta["cwd"]
         text = prompt if is_follow_up else meta["prompt"]
@@ -469,6 +469,8 @@ class Run:
                 cost_usd=round(cost, 4),
                 raw_offset=offset,
                 last_turn_seconds=round(time.time() - started, 1),
+                # The agent's own Status line for this turn (cos/conclusion.py); home sorts the run by it.
+                conclusion=conclusion.status_of(last_text) if status == "done" else None,
             )
         return final
 
