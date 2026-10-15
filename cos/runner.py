@@ -89,6 +89,32 @@ def cli_path(engine: str) -> str:
     return os.environ.get(f"{engine.upper()}_CLI_PATH") or shutil.which(engine) or engine
 
 
+def _slack_target(meta: dict) -> Optional[tuple[str, str]]:
+    channel, thread = meta.get("slack_channel"), meta.get("slack_thread")
+    return (str(channel), str(thread)) if channel and thread else None
+
+
+def run_context(meta: dict) -> Optional[str]:
+    """Where this run answers. Agents register deploy watches with the deploy's slack_channel and
+    slack_thread; never told its thread, an agent wrote null and deploy-watch refused the watch."""
+    target = _slack_target(meta)
+    if not target:
+        return None
+    return (f"This run answers in Slack channel {target[0]}, thread_ts {target[1]} (also $NEO_SLACK_CHANNEL and "
+            "$NEO_SLACK_THREAD). Use exactly these as slack_channel and slack_thread for any deploy-watch "
+            "entry you register.")
+
+
+def engine_env(meta: dict) -> dict:
+    """The bot's environment plus this run's id and Slack thread (none inherited from the bot)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("NEO_SLACK_CHANNEL", "NEO_SLACK_THREAD")}
+    env["NEO_RUN_ID"] = meta["id"]
+    target = _slack_target(meta)
+    if target:
+        env["NEO_SLACK_CHANNEL"], env["NEO_SLACK_THREAD"] = target
+    return env
+
+
 def build_command(
     engine: str, prompt: str, mode: str, session_id: Optional[str] = None, system: Optional[str] = None,
     extra_args: Optional[list[str]] = None, conclude: bool = False,
@@ -325,8 +351,9 @@ class Run:
         text = prompt if is_follow_up else meta["prompt"]
         emit = on_event or (lambda _e: None)
         try:
+            system = "\n\n".join(filter(None, (meta.get("system_prompt"), run_context(meta)))) or None
             cmd = build_command(engine, text, mode, meta["session_id"] if is_follow_up else None,
-                                system=meta.get("system_prompt"), conclude=bool(meta.get("conclude")),
+                                system=system, conclude=bool(meta.get("conclude")),
                                 extra_args=(meta.get("cli_args") or [])
                                 + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []))
             emit(self.append_event({"kind": "prompt", "title": "You", "body": text, "data": {}}, turn))
@@ -338,7 +365,7 @@ class Run:
             # restarts, the engine keeps running and a new bot picks up where this one stopped.
             with raw_path.open("ab") as out, (self.dir / "stderr.log").open("ab") as err:
                 self._proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
-                                              start_new_session=True)
+                                              start_new_session=True, env=engine_env(meta))
         except FileNotFoundError as exc:
             emit(self.append_event({"kind": "error", "title": "Engine not found", "body": str(exc), "data": {}}, turn))
             return self.update_meta(status="failed", pid=None)
