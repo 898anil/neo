@@ -26,6 +26,9 @@ class ConclusionTest(unittest.TestCase):
         self.assertEqual(conclusion.status_of("x\n*Status:* needs you - pick A or B"), {"state": "needs-you", "line": "pick A or B"})
         self.assertEqual(conclusion.status_of("Status: done — merged #12"), {"state": "done", "line": "merged #12"})
         self.assertIsNone(conclusion.status_of("Let me look."))
+        self.assertIsNone(conclusion.status_of("The hook wants:\n```\nStatus: blocked — no access\n```"))
+        self.assertIsNone(conclusion.status_of("Status: done-ish, mostly"))
+        self.assertEqual(conclusion.status_of("Status: done."), {"state": "done", "line": ""})
 
     def test_plans_and_mentions_are_not_a_conclusion(self):
         for text in ("", "Next I'll check the deploy.", "The status: field is wrong", "Status of the deploy: done soon",

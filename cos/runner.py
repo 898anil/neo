@@ -345,7 +345,7 @@ class Run:
             turn = meta["turns"] + 1
             self._cancelled = False
             self._last_error, self._turn_answered = None, False
-            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None, "retry_owner": None})
+            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None, "retry_owner": None, "conclusion": None})
 
         engine, mode, cwd = meta["engine"], meta["mode"], meta["cwd"]
         text = prompt if is_follow_up else meta["prompt"]

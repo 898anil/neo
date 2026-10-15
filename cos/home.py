@@ -194,7 +194,10 @@ def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tu
     # again) the old ask was answered; it must not come back as "opened, not answered" while the next card is
     # still being written, or forever if that card never lands.
     card_current = card.get("source_mtime", 0) >= (it["at"] or 0) - CARD_SLACK_SECONDS
-    open_ask = bool(card.get("needs_you")) and not_closed and (card_current or not opened)
+    status = status_of(it)
+    # An unread ask from an older stop stays, unless the latest stop's own Status line says how it ended (the
+    # owner may have answered in the terminal, which never marks the card seen).
+    open_ask = bool(card.get("needs_you")) and not_closed and (card_current or (not opened and not status))
     if it["attention"] in DECIDE_ATTENTION:
         return "you", False, card
     if open_ask and kind == "decide":
@@ -203,7 +206,6 @@ def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tu
         return "others", False, card
     if it["attention"] == "working":
         return "working", False, card
-    status = status_of(it)
     by_status = STATUS_NEEDS.get((status or {}).get("state"))
     if by_status and it["at"] and seen(waiting_key(it["key"])) < it["at"]:
         # The agent said how its latest stop ended, so the row doesn't wait for the card writer (late, or wrong)
@@ -283,7 +285,8 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
         elif needs == "working":
             in_flight.append({**it, "line": _first_line(it.get("last_text")) or "Working"})
         elif needs == "unfinished":
-            unfinished.append({**it, "result": card.get("result") or ("failed" if (status_of(it) or {}).get("state") == "failed" else None),
+            # A Status line that said failed put it here; the card's own result could still say "worked".
+            unfinished.append({**it, "result": "failed" if (status_of(it) or {}).get("state") == "failed" else card.get("result"),
                                "line": card.get("did") or said or _first_line(it.get("last_text")),
                                "risk": card.get("risk", ""), "next": card.get("next", ""),
                                "age": now - it["at"] if it["at"] else 0})

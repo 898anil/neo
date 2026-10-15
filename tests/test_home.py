@@ -255,6 +255,21 @@ class HomeTest(unittest.TestCase):
         out = build(ov([a]), [], {"agent:c": card(needs_you="Merge #12 now?")}, SINCE, NOW)
         self.assertEqual([d["question"] for d in out["decide"]], ["Merge #12 now?"])
 
+    def test_unread_card_from_an_older_stop_loses_to_the_latest_status_line(self):
+        old = {"agent:x": card(needs_you="Merge #12 now?", source_mtime=NOW - 4000, made_at=NOW - 3900)}
+        done = agent("x", "idle", NOW - 300, last_text="Status: done — merged #12")
+        out = build(ov([done]), [], old, SINCE, NOW)
+        self.assertEqual((out["decide"], out["unfinished"]), ([], []))
+        waiting = agent("x", "idle", NOW - 300, last_text="Status: waiting — on CI")
+        out = build(ov([waiting]), [], old, SINCE, NOW)
+        self.assertEqual(([d["key"] for d in out["decide"]], [(o["key"], o["line"]) for o in out["others"]]),
+                         ([], [("agent:x", "on CI")]))
+
+    def test_status_failed_shows_failed_even_if_the_card_says_worked(self):
+        a = agent("f", "idle", NOW - 600, last_text="Status: failed — tests red")
+        out = build(ov([a]), [], {"agent:f": card(result="worked", did="")}, SINCE, NOW)
+        self.assertEqual([(u["key"], u["result"]) for u in out["unfinished"]], [("agent:f", "failed")])
+
     def test_working_agent_ignores_its_previous_status_line(self):
         a = agent("w", "working", NOW - 10, last_text="Status: needs-you — old ask")
         out = build(ov([a]), [], {}, SINCE, NOW)
