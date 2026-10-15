@@ -465,8 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             events = fleet.recent_turns(fleet.transcript_events(engine, path), turns=8)
             return self._json({**info, "events": events})
         if parts == ["api", "memory"]:
-            from . import learn
-            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files()})
+            from . import autonomy, learn
+            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files(), "review": autonomy.view()})
         if parts == ["api", "usage"]:
             from .runner import usage_summary
 
@@ -546,6 +546,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
             start_turn(run, None)
             return self._json(run.meta(), HTTPStatus.CREATED)
+        if parts == ["api", "memory", "apply"]:
+            from . import autonomy
+            which, shown = (body or {}).get("which"), (body or {}).get("review")
+            if not (which == "all" or (isinstance(which, list) and which
+                                        and all(isinstance(n, int) and not isinstance(n, bool) and 0 < n < 100 for n in which))):
+                return self._error(HTTPStatus.BAD_REQUEST, "which must be \"all\" or a list of proposal numbers")
+            if not isinstance(shown, str) or not shown:
+                return self._error(HTTPStatus.BAD_REQUEST, "the id of the review shown is required; reload the page")
+            try:
+                return self._json({"results": autonomy.apply_from_dashboard(which, shown), "review": autonomy.view()})
+            except ValueError as exc:
+                return self._error(HTTPStatus.CONFLICT, str(exc))
         if parts == ["api", "home", "seen"]:
             home.mark_seen()
             return self._json({"ok": True})

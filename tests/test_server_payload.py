@@ -71,7 +71,7 @@ class BoardRunTest(unittest.TestCase):
         self.assertEqual(server.events_since(evs, 0, ""), (evs, 0))
 
 
-class ConditionalGetTest(unittest.TestCase):
+class ServerMixin:
     def setUp(self):
         import tempfile
         import threading
@@ -91,6 +91,8 @@ class ConditionalGetTest(unittest.TestCase):
         self.env.stop()
         self.tmp.cleanup()
 
+
+class ConditionalGetTest(ServerMixin, unittest.TestCase):
     def get(self, headers=None):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -107,6 +109,35 @@ class ConditionalGetTest(unittest.TestCase):
         status, etag2, body = self.get({"If-None-Match": etag})
         self.assertEqual((status, etag2, body), (304, etag, b""))
         self.assertEqual(self.get({"If-None-Match": '"stale"'})[0], 200)
+
+
+class MemoryApplyTest(ServerMixin, unittest.TestCase):
+    def post(self, body):
+        import http.client
+        import json
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", "/api/memory/apply", body=json.dumps(body), headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        data = json.loads(resp.read() or b"{}")
+        conn.close()
+        return resp.status, data
+
+    def test_apply_validates_and_applies_the_shown_review(self):
+        from unittest.mock import patch
+        from cos import autonomy
+        with patch.dict(os.environ, {"NEO_AUTONOMY_DIR": os.path.join(self.tmp.name, "review"),
+                                     "NEO_MEMORY_DIR": os.path.join(self.tmp.name, "memory")}):
+            autonomy.save({"id": "r1", "date": "2026-10-14", "slack_ts": "1.1", "applied": [],
+                           "proposals": [{"n": 1, "kind": "rule", "text": "Merge once review approves"}]})
+            self.assertEqual(self.post({"which": ["1"], "review": "r1"})[0], 400)
+            self.assertEqual(self.post({"which": [True], "review": "r1"})[0], 400)
+            self.assertEqual(self.post({"which": [], "review": "r1"})[0], 400)
+            self.assertEqual(self.post({"which": [1]})[0], 400)
+            self.assertEqual(self.post({"which": [1], "review": "r0"})[0], 409)
+            status, data = self.post({"which": [1], "review": "r1"})
+            self.assertEqual(status, 200)
+            self.assertEqual(data["results"], [{"n": 1, "message": "saved to me.md"}])
+            self.assertTrue(data["review"]["proposals"][0]["applied"])
 
 
 class ClipLastTextTest(unittest.TestCase):
