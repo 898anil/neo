@@ -320,7 +320,7 @@ def nightly(now: Optional[datetime] = None, hours: int = 24) -> Optional[str]:
                             "buckets": dict(counts), "failed": len(data["failed"]), "blocks": sum(data["blocks"].values())})
         old = load()
         past = [t for t in [*old.get("past_threads", []), old.get("slack_ts")] if t][-60:]
-        save({"date": now.date().isoformat(), "proposals": proposals, "applied": [], "slack_ts": None, "past_threads": past})
+        save({"id": now.isoformat(), "date": now.date().isoformat(), "proposals": proposals, "applied": [], "slack_ts": None, "past_threads": past})
     if not data["runs"] and not stepped and not proposals:
         return None
     return render(data, proposals, history)
@@ -399,13 +399,21 @@ def apply(which: list[int] | str, thread_ts: Optional[str]) -> str:
     return ":brain: " + "\n".join(f"{n}: {line}" for n, line in out)
 
 
-def apply_from_dashboard(which: list[int] | str, date: str) -> list[dict]:
-    """The dashboard's Apply button. `date` is the review the page showed: a newer review since then
-    numbers its proposals differently, so it is refused rather than applying the wrong one."""
+def review_id(state: dict) -> str:
+    """Which nightly run made these proposals (reviews saved before ids existed: their date)."""
+    return str(state.get("id") or state.get("date") or "")
+
+
+def apply_from_dashboard(which: list[int] | str, shown: str) -> list[dict]:
+    """The dashboard's Apply button. `shown` is the review_id of the review the page showed: a newer
+    review, even a rerun the same day, numbers its proposals differently, so it is refused rather
+    than applying the wrong one."""
     with _locked():
         state = load()
-        if not state.get("proposals") or state.get("date") != date:
+        if not state or review_id(state) != shown:
             raise ValueError("This review has been replaced by a newer one. Reload the page.")
+        if not state.get("proposals"):
+            raise ValueError("This autonomy review has no proposals to apply.")
         return [{"n": n, "message": line.replace("`", "")} for n, line in _apply(state, which, lambda t: str(t or ""))]
 
 
@@ -454,7 +462,7 @@ def view() -> Optional[dict]:
     row = next((r for r in reversed(_history()) if r.get("date") == state["date"]), {})
     applied = set(state.get("applied") or [])
     keep = ("n", "kind", "text", "why", "repo", "merges")
-    return {"date": state["date"], "runs": row.get("runs", 0), "stepped": row.get("stepped", 0),
+    return {"id": review_id(state), "date": state["date"], "runs": row.get("runs", 0), "stepped": row.get("stepped", 0),
             "buckets": {LABELS[b]: row.get("buckets", {}).get(b, 0) for b in STEP_IN if row.get("buckets", {}).get(b)},
             "failed": row.get("failed", 0), "blocks": row.get("blocks", 0), "posted": bool(state.get("slack_ts")),
             "proposals": [{**{k: p[k] for k in keep if k in p}, "applied": p["n"] in applied}

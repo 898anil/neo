@@ -740,9 +740,11 @@ const PROPOSAL_KIND = { rule: "Rule", lesson: "Lesson", owner_action: "Needs you
 async function applyProposals(review, which, btn) {
   if (btn) btn.disabled = true;
   try {
-    const r = await api("/api/memory/apply", { method: "POST", body: JSON.stringify({ date: review.date, which }) });
-    toast(r.results.map((x) => `${x.n}: ${x.message}`).join(" · ") || "Nothing to apply");
-    memoryAt = 0; await loadMemory(); refresh();
+    const r = await api("/api/memory/apply", { method: "POST", body: JSON.stringify({ review: review.id, which }) });
+    const done = r.results.filter((x) => !/^(already|no such|only you)/.test(x.message)).length;
+    toast(r.results.length === 1 ? r.results[0].message : `Applied ${done} of ${r.results.length}`);
+    if (memoryData) memoryData.review = r.review;
+    memoryAt = 0; refresh(); // the memory list below changed too
   } catch (err) { toast(err.message); if (btn) btn.disabled = false; }
 }
 function reviewSection(rv) {
@@ -763,7 +765,7 @@ function reviewSection(rv) {
         : h("button", { class: "btn go", onclick: (e) => applyProposals(rv, [p.n], e.currentTarget) }, "Apply")));
   return [
     h("h2", { class: "section" }, `Autonomy review, ${rv.date}`),
-    h("p", { class: "sub" }, `You stepped in ${rv.stepped} times across ${rv.runs} runs.` + (counts ? ` ${counts}.` : "") + (extra ? ` ${extra}.` : "")),
+    h("p", { class: "sub" }, `You stepped in ${rv.stepped} time${rv.stepped === 1 ? "" : "s"} across ${rv.runs} run${rv.runs === 1 ? "" : "s"}.` + (counts ? ` ${counts}.` : "") + (extra ? ` ${extra}.` : "") + (rv.posted ? " Also in Slack." : "")),
     rv.proposals.length ? rv.proposals.map(card) : h("p", { class: "empty" }, "No proposals in this review."),
     open.length > 1 ? h("p", { class: "note" },
       h("button", { class: "btn", onclick: (e) => applyProposals(rv, open.map((p) => p.n), e.currentTarget) }, `Apply all ${open.length}`)) : null,

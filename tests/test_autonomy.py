@@ -266,22 +266,44 @@ class AutonomyTest(unittest.TestCase):
         from cos import autonomy, learn
         autonomy._history({"date": "2026-10-14", "runs": 10, "stepped": 3, "buckets": {"go_ahead": 2, "nudge": 1, "new_ask": 4},
                            "failed": 1, "blocks": 0})
-        autonomy.save({"date": "2026-10-14", "slack_ts": None, "applied": [], "proposals": [
+        autonomy.save({"id": "2026-10-14T17:45:00+00:00", "date": "2026-10-14", "slack_ts": None, "applied": [], "proposals": [
             {"n": 1, "kind": "rule", "text": "Merge once review approves", "why": "asked 5 times", "evidence": ["r1"]},
             {"n": 2, "kind": "owner_action", "text": "Allow `gh pr merge`"}]})
         v = autonomy.view()
-        self.assertEqual((v["runs"], v["stepped"], v["posted"]), (10, 3, False))
+        self.assertEqual((v["id"], v["runs"], v["stepped"], v["posted"]), ("2026-10-14T17:45:00+00:00", 10, 3, False))
         self.assertEqual(v["buckets"], {"go-aheads": 2, "nudges": 1})
         self.assertEqual([(p["n"], p["applied"]) for p in v["proposals"]], [(1, False), (2, False)])
         self.assertNotIn("evidence", v["proposals"][0])
         with self.assertRaises(ValueError):
-            autonomy.apply_from_dashboard([1], "2026-10-13")  # page showed an older review
+            autonomy.apply_from_dashboard([1], "2026-10-14")  # same day, but an earlier run's review
         self.assertFalse((learn.memory_dir() / learn.ME).exists())
-        out = autonomy.apply_from_dashboard("all", "2026-10-14")  # works before the Slack post too
+        out = autonomy.apply_from_dashboard("all", v["id"])  # works before the Slack post too
         self.assertEqual(out, [{"n": 1, "message": "saved to me.md"},
                                {"n": 2, "message": "only you can do this one: Allow `gh pr merge`".replace("`", "")}])
         self.assertTrue(autonomy.view()["proposals"][0]["applied"])
-        self.assertEqual(autonomy.apply_from_dashboard([1], "2026-10-14"), [{"n": 1, "message": "already applied"}])
+        self.assertEqual(autonomy.apply_from_dashboard([1], v["id"]), [{"n": 1, "message": "already applied"}])
+        autonomy.mark_posted("5.5")
+        self.assertIn("1: already applied", autonomy.apply([1], thread_ts="5.5"))  # Slack sees the dashboard's apply
+
+    def test_a_rerun_the_same_day_refuses_the_page_that_showed_the_first(self):
+        from cos import autonomy, learn
+        with patch.object(autonomy, "collect", return_value={"runs": 0, "steps": [], "failed": [], "blocks": {}}), \
+             patch.object(autonomy, "merge_proposal", return_value=[{"kind": "rule", "text": "first"}]):
+            autonomy.nightly(NOW)
+        first = autonomy.view()["id"]
+        with patch.object(autonomy, "collect", return_value={"runs": 0, "steps": [], "failed": [], "blocks": {}}), \
+             patch.object(autonomy, "merge_proposal", return_value=[{"kind": "rule", "text": "second"}]):
+            autonomy.nightly(NOW + timedelta(hours=1))
+        self.assertEqual(autonomy.view()["date"], NOW.date().isoformat())
+        with self.assertRaisesRegex(ValueError, "replaced by a newer one"):
+            autonomy.apply_from_dashboard([1], first)
+        self.assertFalse((learn.memory_dir() / learn.ME).exists())
+
+    def test_dashboard_apply_with_no_proposals_says_so(self):
+        from cos import autonomy
+        autonomy.save({"id": "x", "date": "2026-10-14", "applied": [], "proposals": []})
+        with self.assertRaisesRegex(ValueError, "no proposals"):
+            autonomy.apply_from_dashboard("all", "x")
 
     def test_view_is_none_before_any_review(self):
         from cos import autonomy

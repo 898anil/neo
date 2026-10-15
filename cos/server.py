@@ -548,14 +548,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(run.meta(), HTTPStatus.CREATED)
         if parts == ["api", "memory", "apply"]:
             from . import autonomy
-            which, date = (body or {}).get("which"), (body or {}).get("date")
+            which, shown = (body or {}).get("which"), (body or {}).get("review")
             if not (which == "all" or (isinstance(which, list) and which
                                         and all(isinstance(n, int) and not isinstance(n, bool) and 0 < n < 100 for n in which))):
                 return self._error(HTTPStatus.BAD_REQUEST, "which must be \"all\" or a list of proposal numbers")
-            if not isinstance(date, str):
-                return self._error(HTTPStatus.BAD_REQUEST, "date of the review is required")
+            if not isinstance(shown, str) or not shown:
+                return self._error(HTTPStatus.BAD_REQUEST, "the id of the review shown is required")
             try:
-                return self._json({"results": autonomy.apply_from_dashboard(which, date), "review": autonomy.view()})
+                return self._json({"results": autonomy.apply_from_dashboard(which, shown), "review": autonomy.view()})
             except ValueError as exc:
                 return self._error(HTTPStatus.CONFLICT, str(exc))
         if parts == ["api", "home", "seen"]:
