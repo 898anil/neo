@@ -295,11 +295,25 @@ async def _react(client, channel: str, ts: str, name: str, remove: bool = False)
 # ----------------------------------------------------------------- headless
 
 
+def _same_folder(a: Optional[str], b: str) -> bool:
+    return bool(a) and Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+
+
 async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dict], req, prompt: str,
                        kind: Optional[str] = None) -> bool:
     engine = req.engine or (entry or {}).get("engine") or default_engine()
     same_engine = entry and entry.get("runtime") == "headless" and entry.get("engine") == engine
-    cwd = req.cwd or WORKDIR
+    # A folder named with cwd= sticks to the thread; otherwise follow-ups use today's WORKDIR.
+    previous = Run(entry["run_id"]) if same_engine and entry.get("run_id") else None
+    if req.cwd:
+        pinned = req.cwd
+    elif entry and "cwd" in entry:
+        pinned = entry["cwd"] if entry["cwd"] and os.path.isdir(entry["cwd"]) else None
+    else:
+        # Thread from before folders were recorded: keep a folder that wasn't the default.
+        old_cwd = previous.meta().get("cwd") if previous else None
+        pinned = old_cwd if old_cwd and not _same_folder(old_cwd, WORKDIR) else None
+    cwd = pinned or WORKDIR
     system = await asyncio.to_thread(agent_brief, cwd)  # reads memory and runs git: not on the event loop
     slack = {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
              "system_prompt": system, "conclude": bool(system)}
@@ -307,15 +321,17 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
         slack["kind"] = kind
 
     follow_up = False
-    if same_engine and entry.get("run_id"):
-        run, follow_up = Run(entry["run_id"]), True
+    # A run still busy (adopted after a restart) keeps the thread, so two agents never answer at once.
+    if previous and (_same_folder(previous.meta().get("cwd"), cwd) or previous.meta().get("status") == "running"):
+        run, follow_up = previous, True
     else:
+        # A new folder needs a fresh session (sessions are stored per folder); the prompt carries the thread.
         run = Run.create(engine, prompt, cwd, MODE, source="slack", extra=slack)
-        if same_engine and entry.get("session_id"):
+        if same_engine and not previous and entry.get("session_id"):
             # Thread from before run tracking: resume its engine session.
             run.update_meta(session_id=entry["session_id"])
             follow_up = True
-    await sessions.set_thread(thread_ts, {"run_id": run.id, "engine": engine, "runtime": "headless"})
+    await sessions.set_thread(thread_ts, {"run_id": run.id, "engine": engine, "runtime": "headless", "cwd": pinned})
 
     progress = Progress(engine, "headless", run.meta()["mode"], run.id, DASHBOARD_URL)
     reporter = Reporter(client, channel, thread_ts, progress)
