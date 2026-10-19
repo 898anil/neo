@@ -129,6 +129,28 @@ def cmd_paused(args) -> int:
     return 0 if pause.is_paused() else 1
 
 
+def cmd_post(args) -> int:
+    """Post as neo (bot token), so scheduled jobs don't post as Anil through the connector.
+
+    Exit 0 posted or held, 2 bad input, 3 file or network error, 4 Slack refused it.
+    """
+    from slack_sdk.errors import SlackApiError
+
+    from .post import post
+
+    try:
+        text = args.text if args.text is not None else open(args.text_file, encoding="utf-8").read()
+        result = post(args.channel, text, thread_ts=args.thread, job=args.job)
+    except OSError as exc:
+        print(f"error: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 3
+    except SlackApiError as exc:
+        print(f"error: slack: {exc.response.get('error')}", file=sys.stderr)
+        return 4
+    print(json.dumps(result))
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="cos", description="Run Claude Code or Codex with a visible timeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -173,6 +195,15 @@ def main(argv=None) -> int:
     p = sub.add_parser("paused", help="exit 0 while notifications are paused (for scheduled jobs)")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_paused)
+
+    p = sub.add_parser("post", help="post a Slack message as neo (bot), held while paused")
+    p.add_argument("--channel", required=True)
+    p.add_argument("--thread", help="thread_ts to reply in")
+    p.add_argument("--job", help="job name; while paused the message goes to ~/.neo/<job>/held.json")
+    text = p.add_mutually_exclusive_group(required=True)
+    text.add_argument("--text")
+    text.add_argument("--text-file", help="read the message from a file (avoids shell quoting)")
+    p.set_defaults(func=cmd_post)
 
     args = parser.parse_args(argv)
     try:
