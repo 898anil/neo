@@ -41,6 +41,8 @@ READ_ONLY_TOOLS = [
     "Bash(kubectl config get-contexts:*)",
     "Bash(gh run list:*)", "Bash(gh run view:*)", "Bash(gh pr list:*)", "Bash(gh pr view:*)",
     "Bash(gh pr checks:*)", "Bash(gh issue list:*)", "Bash(gh issue view:*)", "Bash(gh repo list:*)",
+    "Bash(gh search issues:*)", "Bash(gh search prs:*)", "Bash(gh project item-list:*)",
+    "Bash(gh project field-list:*)", "Bash(gh project view:*)",
     "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git blame:*)",
     "Bash(jq:*)", "Bash(sort:*)", "Bash(uniq:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
     "Bash(grep:*)", "Bash(cut:*)", "Bash(date:*)", "Bash(ls:*)", "Bash(cat:*)",
@@ -180,6 +182,7 @@ def save(data: dict) -> dict:
     except (TypeError, ValueError):
         every = 0
     hours = str(data.get("hours", "work"))
+    at = str(data.get("at") or "").strip()
     if not name:
         raise ValueError("give the watch a name")
     if not instructions or len(instructions) > MAX_INSTRUCTIONS:
@@ -188,8 +191,12 @@ def save(data: dict) -> dict:
         raise ValueError(f"every must be one of {EVERY} minutes")
     if hours not in HOURS:
         raise ValueError(f"hours must be one of {HOURS}")
+    if at and not _at_time(at):
+        raise ValueError("at must be a local time as HH:MM, e.g. 10:00")
     fields = {"name": name, "instructions": instructions, "every": every, "hours": hours,
               "enabled": bool(data.get("enabled", True))}
+    if "at" in data:
+        fields["at"] = at
     with _lock:
         rows = load()
         watch_id = data.get("id")
@@ -220,14 +227,35 @@ def in_hours(watch: dict, now: datetime) -> bool:
     return now.weekday() < 5 and 8 <= now.hour < 20
 
 
+def _at_time(at: str) -> Optional[tuple[int, int]]:
+    """"10:00" -> (10, 0); None when it is not a valid HH:MM."""
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", at or "")
+    if not m or int(m[1]) > 23 or int(m[2]) > 59:
+        return None
+    return int(m[1]), int(m[2])
+
+
 def due(now: Optional[datetime] = None) -> list[dict]:
-    """Enabled watches whose time has come and that are not already checking."""
+    """Enabled watches whose time has come and that are not already checking.
+
+    A watch with "at" (local HH:MM) runs once a day at that time, on the days its hours allow,
+    instead of every N minutes; one missed while the machine was off runs when it is back."""
     now = now or datetime.now()
     out = []
     for w in load():
         if not w.get("enabled") or not in_hours(w, now) or running(w["id"]):
             continue
         last = w.get("last_started_at")
+        at = _at_time(w.get("at") or "")
+        if at:
+            slot = now.replace(hour=at[0], minute=at[1], second=0, microsecond=0)
+            try:
+                ran = bool(last) and datetime.fromisoformat(last) >= slot
+            except ValueError:
+                ran = False
+            if now >= slot and not ran:
+                out.append(w)
+            continue
         if last:
             try:
                 if now - datetime.fromisoformat(last) < timedelta(minutes=int(w.get("every") or 120)):

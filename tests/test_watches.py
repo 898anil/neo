@@ -104,6 +104,25 @@ class WatchesTest(WatchTestCase):
         self.assertEqual([w["id"] for w in self.watches.due(monday_10)], ["prod-logs"])
         self.assertEqual({w["id"] for w in self.watches.due(datetime(2026, 9, 28, 11, 1))}, {"sentry", "prod-logs"})
 
+    def test_due_at_a_fixed_time_runs_once_a_day(self):
+        self.watches.save({"name": "Bugs", "instructions": "open bugs", "every": 1440, "hours": "work", "at": "10:00"})
+        due = lambda when: "bugs" in {w["id"] for w in self.watches.due(when)}
+        self.assertFalse(due(datetime(2026, 9, 28, 9, 59)))
+        self.assertTrue(due(datetime(2026, 9, 28, 10, 0)))
+        self.watches._update("bugs", last_started_at="2026-09-28T10:00:20")
+        self.assertFalse(due(datetime(2026, 9, 28, 15, 0)))
+        self.assertFalse(due(datetime(2026, 9, 29, 9, 59)))  # not 24h-after-last drift
+        self.assertTrue(due(datetime(2026, 9, 29, 10, 0)))
+        self.watches._update("bugs", last_started_at="2026-10-02T10:00:20")  # Friday
+        self.assertFalse(due(datetime(2026, 10, 3, 10, 0)))  # Saturday is outside work hours
+        self.assertFalse(due(datetime(2026, 10, 5, 8, 0)))  # Monday before 10:00
+        self.assertTrue(due(datetime(2026, 10, 5, 10, 0)))
+        self.assertTrue(due(datetime(2026, 10, 6, 14, 0)))  # missed while off: catches up
+        with self.assertRaises(ValueError):
+            self.watches.save({"id": "bugs", "name": "Bugs", "instructions": "x", "every": 1440, "at": "25:00"})
+        self.watches.save({"id": "bugs", "name": "Bugs", "instructions": "x", "every": 1440})
+        self.assertEqual(self.watches.get("bugs")["at"], "10:00")  # an edit without "at" keeps it
+
     def test_check_records_findings_once_and_tells_the_bot(self):
         told = []
         self.watches.on_checked = lambda watch, meta, new: told.append((watch["id"], meta["status"], [f["key"] for f in new]))
