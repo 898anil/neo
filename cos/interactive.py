@@ -165,6 +165,8 @@ class InteractiveRun:
         if engine == "codex":
             # An "Update available" menu at startup would hold an unattended session forever.
             agent_args = ("-c", "check_for_update_on_startup=false", *agent_args)
+            if mode == "full":  # as headless codex (runner.py): no approval prompts, no sandbox
+                agent_args = ("--dangerously-bypass-approvals-and-sandbox", *agent_args)
         if system and engine == "claude":
             # From a file: herdr refuses to pass multi-line text through the pane's shell
             # ("agent arguments cannot be encoded safely"), and the agent would never start.
