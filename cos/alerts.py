@@ -22,6 +22,9 @@ _RESOLVED_RE = re.compile(r"\[resolved\b|^\W*resolved\b|\bstatus:\s*resolved\b",
 _FAILED_RE = re.compile(r"\b(fail(ed|ure|ing)?|error|cancel(l)?ed|timed out)\b|:x:|:rotating_light:|:red_circle:", re.I)
 _RUNNING_RE = re.compile(r"\b(running|waiting|queued|in progress|started|starting)\b|:arrows_counterclockwise:|:hourglass", re.I)
 _PASSED_RE = re.compile(r"\b(passed|succeeded|success|green)\b|:white_check_mark:|:tada:", re.I)
+# Only posts that look like a CI run's status are held while running or skipped when green; a plain
+# alert ("success rate dropped", "5000 messages queued") always gets its RCA.
+_CI_RE = re.compile(r"actions/runs/|\b(ci|e2e|nightly|sweep|workflow|pipeline|builds?|gate \d+|checks?|jobs?)\b", re.I)
 PENDING_HOURS = 6  # how long an in-progress status post is re-checked for its final state
 
 
@@ -45,9 +48,12 @@ def _status_part(text: str) -> str:
 def run_state(text: str) -> str:
     """'failed' if any failure shows, else 'running' while jobs are still going, else 'passed'
     when only success markers are left, else 'other' (a plain alert with no run status)."""
+    is_ci = bool(_CI_RE.search(text))
     text = _status_part(text)
     if _FAILED_RE.search(text):
         return "failed"
+    if not is_ci:
+        return "other"
     if _RUNNING_RE.search(text):
         return "running"
     if _PASSED_RE.search(text):

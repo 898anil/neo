@@ -91,6 +91,10 @@ class AlertGateTest(unittest.TestCase):
         self.assertEqual(run_state("[FIRING:1] PodCrashLooping api"), "other")
         self.assertEqual(run_state(":tada: CI success"), "passed")
         self.assertEqual(run_state("Gate 2: cancelled"), "failed")
+        # Plain alerts that only happen to use a status word are not CI runs: they always get an RCA.
+        self.assertEqual(run_state("Payment success rate dropped to 82%"), "other")
+        self.assertEqual(run_state("DLQ: 5000 messages queued"), "other")
+        self.assertEqual(run_state("Incident started for policy checkout-latency"), "other")
 
     def test_is_resolved(self):
         self.assertTrue(is_resolved(":white_check_mark: [RESOLVED] X"))
