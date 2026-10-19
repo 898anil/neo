@@ -92,5 +92,6 @@ class PostTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("FileNotFoundError", stderr.getvalue())
 
+
 if __name__ == "__main__":
     unittest.main()

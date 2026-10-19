@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 from . import pause
 from .runner import ENGINES, MODES, TERMINAL, Run, list_runs, valid_run_id
@@ -139,7 +140,7 @@ def cmd_post(args) -> int:
     from .post import post
 
     try:
-        text = args.text if args.text is not None else open(args.text_file, encoding="utf-8").read()
+        text = args.text if args.text is not None else Path(args.text_file).read_text(encoding="utf-8")
         result = post(args.channel, text, thread_ts=args.thread, job=args.job)
     except OSError as exc:
         print(f"error: {exc.__class__.__name__}: {exc}", file=sys.stderr)
