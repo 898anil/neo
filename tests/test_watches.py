@@ -120,6 +120,8 @@ class WatchesTest(WatchTestCase):
         self.assertTrue(due(datetime(2026, 10, 6, 14, 0)))  # missed while off: catches up
         with self.assertRaises(ValueError):
             self.watches.save({"id": "bugs", "name": "Bugs", "instructions": "x", "every": 1440, "at": "25:00"})
+        with self.assertRaises(ValueError):  # would never run inside work hours
+            self.watches.save({"id": "bugs", "name": "Bugs", "instructions": "x", "every": 1440, "at": "21:00"})
         self.watches.save({"id": "bugs", "name": "Bugs", "instructions": "x", "every": 1440})
         self.assertEqual(self.watches.get("bugs")["at"], "10:00")  # an edit without "at" keeps it
 

@@ -193,6 +193,8 @@ def save(data: dict) -> dict:
         raise ValueError(f"hours must be one of {HOURS}")
     if at and not _at_time(at):
         raise ValueError("at must be a local time as HH:MM, e.g. 10:00")
+    if at and hours == "work" and not 8 <= _at_time(at)[0] < 20:
+        raise ValueError("at must be between 08:00 and 20:00 for a work-hours watch")
     fields = {"name": name, "instructions": instructions, "every": every, "hours": hours,
               "enabled": bool(data.get("enabled", True))}
     if "at" in data:
