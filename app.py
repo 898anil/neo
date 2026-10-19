@@ -1306,6 +1306,9 @@ async def main() -> None:
         raise SystemExit("Slack unreachable")
     BOT_USER_ID = auth["user_id"]
     TEAM_URL = auth.get("url")
+    # What Slack calls this app ("Nio"), so the mentions check and the brief skip neo's own posts.
+    if not os.environ.get("NEO_BOT_NAME", "").strip():
+        os.environ["NEO_BOT_NAME"] = auth.get("user") or ""
     _start_dashboard()
     log.info(
         "Starting Neo bot (bot=%s, engine=%s, mode=%s, workdir=%s, dashboard=%s, allowlist=%s)",

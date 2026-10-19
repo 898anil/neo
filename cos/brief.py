@@ -48,6 +48,15 @@ def _findings_summary() -> str:
     return "\n".join(lines)
 
 
+def prompt(now: Optional[datetime] = None) -> str:
+    from .mentions import bot_names
+
+    now = now or datetime.now()
+    template = read_prompt("brief.md") or "Write my morning brief for {date}.\n\n{agents}"
+    return template.format(date=now.strftime("%-d %B %Y"), weekday=now.strftime("%A"), agents=_agents_summary(),
+                           bot=" or ".join(n.capitalize() for n in bot_names()), **owner_fields())
+
+
 def running() -> Optional[dict]:
     for meta in list_runs(40):
         if meta.get("kind") == "brief" and meta["status"] in ("queued", "running"):
@@ -61,10 +70,7 @@ def start(source: str = "dashboard", on_done: Optional[Callable[[dict], None]] =
         current = running()
         if current:
             return current
-        now = datetime.now()
-        template = read_prompt("brief.md") or "Write my morning brief for {date}.\n\n{agents}"
-        prompt = template.format(date=now.strftime("%-d %B %Y"), weekday=now.strftime("%A"), agents=_agents_summary(), **owner_fields())
-        run = Run.create("claude", prompt, workdir(), "full", source=source, extra={"kind": "brief", "title": "Morning brief"})
+        run = Run.create("claude", prompt(), workdir(), "full", source=source, extra={"kind": "brief", "title": "Morning brief"})
 
     def work():
         try:

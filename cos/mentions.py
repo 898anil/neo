@@ -85,10 +85,21 @@ def is_pr_notification(m: dict) -> bool:
     return str(m.get("channel_name") or "").startswith("gh-") or str(m.get("from") or "").startswith("GitHub")
 
 
+def bot_names() -> list[str]:
+    """What neo's Slack app is called: "neo", plus the name Slack gave this app (NEO_BOT_NAME, set at
+    startup from auth.test), which can be anything ("Nio")."""
+    names = ["neo"]
+    for n in re.split(r"[,\s]+", os.environ.get("NEO_BOT_NAME", "").strip().lower()):
+        if n and n not in names:
+            names.append(n)
+    return names
+
+
 def is_from_neo(m: dict) -> bool:
-    """neo's own posts (briefs, reminders, repeats of its findings) tag the owner but are not asks."""
+    """neo's own posts (briefs, reminders, approval pings, repeats of its findings) tag the owner but are
+    not asks: an agent's question is already a card, and the ping goes stale once the agent is gone."""
     sender = str(m.get("from") or "").strip().lower()
-    return sender == "neo" or sender.startswith(("neo (", "neo bot"))
+    return any(sender == n or sender.startswith((f"{n} (", f"{n} bot")) for n in bot_names())
 
 
 def owner_id() -> str:
@@ -157,7 +168,8 @@ def prompt(now: Optional[datetime] = None) -> str:
         "Rules:",
         "- Read only. Never send, react, draft or schedule anything in Slack, and change nothing anywhere else.",
         "- Skip GitHub app posts and anything in gh-* channels (PR review requests, PR opened/merged/CI notices).",
-        "- Skip neo's own posts (the neo bot: briefs, reminders, digests, repeats of its findings).",
+        f"- Skip neo's own posts (the neo bot, named {' or '.join(n.capitalize() for n in bot_names())} in Slack: briefs, reminders, "
+        "digests, agents waiting for approval or asking something, repeats of its findings).",
         f"- Skip messages {o['owner']} wrote themselves and bot posts that only list names. needs_owner is false when {o['owner']} (<@{me}>) "
         "already replied after the tag, or it is a thank-you, FYI or broadcast.",
         "- Before drafting, check the facts the reply depends on (the PR, the Sentry issue, the code, the deploy). "
@@ -284,7 +296,9 @@ def get(mid: str) -> Optional[dict]:
 
 
 def open_items() -> list[dict]:
-    return sorted((i for i in _read()["items"].values() if i["status"] in OPEN), key=lambda i: i["found_at"])
+    # is_from_neo again: neo's own posts picked up before its Slack name was known stay out of the decisions.
+    return sorted((i for i in _read()["items"].values() if i["status"] in OPEN and not is_from_neo(i)),
+                  key=lambda i: i["found_at"])
 
 
 def _set(mid: str, **fields) -> dict:
