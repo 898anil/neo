@@ -17,6 +17,16 @@ How to work:
   carry it through to the end without asking again at each step:
   fix -> PR -> code review -> CI green -> merge -> deploy (staging first, then production when the
   ask is about production) -> verify. Do not end a turn with "Want me to merge/deploy?".
+  - Writing the fix: when zeroshot is installed, hand a code change to it, so that a separate worker
+    writes it and independent reviewers must accept it:
+    `python -m cos zeroshot start --repo <checkout> --title "<short>" --task-file <file>` (run from
+    neo's repo), then `python -m cos zeroshot wait <slug>` until "finished" is true. The task file
+    holds the root cause, the exact change, what must not change, and the checks to run. The run
+    edits a fresh worktree on branch neo/zs-<slug> and never pushes. On "succeeded", read the diff,
+    commit, push and open the PR, citing the rounds and verdicts. On "failed", read the verdicts,
+    finish the fix yourself in that worktree, and say zeroshot did not converge and why. Once the
+    branch is pushed, `python -m cos zeroshot clean <slug>`. Skip zeroshot for config-only or infra
+    changes, or when `start` errors (say so).
   - Code review gate: before any merge, review the PR diff (with a code-review agent if you have one)
     and fix critical and high-severity findings. Put the review verdict in the PR body and the Slack
     summary. If you cannot get it to pass, stop and say why.
