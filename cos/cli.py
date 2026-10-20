@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -152,6 +154,27 @@ def cmd_post(args) -> int:
     return 0
 
 
+def cmd_zeroshot(args) -> int:
+    """Hand a change to a zeroshot review loop (cos/zeroshot.py). Prints JSON; exit 3 when git or zeroshot fails."""
+    from . import zeroshot
+
+    try:
+        if args.zs_command == "start":
+            task = args.task if args.task is not None else Path(args.task_file).read_text(encoding="utf-8")
+            result = zeroshot.start(args.repo, task, args.title, base=args.base, slug=args.slug)
+        elif args.zs_command == "status":
+            result = zeroshot.status(args.ref)
+        elif args.zs_command == "clean":
+            result = zeroshot.clean(args.ref, force=args.force)
+        else:
+            result = zeroshot.wait(args.ref, timeout=args.timeout)
+    except (OSError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError, sqlite3.Error) as exc:
+        print(f"error: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="cos", description="Run Claude Code or Codex with a visible timeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -205,6 +228,26 @@ def main(argv=None) -> int:
     text.add_argument("--text")
     text.add_argument("--text-file", help="read the message from a file (avoids shell quoting)")
     p.set_defaults(func=cmd_post)
+
+    p = sub.add_parser("zeroshot", help="run a change through a zeroshot worker + independent review loop")
+    zs = p.add_subparsers(dest="zs_command", required=True)
+    q = zs.add_parser("start", help="new worktree at origin/<base> and a detached run in it")
+    q.add_argument("--repo", required=True, help="path to the git checkout")
+    q.add_argument("--title", required=True)
+    q.add_argument("--base", default="main")
+    q.add_argument("--slug", help="job name (default: from the title)")
+    task = q.add_mutually_exclusive_group(required=True)
+    task.add_argument("--task")
+    task.add_argument("--task-file", help="read the task from a file (avoids shell quoting)")
+    q = zs.add_parser("status", help="phase, verdicts and changed files of a job (slug or run id)")
+    q.add_argument("ref")
+    q = zs.add_parser("wait", help="block until the job finishes or --timeout seconds pass")
+    q.add_argument("ref")
+    q.add_argument("--timeout", type=int, default=540)
+    q = zs.add_parser("clean", help="remove a finished job's worktree, local branch and record")
+    q.add_argument("ref")
+    q.add_argument("--force", action="store_true", help="also drop uncommitted changes and unpushed commits")
+    p.set_defaults(func=cmd_zeroshot)
 
     args = parser.parse_args(argv)
     try:

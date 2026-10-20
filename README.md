@@ -188,6 +188,10 @@ Dash  ─┼─▶ app.py (Socket Mode) ─▶ cos/ ──┤
 - `cos/fleet.py` -- everything on the machine: all herdr agents, their transcripts, runs.
 - `cos/watches.py` -- watches and findings; `cos/settings.py` -- choices made from the dashboard.
 - `cos/server.py` + `cos/static/index.html` -- the dashboard. `python -m cos` is also a CLI.
+- `cos/zeroshot.py` -- `python -m cos zeroshot start|status|wait`: a code change written by one agent
+  and accepted by independent reviewers ([zeroshot](https://zeroshot.sh)) before neo opens the PR.
+  Needs `npm install -g --prefix ~/.local @the-open-engine-company/zeroshot`; per-repo review rules
+  go in `private/zeroshot/<repo folder>.md`.
 
 Live runs use their own herdr session (`neo`); your own agents stay in your default session
 and are shown and controllable, never restarted. Attach: `herdr session attach neo`.
