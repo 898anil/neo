@@ -88,6 +88,18 @@ a Claude RCA in its thread (repeats within 30 minutes are skipped; `NEO_AUTO_RCA
 The brief's time is `NEO_BRIEF_AT` (default 08:30, weekdays; `off` to disable); its instructions are in
 `prompts/brief.md`, and every agent's standing instructions in `prompts/slack-agent.md`.
 
+**Voice notes.** Record a Slack voice clip in a DM to neo, in a thread neo is working in, or with
+`@neo` typed beside it. neo transcribes it on this machine, posts what it heard, runs it like a typed
+mention, and replies with text plus a spoken clip. Speech-to-text is mlx-whisper (`NEO_STT_MODEL`,
+default `mlx-community/whisper-large-v3-turbo`) in its own venv; text-to-speech is macOS `say`
+(`NEO_TTS_VOICE`, default Samantha; download a Premium voice in System Settings → Accessibility →
+Spoken Content for a better one). The app needs the `files:read` and `files:write` scopes. One-time setup:
+
+```bash
+uv venv -p python3.12 ~/.neo/voice/venv
+uv pip install -p ~/.neo/voice/venv/bin/python mlx-whisper imageio-ffmpeg
+```
+
 ## Memory
 
 Every Claude or Codex session starts blank, so you end up re-explaining the same things: which
