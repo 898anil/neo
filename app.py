@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -39,7 +40,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import autonomy, learn  # noqa: E402
+from cos import autonomy, learn, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -292,11 +293,71 @@ async def _react(client, channel: str, ts: str, name: str, remove: bool = False)
         log.debug("reaction %s failed: %s", name, exc)
 
 
+# -------------------------------------------------------------------- voice
+
+
+_STT_LOCK = asyncio.Lock()
+
+
+async def resolve_files(client, event: dict) -> None:
+    """Message events sometimes carry file stubs (`file_access: check_file_info`) with no type;
+    fill them in so a voice clip is recognised. Best-effort."""
+    files = event.get("files") or []
+    for i, file in enumerate(files):
+        if file.get("file_access") != "check_file_info":
+            continue
+        try:
+            files[i] = (await client.files_info(file=file["id"]))["file"]
+        except Exception as exc:  # noqa: BLE001 - an unknown file is just not a voice note
+            log.warning("files.info %s failed: %s", file.get("id"), exc)
+
+
+async def hear(client, channel: str, thread_ts: str, event: dict) -> Optional[str]:
+    """What was said in the message's voice clip(s), echoed into the thread so you can see what
+    was understood (and later turns see it in the thread context). None if it could not be heard."""
+    await _react(client, channel, event["ts"], "ear")
+    heard: list[str] = []
+    for file in voice.audio_files(event):
+        try:
+            async with _STT_LOCK:  # each transcription loads the whole model; one at a time
+                heard.append(await asyncio.to_thread(voice.transcribe, file, client.token))
+        except Exception as exc:  # noqa: BLE001 - tell the sender instead of dropping the message
+            log.warning("voice clip %s not transcribed: %s", file.get("id"), exc)
+            why = exc if isinstance(exc, voice.VoiceError) else "something went wrong (see the bot log)"
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                          text=f":x: I couldn't make out that voice note: {why}")
+            await _react(client, channel, event["ts"], "ear", remove=True)
+            return None
+    await _react(client, channel, event["ts"], "ear", remove=True)
+    text = " ".join(t for t in heard if t).strip()
+    if not text:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text=":x: I couldn't hear anything in that voice note.")
+        return None
+    await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(f":studio_microphone: _Heard:_ {text}"))
+    return text
+
+
+async def say_aloud(client, channel: str, thread_ts: str, answer: str) -> None:
+    """Post the answer as a spoken clip too. Best-effort: the text answer is already in the thread."""
+    path = None
+    try:
+        path = await asyncio.to_thread(voice.speak_answer, answer)
+        if path:
+            await client.files_upload_v2(channel=channel, thread_ts=thread_ts, file=str(path),
+                                         filename="neo-reply.m4a", title="neo, spoken")
+    except Exception as exc:  # noqa: BLE001 - a missing clip must never fail the run
+        log.warning("spoken reply failed for thread=%s: %s", thread_ts, exc)
+    finally:
+        if path:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+
 # ----------------------------------------------------------------- headless
 
 
 async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dict], req, prompt: str,
-                       kind: Optional[str] = None) -> bool:
+                       kind: Optional[str] = None, spoken: bool = False) -> bool:
     engine = req.engine or (entry or {}).get("engine") or default_engine()
     same_engine = entry and entry.get("runtime") == "headless" and entry.get("engine") == engine
     cwd = req.cwd or WORKDIR
@@ -348,6 +409,8 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
                     await reporter.finish("done", True)
                 if progress.final.strip() not in posted:
                     await reporter.say(progress.final if not posted else ":hourglass: _Background work finished:_\n" + progress.final)
+                    if spoken and not posted:
+                        await say_aloud(client, channel, thread_ts, progress.final)
                     posted.append(progress.final.strip())
                     run.update_meta(slack_posted_seq=event.get("seq"))  # a restarted bot must not repeat it
                 ANSWERED.add(thread_ts)
@@ -377,6 +440,8 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
     await reporter.finish(status, answered)
     if answered:
         await reporter.say(progress.final)
+        if spoken:
+            await say_aloud(client, channel, thread_ts, progress.final)
     elif status != "done":
         await reporter.say(":warning: The run ended without an answer. See the trace.")
     return status == "done"
@@ -967,6 +1032,11 @@ async def handle_dm(event: dict, client) -> None:
     if event.get("channel") in AUTO_RCA_CHANNELS:
         await maybe_auto_rca(client, event["channel"], event, "event")
         return
+    if event.get("subtype") == "file_share" and not (ALLOWED_USER_IDS and event.get("user") not in ALLOWED_USER_IDS):
+        await resolve_files(client, event)
+    if _is_voice_note(event):
+        await handle_voice_message(event, client)
+        return
     if event.get("channel_type") != "im" or event.get("bot_id") or event.get("subtype"):
         return
     user = event.get("user")
@@ -975,11 +1045,46 @@ async def handle_dm(event: dict, client) -> None:
     channel, text = event["channel"], _clean_prompt(event.get("text", ""))
     thread_ts = event.get("thread_ts")
     target = await sessions.get_thread(f"dm:{thread_ts}") if thread_ts else None
+    if not target and thread_ts and await sessions.get_thread(thread_ts):
+        await handle_mention(event, client)  # a typed follow-up in a DM thread a voice note started
+        return
+    await reply_to_dm_agent(client, event, channel, thread_ts, target, text)
+
+
+def _is_voice_note(event: dict) -> bool:
+    return (event.get("subtype") == "file_share" and not event.get("bot_id")
+            and event.get("user") != BOT_USER_ID and bool(voice.audio_files(event)))
+
+
+async def handle_voice_message(event: dict, client) -> None:
+    """A voice clip with no @neo: in a DM to neo, or in a thread neo is already working in, it is
+    meant for neo, so it is handled like a mention. One that mentions @neo arrives as app_mention."""
+    user = event.get("user")
+    if ALLOWED_USER_IDS and user not in ALLOWED_USER_IDS:
+        return
+    if event.get("channel_type") != "im" and BOT_USER_ID and f"<@{BOT_USER_ID}" in (event.get("text") or ""):
+        return  # app_mention handles it (Slack sends none in DMs); answering here too would run it twice
+    channel, thread_ts = event["channel"], event.get("thread_ts")
+    if event.get("channel_type") == "im":
+        target = await sessions.get_thread(f"dm:{thread_ts}") if thread_ts else None
+        if target:  # a spoken answer to an agent notification
+            heard = await hear(client, channel, thread_ts, event)
+            if heard:
+                typed = _clean_prompt(event.get("text", ""))
+                await reply_to_dm_agent(client, event, channel, thread_ts, target, f"{typed}\n{heard}".strip())
+            return
+        await handle_mention(event, client)
+    elif thread_ts and await sessions.get_thread(thread_ts):
+        await handle_mention(event, client)
+
+
+async def reply_to_dm_agent(client, event: dict, channel: str, thread_ts: Optional[str],
+                            target: Optional[dict], text: str) -> None:
     if not target:
         await client.chat_postMessage(
             channel=channel, thread_ts=event["ts"],
             text="Reply in the thread of an agent notification to answer that agent. "
-                 "To start work, mention me in a channel: `@neo <task>`.",
+                 "To start work, mention me in a channel (`@neo <task>`) or send me a voice note here.",
         )
         return
     # Only explicit control words; "yes"/"no" are ordinary answers to a question.
@@ -1104,9 +1209,18 @@ async def handle_mention(event: dict, client) -> None:
         return  # Silently ignore anyone not on the allowlist.
 
     channel = event["channel"]
+    if event.get("files"):
+        await resolve_files(client, event)
     # Reply inside the mention's thread; start a new thread on a top-level mention.
     thread_ts = event.get("thread_ts") or event["ts"]
-    req = commands.parse(_clean_prompt(event.get("text", "")))
+    raw = _clean_prompt(event.get("text", ""))
+    spoken = bool(voice.audio_files(event))
+    if spoken:  # a voice note: what was said is the message (after any typed words)
+        heard = await hear(client, channel, thread_ts, event)
+        if heard is None:
+            return
+        raw = f"{raw}\n{heard}".strip()
+    req = commands.parse(raw)
     entry = await sessions.get_thread(thread_ts)
     log.info("mention: user=%s channel=%s thread=%s command=%s engine=%s live=%s",
              user, channel, thread_ts, req.command, req.engine, req.live)
@@ -1127,7 +1241,7 @@ async def handle_mention(event: dict, client) -> None:
         return
 
     if entry and entry.get("runtime") == "agent" and req.command != "help":
-        await answer_agent(client, channel, thread_ts, event["ts"], entry, req, _clean_prompt(event.get("text", "")))
+        await answer_agent(client, channel, thread_ts, event["ts"], entry, req, raw)
         return
 
     if req.command != "run":
@@ -1172,7 +1286,7 @@ async def handle_mention(event: dict, client) -> None:
             if req.live:
                 ok = await start_live(client, channel, thread_ts, req, prompt)
             else:
-                ok = await run_headless(client, channel, thread_ts, entry, req, prompt)
+                ok = await run_headless(client, channel, thread_ts, entry, req, prompt, spoken=spoken)
     except HerdrError as exc:
         ok = False
         detail = "the agent is waiting for approval; use `@neo approve` or `@neo deny` first" if exc.code == "agent_blocked" else str(exc)

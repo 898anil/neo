@@ -23,7 +23,9 @@
         "reactions:write",
         "channels:history",
         "groups:history",
-        "im:history"
+        "im:history",
+        "files:read",
+        "files:write"
       ]
     }
   },
