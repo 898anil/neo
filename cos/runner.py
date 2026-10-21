@@ -118,12 +118,16 @@ def engine_env(meta: dict) -> dict:
 def build_command(
     engine: str, prompt: str, mode: str, session_id: Optional[str] = None, system: Optional[str] = None,
     extra_args: Optional[list[str]] = None, conclude: bool = False,
+    system_file: Optional[str] = None, prompt_on_stdin: bool = False,
 ) -> list[str]:
     """system: standing instructions. Claude takes them natively (--append-system-prompt, on every
     turn); Codex has no equivalent flag, so they lead the first prompt of the session.
     extra_args: more CLI options for the engine (for example Claude's --allowedTools, --json-schema).
     conclude: an agent session (it has the agent brief): Claude gets the Stop hook that makes each turn end
-    with a Status line (cos/conclusion.py). Scheduled jobs leave it off."""
+    with a Status line (cos/conclusion.py). Scheduled jobs leave it off.
+    system_file / prompt_on_stdin: keep the brief, memory and prompt off the command line, where any
+    user on this Mac can read them with `ps`. Claude reads system_file (--append-system-prompt-file);
+    the prompt goes on stdin, built by stdin_prompt()."""
     extra_args = list(extra_args or [])
     model = os.environ.get(f"{engine.upper()}_MODEL")
     if engine == "claude":
@@ -131,15 +135,19 @@ def build_command(
         cmd += CLAUDE_MODE_FLAGS[mode]
         if conclude:
             cmd += ["--settings", conclusion.settings_json()]
-        if system:
+        if system_file:
+            cmd += ["--append-system-prompt-file", system_file]
+        elif system:
             cmd += ["--append-system-prompt", system]
         if model:
             cmd += ["--model", model]
         if session_id:
             cmd += ["--resume", session_id]
+        if prompt_on_stdin:
+            return cmd + extra_args
         return cmd + extra_args + ["--", prompt]  # "--": a prompt starting with "-" is not an option
     if engine == "codex":
-        if system and not session_id:
+        if system and not session_id and not prompt_on_stdin:
             prompt = f"{system}\n\n---\n\n{prompt}"
         if mode == "full":
             access = ["--dangerously-bypass-approvals-and-sandbox"]
@@ -157,8 +165,25 @@ def build_command(
         cmd += ["--"]  # a prompt (or id) starting with "-" is not an option
         if session_id:
             cmd += [session_id]
-        return cmd + [prompt]
+        return cmd + ["-" if prompt_on_stdin else prompt]  # "-": codex reads the prompt from stdin
     raise ValueError(f"unknown engine: {engine}")
+
+
+def stdin_prompt(engine: str, prompt: str, session_id: Optional[str] = None, system: Optional[str] = None) -> str:
+    """What the engine reads on stdin with build_command(prompt_on_stdin=True): the prompt, and for
+    Codex's first turn the standing instructions ahead of it (Codex has no system-prompt flag)."""
+    if engine == "codex" and system and not session_id:
+        return f"{system}\n\n---\n\n{prompt}"
+    return prompt
+
+
+def write_private(path: Path, text: str) -> Path:
+    """Write text readable only by this user (0600), replacing any earlier file."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.chmod(path, 0o600)  # O_CREAT's mode is ignored when the file already existed
+    return path
 
 
 def validate_request(engine: str, prompt: str, cwd: str, mode: str) -> Optional[str]:
@@ -352,10 +377,16 @@ class Run:
         emit = on_event or (lambda _e: None)
         try:
             system = "\n\n".join(filter(None, (meta.get("system_prompt"), run_context(meta)))) or None
-            cmd = build_command(engine, text, mode, meta["session_id"] if is_follow_up else None,
+            session_id = meta["session_id"] if is_follow_up else None
+            # Brief, memory and prompt go through 0600 files, never argv (readable by anyone via `ps`).
+            system_file = (str(write_private(self.dir / "system.md", system))
+                           if system and engine == "claude" else None)
+            prompt_path = write_private(self.dir / "prompt.txt", stdin_prompt(engine, text, session_id, system))
+            cmd = build_command(engine, text, mode, session_id,
                                 system=system, conclude=bool(meta.get("conclude")),
                                 extra_args=(meta.get("cli_args") or [])
-                                + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []))
+                                + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []),
+                                system_file=system_file, prompt_on_stdin=True)
             emit(self.append_event({"kind": "prompt", "title": "You", "body": text, "data": {}}, turn))
             raw_path = self.dir / "raw.jsonl"
             offset = raw_path.stat().st_size if raw_path.exists() else 0
@@ -363,8 +394,8 @@ class Run:
             self._stderr_offset = stderr_path.stat().st_size if stderr_path.exists() else 0
             # The engine writes straight to files, not to a pipe into this process: if the bot
             # restarts, the engine keeps running and a new bot picks up where this one stopped.
-            with raw_path.open("ab") as out, (self.dir / "stderr.log").open("ab") as err:
-                self._proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
+            with raw_path.open("ab") as out, (self.dir / "stderr.log").open("ab") as err, prompt_path.open("rb") as inp:
+                self._proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err, stdin=inp,
                                               start_new_session=True, env=engine_env(meta))
         except FileNotFoundError as exc:
             emit(self.append_event({"kind": "error", "title": "Engine not found", "body": str(exc), "data": {}}, turn))

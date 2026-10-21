@@ -32,7 +32,7 @@ class OwnerTest(unittest.TestCase):
         with patch.dict(os.environ, {"NEO_OWNER_NAME": "Alex"}), \
                 patch.object(cards.subprocess, "run", side_effect=OSError("no claude")) as run:
             self.assertIsNone(cards.make_card("Fix CI", "log"))
-        prompt = run.call_args[0][0][-1]
+        prompt = run.call_args.kwargs["input"]  # stdin, not argv
         self.assertTrue(prompt.startswith("You are Alex's chief of staff. Alex is busy"), prompt[:80])
         self.assertNotIn("{owner}", prompt)
 
@@ -40,7 +40,7 @@ class OwnerTest(unittest.TestCase):
         with patch.dict(os.environ, {"NEO_OWNER_NAME": "Alex"}), \
                 patch.object(digest.subprocess, "run", side_effect=OSError("no claude")) as run:
             digest.make("Fix CI", "log", needs_you="merge?")
-        prompt = run.call_args[0][0][-1]
+        prompt = run.call_args.kwargs["input"]  # stdin, not argv
         self.assertIn("digest for Alex, who glances", prompt)
         self.assertIn("needs Alex for: merge?", prompt)
         self.assertTrue(ask.system_prompt("snap").startswith("The owner is asking about their work"))

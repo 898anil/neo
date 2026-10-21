@@ -6,6 +6,7 @@ the registration (deploy-nothread/deskie-web-stage-v3.13.70, 2026-10-13).
 """
 
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -35,8 +36,17 @@ class RunContextTest(unittest.TestCase):
             run.execute(follow_up)
         cmd, kwargs = popen.call_args.args[0], popen.call_args.kwargs
         self.cmd = cmd
-        system = cmd[cmd.index("--append-system-prompt") + 1] if "--append-system-prompt" in cmd else None
+        self.stdin = (run.dir / "prompt.txt").read_text()
+        self.assertNotIn("--append-system-prompt", cmd, "the brief never goes on the command line")
+        self.assertNotIn(self.stdin, cmd, "nor the prompt")
+        flag = "--append-system-prompt-file"
+        system = Path(cmd[cmd.index(flag) + 1]).read_text() if flag in cmd else None
         return run, system, kwargs.get("env")
+
+    def test_prompt_and_brief_files_are_private(self):
+        run, _, _ = self.start_turn(**self.SLACK)
+        for name in ("prompt.txt", "system.md"):
+            self.assertEqual((run.dir / name).stat().st_mode & 0o777, 0o600, name)
 
     def test_claude_follow_up_turn_still_knows_its_thread(self):
         run, _, _ = self.start_turn(**self.SLACK)
@@ -46,11 +56,19 @@ class RunContextTest(unittest.TestCase):
 
     def test_codex_gets_context_in_first_prompt_and_env_on_follow_ups(self):
         run, _, env = self.start_turn(engine="codex", **self.SLACK)
-        self.assertIn("1791814887.170329", self.cmd[-1])
+        self.assertEqual(self.cmd[-1], "-", "codex reads the prompt from stdin")
+        self.assertIn("1791814887.170329", self.stdin)
         self.assertEqual(env["NEO_SLACK_THREAD"], "1791814887.170329")
         _, _, env = self.start_turn(follow_up="and prod?", run=run)
-        self.assertEqual(self.cmd[-1], "and prod?")
+        self.assertEqual(self.stdin, "and prod?")
         self.assertEqual(env["NEO_SLACK_CHANNEL"], "C0C2QBJTSCU")
+
+    def test_codex_resume_reads_stdin_after_the_session_id(self):
+        cmd = runner.build_command("codex", "and?", "full", "thread-1", system="BRIEF", prompt_on_stdin=True)
+        self.assertEqual(cmd[-3:], ["--", "thread-1", "-"])
+        self.assertNotIn("BRIEF", " ".join(cmd))
+        self.assertEqual(runner.stdin_prompt("codex", "and?", "thread-1", "BRIEF"), "and?")
+        self.assertTrue(runner.stdin_prompt("codex", "go", None, "BRIEF").startswith("BRIEF"))
 
     def test_stale_run_id_from_the_bot_is_replaced(self):
         with patch.dict(os.environ, {"NEO_RUN_ID": "old-run"}):

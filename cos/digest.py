@@ -195,12 +195,12 @@ def make(title: str, material: str, needs_you: str = "", timeout: int = 420) -> 
     # The log is untrusted text: no tools, no MCP servers, no user settings or hooks, an empty cwd.
     needs = f"\nThe card for this task says it needs {owner_name()} for: {needs_you}" if needs_you else ""
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
-           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA),
-           "--", PROMPT.format(title=title, needs=needs, material=material[-cards.MATERIAL_CHARS:], **owner_fields())]
+           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA)]
+    prompt = PROMPT.format(title=title, needs=needs, material=material[-cards.MATERIAL_CHARS:], **owner_fields())
     cwd = Path(tempfile.gettempdir()) / "neo-digest"
     try:
         cwd.mkdir(exist_ok=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=str(cwd))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=prompt, cwd=str(cwd))  # stdin, not argv: `ps` shows argv
         raw = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
