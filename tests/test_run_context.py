@@ -63,6 +63,13 @@ class RunContextTest(unittest.TestCase):
         self.assertEqual(self.stdin, "and prod?")
         self.assertEqual(env["NEO_SLACK_CHANNEL"], "C0C2QBJTSCU")
 
+    def test_codex_resume_reads_stdin_after_the_session_id(self):
+        cmd = runner.build_command("codex", "and?", "full", "thread-1", system="BRIEF", prompt_on_stdin=True)
+        self.assertEqual(cmd[-3:], ["--", "thread-1", "-"])
+        self.assertNotIn("BRIEF", " ".join(cmd))
+        self.assertEqual(runner.stdin_prompt("codex", "and?", "thread-1", "BRIEF"), "and?")
+        self.assertTrue(runner.stdin_prompt("codex", "go", None, "BRIEF").startswith("BRIEF"))
+
     def test_stale_run_id_from_the_bot_is_replaced(self):
         with patch.dict(os.environ, {"NEO_RUN_ID": "old-run"}):
             run, _, env = self.start_turn(**self.SLACK)

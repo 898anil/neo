@@ -24,7 +24,7 @@ from .events import TRANSCRIPT_NORMALIZERS
 from .herdr import Herdr, HerdrError, agent_session_id
 from .runner import (
     AUTO_RESTART_DELAYS, AUTO_RESTART_PROMPT, CLAUDE_MODE_FLAGS, MAX_AUTO_RESTARTS_PER_PROMPT, MODES, Run,
-    is_transient_engine_error,
+    is_transient_engine_error, write_private,
 )
 
 log = logging.getLogger("cos.interactive")
@@ -168,8 +168,7 @@ class InteractiveRun:
         if system and engine == "claude":
             # From a file: herdr refuses to pass multi-line text through the pane's shell
             # ("agent arguments cannot be encoded safely"), and the agent would never start.
-            brief = run.dir / "system-prompt.md"
-            brief.write_text(system)
+            brief = write_private(run.dir / "system-prompt.md", system)
             agent_args = ("--append-system-prompt-file", str(brief), *agent_args)
         cwd_abs = run.meta()["cwd"]
         workspace = None

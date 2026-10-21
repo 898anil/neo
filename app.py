@@ -188,7 +188,8 @@ async def _thread_transcript(client, channel: str, thread_ts: str, exclude_ts: s
         text = _message_text(msg)
         if not text:
             continue
-        lines.append(f"{_speaker(msg, requester)}: {text}")
+        # Indent continuation lines so a message can't fake a new "<@U…> (requester):" line.
+        lines.append(f"{_speaker(msg, requester)}: " + text.replace("\n", "\n    "))
 
     if not lines:
         return ""
@@ -204,7 +205,9 @@ def _speaker(msg: dict, requester: Optional[str]) -> str:
     user = msg.get("user")
     if user and user == BOT_USER_ID:
         return "neo"
-    if msg.get("bot_id") or not user:
+    # bot_profile / bot_message mark a bot-token post; a person's own post made through an app
+    # (user token, e.g. Send-as-Anil) can carry bot_id too and stays that person.
+    if not user or msg.get("bot_profile") or msg.get("subtype") == "bot_message":
         return f"app {msg.get('username') or msg.get('bot_id') or 'unknown'}"
     return f"<@{user}> (requester)" if user == requester else f"<@{user}>"
 
