@@ -213,8 +213,10 @@ Tests: `poetry run python -m unittest discover -s tests`
 ## Security
 
 - `ALLOWED_USER_IDS` is the gate for Slack; never leave it empty in a shared workspace.
-- Headless runs default to `NEO_MODE=full` (no approval prompts, as the bot always ran);
-  `NEO_MODE=edit` or `readonly` tightens that. Live runs use each CLI's own permission settings.
+- Slack-started agents default to `NEO_MODE=full`: Claude and Codex run without approval prompts
+  in headless and live modes, and Codex bypasses its sandbox. In other modes, headless Codex
+  applies the `edit`/`readonly` sandbox policy; live Codex omits bypass and keeps its CLI
+  permissions. Claude receives the corresponding permission-mode setting in both runtimes.
 - Thread text is passed to agents as context: treat alert/bot messages as untrusted input.
 - The dashboard can start and steer agents. It only answers localhost, allowed Tailscale
   logins, or `COS_TOKEN`; cross-site requests are refused. Rotate the token by deleting
