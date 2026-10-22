@@ -378,8 +378,8 @@ def send(mid: str, text: str) -> dict:
     return run.meta()
 
 
-def hand_to_neo(mid: str) -> dict:
-    """Start a full neo run on the mention's neo_task; it should post its result in the thread itself."""
+def task_for_neo(mid: str) -> tuple[str, dict]:
+    """Build the task for a mention without choosing a runtime."""
     item = get(mid)
     if not item or not item.get("neo_task"):
         raise LookupError("nothing for neo to do here")
@@ -389,7 +389,16 @@ def hand_to_neo(mid: str) -> dict:
             "When done, reply in that Slack thread with what you did and the links (channel "
             f"{item['channel_id']}, thread_ts {item['thread_ts']}). Ask {o['owner']} before anything irreversible "
             "(a prod deploy, an admin merge, deleting data).")
-    run = Run.create("claude", task, workdir(), "full", source="dashboard",
-                     extra={"kind": "mention-task", "title": f"For {item['from']}: {item['asked'][:80]}"})
-    _set(mid, status="working", task_run=run.id, note="handed to neo")
+    return task, {"kind": "mention-task", "title": f"For {item['from']}: {item['asked'][:80]}"}
+
+
+def mark_handed_to_neo(mid: str, run_id: str) -> None:
+    _set(mid, status="working", task_run=run_id, note="handed to neo")
+
+
+def hand_to_neo(mid: str) -> dict:
+    """Compatibility entry point for scheduled/internal callers."""
+    task, extra = task_for_neo(mid)
+    run = Run.create("claude", task, workdir(), "full", source="dashboard", extra=extra)
+    mark_handed_to_neo(mid, run.id)
     return run

@@ -256,6 +256,20 @@ def start_turn(run: Run, prompt: str | None) -> None:
     threading.Thread(target=work, daemon=True, name=f"run-{run.id}").start()
 
 
+def start_live_task(engine: str, prompt: str, cwd: str, extra: dict | None = None,
+                    agent_args: tuple[str, ...] = (), system: str | None = None):
+    """Start owner-requested dashboard work in a grouped, controllable Herdr lane."""
+    from .interactive import InteractiveRun
+
+    irun = InteractiveRun.start(
+        engine, prompt, cwd, label="dashboard", source="dashboard", extra=extra,
+        agent_args=agent_args, system=system or agent_brief(cwd),
+        group_label=group_for_task(prompt, cwd), task_label=task_label(prompt),
+    )
+    LIVE_RUNS.append(irun)
+    return irun
+
+
 DO_IT_PROMPT = ("{Owner} read your summary and accepted the recommendation. Do it now: {do_it}\n"
                 "Ask them first only for something irreversible beyond that (a prod deploy, an admin merge, deleting data).")
 
@@ -279,14 +293,14 @@ def do_recommendation(key: str) -> dict:
         run = Run(key[4:])
         meta = fresh_meta(run)
         fleet.mark_run_seen(run.id)
-        if meta.get("mode") == "full" and meta.get("runtime", "headless") == "headless" and meta["status"] in TERMINAL:
-            start_turn(run, prompt)
-            return {"ok": True, "where": "run", "id": run.id}
         context = f"Context: an earlier neo run ({run.id}, {card.get('title', '')!r}) did: {card.get('did', '')}\n"
-        new = Run.create("claude", context + prompt, workdir(), "full", source="dashboard",
-                         extra={"kind": "do", "title": f"Do: {card.get('title', key)[:100]}"})
-        start_turn(new, None)
-        return {"ok": True, "where": "run", "id": new.id}
+        irun = start_live_task(
+            meta.get("engine") or "claude", context + prompt, meta.get("cwd") or workdir(),
+            extra={"kind": "do", "title": f"Do: {card.get('title', key)[:100]}"},
+        )
+        live = irun.run.meta()
+        return {"ok": True, "where": "agent", "id": live["id"],
+                "href": f"#/agent/{live['herdr_session']}/{live['herdr_pane']}"}
     raise LookupError("unknown item")
 
 
@@ -539,14 +553,15 @@ class Handler(BaseHTTPRequestHandler):
             if not question:
                 return self._error(HTTPStatus.BAD_REQUEST, "question required")
             try:
-                run = Run.create("claude", question[:2000], workdir(), "readonly", source="dashboard",
-                                 extra={"kind": "ask", "title": f"Ask: {question[:100]}",
-                                        "system_prompt": ask.system_prompt(ask.current_snapshot()),
-                                        "cli_args": watches.cli_args()[0]})
-            except ValueError as exc:
+                irun = start_live_task(
+                    "claude", question[:2000], workdir(),
+                    extra={"kind": "ask", "title": f"Ask: {question[:100]}"},
+                    agent_args=tuple(watches.cli_args()[0]),
+                    system=ask.system_prompt(ask.current_snapshot()),
+                )
+            except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
-            start_turn(run, None)
-            return self._json(run.meta(), HTTPStatus.CREATED)
+            return self._json(irun.run.meta(), HTTPStatus.CREATED)
         if parts == ["api", "memory", "apply"]:
             from . import autonomy
             which, shown = (body or {}).get("which"), (body or {}).get("review")
@@ -569,9 +584,10 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[3] == "send":
                     return self._json(mentions.send(parts[2], str((body or {}).get("text", ""))), HTTPStatus.ACCEPTED)
                 if parts[3] == "neo":
-                    run = mentions.hand_to_neo(parts[2])
-                    start_turn(run, None)
-                    return self._json(run.meta(), HTTPStatus.CREATED)
+                    prompt, extra = mentions.task_for_neo(parts[2])
+                    irun = start_live_task("claude", prompt, workdir(), extra=extra)
+                    mentions.mark_handed_to_neo(parts[2], irun.run.id)
+                    return self._json(irun.run.meta(), HTTPStatus.CREATED)
                 return self._json(mentions.dismiss(parts[2]))
             except LookupError as exc:
                 return self._error(HTTPStatus.NOT_FOUND, str(exc))
@@ -764,10 +780,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(HTTPStatus.BAD_REQUEST, "prompt is required")
                 if meta["status"] == "running":
                     return self._error(HTTPStatus.CONFLICT, "wait for the current turn to finish")
-                if not meta.get("session_id"):
-                    return self._error(HTTPStatus.CONFLICT, "no session to continue")
-                start_turn(run, prompt)
-                return self._json({"ok": True}, HTTPStatus.ACCEPTED)
+                args = memory.resume_args(meta.get("engine", "claude"), meta["session_id"]) if meta.get("session_id") else ()
+                irun = start_live_task(meta.get("engine", "claude"), prompt, meta.get("cwd") or workdir(),
+                                       extra={"kind": "continued-run", "resumed_from": run.id}, agent_args=args)
+                live = irun.run.meta()
+                return self._json({"ok": True, "session": live["herdr_session"], "pane_id": live["herdr_pane"]},
+                                  HTTPStatus.ACCEPTED)
         self._error(HTTPStatus.NOT_FOUND, "not found")
 
     @staticmethod
