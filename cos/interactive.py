@@ -140,6 +140,8 @@ class InteractiveRun:
         on_event: Optional[Callable[[dict], None]] = None,
         agent_args: tuple[str, ...] = (),
         system: Optional[str] = None,
+        group_label: Optional[str] = None,
+        task_label: Optional[str] = None,
     ) -> "InteractiveRun":
         herdr = herdr or Herdr()
         herdr.ensure_server()
@@ -173,10 +175,14 @@ class InteractiveRun:
         cwd_abs = run.meta()["cwd"]
         workspace = None
         try:
-            workspace, pane = herdr.create_workspace(cwd_abs, label)
+            if group_label:
+                workspace, tab, pane = herdr.acquire_lane(cwd_abs, group_label, task_label or label)
+            else:
+                workspace, pane = herdr.create_workspace(cwd_abs, label)
+                tab = None
             run.update_meta(
                 status="starting", herdr_session=herdr.session, herdr_agent=name,
-                herdr_workspace=workspace, herdr_pane=pane, turns=0,
+                herdr_workspace=workspace, herdr_tab=tab, herdr_pane=pane, turns=0,
             )
             agent = cls._start_past_trust_prompt(herdr, name, engine, pane, agent_args)
         except HerdrError as exc:
@@ -189,7 +195,10 @@ class InteractiveRun:
                 except HerdrError:
                     screen = ""
                 try:
-                    herdr.close_workspace(workspace)  # do not leave an empty workspace behind
+                    if tab:
+                        herdr.close_lane(workspace, tab)
+                    else:
+                        herdr.close_workspace(workspace)  # do not leave an empty workspace behind
                 except HerdrError:
                     pass
             detail = f"{exc}\n\nThe agent's screen when it gave up:\n{screen}" if screen else str(exc)
@@ -425,14 +434,22 @@ class InteractiveRun:
 
     def close(self) -> None:
         self._stop.set()
-        workspace = self.run.meta().get("herdr_workspace")
-        if workspace:
-            try:
-                self.herdr.close_workspace(workspace)
-            except HerdrError:
-                pass
+        self._close_layout()
         self.run.update_meta(status="closed")
         self._emit({"kind": "status", "title": "closed", "body": "", "data": {"status": "closed"}})
+
+    def _close_layout(self) -> None:
+        """Clean the Nio-owned lane while preserving sibling tasks in the same group."""
+        workspace = self.run.meta().get("herdr_workspace")
+        tab = self.run.meta().get("herdr_tab")
+        if workspace:
+            try:
+                if tab:
+                    self.herdr.close_lane(workspace, tab)
+                else:
+                    self.herdr.close_workspace(workspace)
+            except HerdrError:
+                pass
 
     # --------------------------------------------------------------- watcher
 
@@ -602,6 +619,7 @@ class InteractiveRun:
             state = self.status()
             self._polled_ok = True
             if state == "closed":
+                self._close_layout()
                 self.run.update_meta(status="closed")
                 self._emit({"kind": "status", "title": "closed", "body": "agent is gone from herdr", "data": {"status": "closed"}})
                 with _CLAIMED_LOCK:

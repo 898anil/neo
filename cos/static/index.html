@@ -2200,7 +2200,7 @@ function openSheet(pre = {}) {
   if (document.querySelector(".sheet")) return;
   const o = overview || { agents: [], runs: [] };
   const recent = [...new Set([...o.agents.map((a) => a.cwd), ...o.runs.map((r) => r.cwd)].filter(Boolean))].slice(0, 5);
-  let engine = o.default_engine || "claude", how = "live", where = pre.where || "folder";
+  let engine = o.default_engine || "claude", where = pre.where || "folder";
   const close = () => { scrim.remove(); sheet.remove(); };
   const scrim = h("div", { class: "scrim", onclick: close });
   const segOf = (opts, get, set) => {
@@ -2212,22 +2212,21 @@ function openSheet(pre = {}) {
   const hint = h("span", { class: "hint" });
   const whereHint = h("span", { class: "hint" });
   const syncHint = () => {
-    hint.textContent = how === "live" ? "Runs in a terminal you can take over, and asks before risky steps." : "Runs to completion without stopping for approvals.";
+    hint.textContent = "Runs in a grouped Herdr terminal you can inspect and take over.";
     whereHint.textContent = where === "branch" ? "Starts a fresh branch off main in its own worktree, so parallel tasks never collide." : "Works directly in the folder below.";
   };
   const cwd = h("input", { class: "field", name: "cwd", value: pre.cwd || recent[0] || "", autocomplete: "off", autocapitalize: "off", spellcheck: "false", required: true });
   const task = h("textarea", { class: "field", name: "task", placeholder: "What should the agent do?", required: true }, pre.prompt || "");
   const start = h("button", { class: "btn primary", type: "submit", style: "height:50px;justify-content:center" }, "Start task");
   const form = h("form", { onsubmit: async (e) => {
-    e.preventDefault(); start.disabled = true; start.textContent = how === "live" ? "Starting agent…" : "Starting…";
+    e.preventDefault(); start.disabled = true; start.textContent = "Starting agent…";
     const payload = { engine, cwd: cwd.value.trim(), prompt: task.value.trim(), mode: "full", branch: where === "branch", finding: pre.finding };
     try {
-      if (how === "live") { const r = await api("/api/live", { method: "POST", body: JSON.stringify(payload) }); close(); location.hash = `#/agent/${enc(r.session)}/${enc(r.pane_id)}`; }
-      else { const r = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) }); close(); location.hash = `#/run/${r.id}`; }
+      const r = await api("/api/live", { method: "POST", body: JSON.stringify(payload) }); close(); location.hash = `#/agent/${enc(r.session)}/${enc(r.pane_id)}`;
     } catch (err) { toast(err.message); start.disabled = false; start.textContent = "Start task"; }
   } },
     h("label", { class: "lbl" }, "Agent", segOf([["claude", "Claude"], ["codex", "Codex"]], () => engine, (v) => (engine = v))),
-    h("label", { class: "lbl" }, "How it runs", segOf([["live", "Live"], ["headless", "In the background"]], () => how, (v) => (how = v)), hint),
+    h("label", { class: "lbl" }, "How it runs", hint),
     h("label", { class: "lbl" }, "Where", segOf([["folder", "In the folder"], ["branch", "On a new branch"]], () => where, (v) => (where = v)), whereHint),
     h("label", { class: "lbl" }, "Folder", cwd, recent.length > 1 ? h("div", { class: "recent" }, recent.map((c) => h("button", { type: "button", onclick: () => (cwd.value = c) }, c.split("/").filter(Boolean).pop()))) : null),
     h("label", { class: "lbl" }, "Task", task),

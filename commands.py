@@ -1,7 +1,7 @@
 """Parse @neo messages and render run progress for Slack. No Slack or I/O here.
 
 Grammar (after the @neo mention is stripped):
-    [live] [claude|codex] [cwd=<path>] <task>     start or continue a run
+    [live] [claude|codex] [cwd=<path>] <task>     start or continue a live run
     stop | status | close | approve | deny         control the thread's run
     keys <key> [<key> ...]                        raw keys to a live agent (e.g. `keys 2 enter`)
     default [claude|codex]                        show or set the agent used when you name none
@@ -29,9 +29,9 @@ SLACK_TEXT_MAX = 3800
 
 HELP = (
     "*How to use me*\n"
-    "`@neo <task>` run the default engine headless, with live steps in this thread\n"
+    "`@neo <task>` run the default engine in Herdr, with live steps in this thread\n"
     "`@neo claude <task>` / `@neo codex <task>` pick the engine\n"
-    "`@neo live claude <task>` run it interactively in herdr; you can attach and take over\n"
+    "Every task is interactive in Herdr; you can attach and take over\n"
     "`@neo cwd=~/path/to/repo <task>` choose the working folder\n"
     "`@neo default codex` / `@neo default claude` set the agent used when you name none\n"
     "`@neo watches` what your watches (Sentry, production errors, ...) found and haven't been handled\n"
@@ -104,7 +104,9 @@ def parse(text: str) -> Request:
     prompt = text.strip()
     for token in words[: len(words) - len(rest)]:
         prompt = prompt[len(token):].lstrip()
-    return Request("run", prompt=prompt, engine=engine, live=bool(live), cwd=cwd)
+    # Owner-started Slack tasks are always visible and controllable in Herdr. ``live`` remains
+    # accepted for backwards compatibility, but is no longer required.
+    return Request("run", prompt=prompt, engine=engine, live=True, cwd=cwd)
 
 
 # ------------------------------------------------------------------ progress

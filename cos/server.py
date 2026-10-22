@@ -50,6 +50,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from . import ask, brief, cards, digest, fleet, home, loops, memory, mentions, pause, settings, watches, work
 from .config import agent_brief, default_engine, owner_fields, workdir
 from .herdr import HerdrError
+from .layout import group_for_task, task_label
 from .runner import ENGINES, TERMINAL, Run, list_runs, valid_run_id
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -655,7 +656,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 irun = InteractiveRun.start(engine, prompt, cwd, label="resume", source="dashboard",
                                             extra={"kind": "resume", "resumed_from": str(path), "title": f"Continued: {info['title']}"},
-                                            agent_args=memory.resume_args(engine, info["session_id"]), system=agent_brief(cwd))
+                                            agent_args=memory.resume_args(engine, info["session_id"]), system=agent_brief(cwd),
+                                            group_label="Nio · Agent operations", task_label=task_label(f"Continue {info['title']}"))
             except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
             LIVE_RUNS.append(irun)
@@ -680,14 +682,14 @@ class Handler(BaseHTTPRequestHandler):
             extra = {"kind": f"pr-{parts[2]}", "pr_url": pr["url"], "system_prompt": standing, "conclude": bool(standing),
                      "title": f"Review: {pr['title']}" if parts[2] == "review" else f"Fix CI: {pr['title']}"}
             try:
-                if parts[2] == "review":
-                    run = Run.create(default_engine(), work.review_prompt(pr), cwd, "full", source="dashboard", extra=extra)
-                    start_turn(run, None)
-                    return self._json({"run_id": run.id}, HTTPStatus.CREATED)
                 from .interactive import InteractiveRun
-
-                irun = InteractiveRun.start(default_engine(), work.fix_ci_prompt(pr), cwd, label=f"fix-{pr['repo_name']}-{pr['number']}",
-                                            source="dashboard", extra={"kind": "pr-fix", "pr_url": pr["url"], "title": f"Fix CI: {pr['title']}"}, system=agent_brief(cwd))
+                task_prompt = work.review_prompt(pr) if parts[2] == "review" else work.fix_ci_prompt(pr)
+                title = ("Review" if parts[2] == "review" else "Fix CI") + f" #{pr['number']}: {pr['title']}"
+                irun = InteractiveRun.start(
+                    default_engine(), task_prompt, cwd, label=f"{parts[2]}-{pr['repo_name']}-{pr['number']}",
+                    source="dashboard", extra=extra, system=agent_brief(cwd),
+                    group_label=group_for_task(task_prompt, cwd), task_label=task_label(title),
+                )
                 LIVE_RUNS.append(irun)
                 meta = irun.run.meta()
                 return self._json({"run_id": meta["id"], "session": meta["herdr_session"], "pane_id": meta["herdr_pane"]}, HTTPStatus.CREATED)
@@ -709,6 +711,8 @@ class Handler(BaseHTTPRequestHandler):
                     engine, str(body.get("prompt", "")), cwd,
                     label="dash", source="dashboard", system=agent_brief(cwd),
                     extra={"branch": branch} if branch else None,
+                    group_label=group_for_task(str(body.get("prompt", "")), cwd),
+                    task_label=task_label(str(body.get("prompt", ""))),
                 )
             except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -724,19 +728,20 @@ class Handler(BaseHTTPRequestHandler):
                 branch = None
                 if body.get("branch") and str(body.get("prompt", "")).strip():
                     cwd, branch = work.new_worktree(cwd, str(body.get("prompt", "")))
-                run = Run.create(
-                    engine=str(body.get("engine", "")),
-                    prompt=str(body.get("prompt", "")),
-                    cwd=cwd,
-                    mode=str(body.get("mode", "readonly")),
-                    source="dashboard",
-                    extra={"system_prompt": (standing := agent_brief(cwd)), "conclude": bool(standing), "branch": branch},
+                from .interactive import InteractiveRun
+                prompt = str(body.get("prompt", ""))
+                irun = InteractiveRun.start(
+                    str(body.get("engine", "")), prompt, cwd,
+                    label="dashboard", source="dashboard", system=agent_brief(cwd),
+                    extra={"branch": branch} if branch else None,
+                    group_label=group_for_task(prompt, cwd), task_label=task_label(prompt),
                 )
-            except ValueError as exc:
+            except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
-            start_turn(run, None)
-            self._mark_finding(body, {"run_id": run.id})
-            return self._json(run.meta(), HTTPStatus.CREATED)
+            LIVE_RUNS.append(irun)
+            meta = irun.run.meta()
+            self._mark_finding(body, {"run_id": meta["id"], "session": meta["herdr_session"], "pane_id": meta["herdr_pane"]})
+            return self._json(meta, HTTPStatus.CREATED)
 
         if len(parts) == 4 and parts[:2] == ["api", "runs"]:
             run = self._run_or_404(parts[2])

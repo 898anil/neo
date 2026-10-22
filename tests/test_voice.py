@@ -208,7 +208,7 @@ class VoiceMentionTest(unittest.IsolatedAsyncioTestCase):
         self.patches = [
             patch.object(sessions, "_STORE_PATH", Path(self.tmp.name) / "sessions.json"),
             patch.object(app, "ALLOWED_USER_IDS", {"U1"}),
-            patch.object(app, "run_headless", self.run),
+            patch.object(app, "start_live", self.run),
         ]
         for p in self.patches:
             p.start()
@@ -225,7 +225,7 @@ class VoiceMentionTest(unittest.IsolatedAsyncioTestCase):
             await app.handle_mention(event, client)
         self.assertTrue(any("Heard:_ check the stage deploy" in p for p in client.posts))
         args, kwargs = self.run.await_args
-        self.assertIn("check the stage deploy", args[5])
+        self.assertIn("check the stage deploy", args[4])
         self.assertTrue(kwargs["spoken"])
 
     async def test_unheard_clip_says_so_and_runs_nothing(self):

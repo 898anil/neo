@@ -20,6 +20,7 @@ AGENT_NAME_MAX = 32
 # One start at a time per bot: every run's watcher may notice a dead server at once, and a second
 # start would kill the tmux session the first one just made.
 _START_LOCK = threading.Lock()
+_LAYOUT_LOCK = threading.Lock()
 _START_FAILED_AT: dict[str, float] = {}
 START_RETRY_SECONDS = 60.0
 
@@ -144,6 +145,39 @@ class Herdr:
     def create_workspace(self, cwd: str, label: str) -> tuple[str, str]:
         result = self.call("workspace", "create", "--cwd", cwd, "--label", label, "--no-focus")
         return result["workspace"]["workspace_id"], result["root_pane"]["pane_id"]
+
+    def acquire_lane(self, cwd: str, group_label: str, task_label: str) -> tuple[str, str, str]:
+        """Reuse a logical Nio workspace and create one task tab inside it."""
+        with _LAYOUT_LOCK:
+            rows = self.call("workspace", "list").get("workspaces") or []
+            workspace = next((row for row in rows if row.get("label") == group_label), None)
+            if workspace:
+                workspace_id = workspace["workspace_id"]
+                result = self.call(
+                    "tab", "create", "--workspace", workspace_id, "--cwd", cwd,
+                    "--label", task_label, "--no-focus",
+                )
+                tab_id = result["tab"]["tab_id"]
+                pane_id = result["root_pane"]["pane_id"]
+            else:
+                result = self.call(
+                    "workspace", "create", "--cwd", cwd, "--label", group_label, "--no-focus",
+                )
+                workspace_id = result["workspace"]["workspace_id"]
+                tab_id = result["tab"]["tab_id"]
+                pane_id = result["root_pane"]["pane_id"]
+                self.call("tab", "rename", tab_id, task_label)
+            self.call("pane", "rename", pane_id, task_label)
+            return workspace_id, tab_id, pane_id
+
+    def close_lane(self, workspace_id: str, tab_id: str) -> None:
+        """Remove only this Nio-owned task; remove its group when it becomes empty."""
+        with _LAYOUT_LOCK:
+            tabs = self.call("tab", "list", "--workspace", workspace_id).get("tabs") or []
+            if len(tabs) > 1:
+                self.call("tab", "close", tab_id)
+            else:
+                self.close_workspace(workspace_id)
 
     def close_workspace(self, workspace_id: str) -> None:
         self.call("workspace", "close", workspace_id)

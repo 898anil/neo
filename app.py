@@ -44,6 +44,7 @@ from cos import autonomy, learn, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
+from cos.layout import group_for_task, task_label  # noqa: E402
 from cos.runner import ENGINES, MODES, Run, cos_home, list_runs, pid_alive  # noqa: E402
 
 # Only these Slack user ids may trigger the bot. This is the security gate:
@@ -472,8 +473,9 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
 class LiveThread:
     """Bridges one interactive herdr agent and one Slack thread."""
 
-    def __init__(self, client, channel: str, thread_ts: str):
+    def __init__(self, client, channel: str, thread_ts: str, spoken: bool = False):
         self.client, self.channel, self.thread_ts = client, channel, thread_ts
+        self.speak_next = spoken
         self.loop = asyncio.get_running_loop()
         self.queue: asyncio.Queue = asyncio.Queue()
         self.irun: Optional[InteractiveRun] = None
@@ -553,6 +555,9 @@ class LiveThread:
             await self.reporter.finish("done", bool(final.strip()))
             if final.strip():
                 await self.reporter.say(final)
+                if self.speak_next:
+                    await say_aloud(self.client, self.channel, self.thread_ts, final)
+                    self.speak_next = False
             self.reporter = None  # the next event starts a new turn message
         elif state == "closed":
             await self.reporter.finish("done", True)
@@ -562,12 +567,14 @@ class LiveThread:
             await self.reporter.update(force=True)
 
 
-async def start_live(client, channel: str, thread_ts: str, req, prompt: str) -> bool:
+async def start_live(client, channel: str, thread_ts: str, req, prompt: str, spoken: bool = False) -> bool:
     engine = req.engine or default_engine()
     cwd = req.cwd or WORKDIR
-    live = LiveThread(client, channel, thread_ts)
+    live = LiveThread(client, channel, thread_ts, spoken=spoken)
     LIVE[thread_ts] = live
     label = f"slack-{thread_ts.split('.')[0][-6:]}"
+    group = group_for_task(req.prompt, cwd)
+    title = task_label(req.prompt)
     system = await asyncio.to_thread(agent_brief, cwd)
     try:
         live.irun = await asyncio.to_thread(
@@ -582,6 +589,8 @@ async def start_live(client, channel: str, thread_ts: str, req, prompt: str) -> 
             live.on_event,
             (),
             system,
+            group,
+            title,
         )
     except Exception as exc:  # noqa: BLE001 - HerdrError, ValueError, OSError, ...
         log.exception("live start failed for thread=%s", thread_ts)
@@ -1296,14 +1305,15 @@ async def handle_mention(event: dict, client) -> None:
     ok = True
     try:
         live = await live_for(client, channel, thread_ts, entry)
-        if live and live.irun and not req.live and not req.engine:
+        if live and live.irun and not req.engine:
             # Follow-up in a live thread goes straight to the running agent.
+            live.speak_next = spoken
             await asyncio.to_thread(live.irun.send, req.prompt)
         else:
             transcript = await _thread_transcript(client, channel, thread_ts, event["ts"], requester=user)
             prompt = _with_context(transcript, req.prompt)
             if req.live:
-                ok = await start_live(client, channel, thread_ts, req, prompt)
+                ok = await start_live(client, channel, thread_ts, req, prompt, spoken=spoken)
             else:
                 ok = await run_headless(client, channel, thread_ts, entry, req, prompt, spoken=spoken)
     except HerdrError as exc:

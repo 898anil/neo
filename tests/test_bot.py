@@ -21,7 +21,7 @@ from cos.events import normalize_claude_transcript, normalize_codex_transcript  
 class ParseTest(unittest.TestCase):
     def test_plain_task_keeps_text(self):
         req = commands.parse("why is the build red?\nsee logs")
-        self.assertEqual((req.command, req.engine, req.live), ("run", None, False))
+        self.assertEqual((req.command, req.engine, req.live), ("run", None, True))
         self.assertEqual(req.prompt, "why is the build red?\nsee logs")
 
     def test_options_in_any_order(self):
@@ -314,6 +314,7 @@ class InteractiveRunTest(unittest.TestCase):
         self.set_status("gone")
         self.wait_for(events, lambda e: e["kind"] == "status" and e["title"] == "closed")
         self.assertEqual(irun.run.meta()["status"], "closed")
+        self.assertIn(["workspace", "close", "w9"], self.calls())
 
     def test_attach_resumes_from_saved_offset(self):
         from cos.herdr import Herdr
