@@ -164,7 +164,8 @@ class InteractiveRun:
             agent_args = ("--remote-control", name, *agent_args)
         if engine == "codex":
             # An "Update available" menu at startup would hold an unattended session forever.
-            agent_args = ("-c", "check_for_update_on_startup=false", *agent_args)
+            bypass = ("--dangerously-bypass-approvals-and-sandbox",) if mode == "full" else ()
+            agent_args = (*bypass, "-c", "check_for_update_on_startup=false", *agent_args)
         if system and engine == "claude":
             # From a file: herdr refuses to pass multi-line text through the pane's shell
             # ("agent arguments cannot be encoded safely"), and the agent would never start.
