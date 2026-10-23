@@ -407,6 +407,9 @@ class CodexTurnCompleteTest(InteractiveRunTest):
         done = [e for e in events if e["kind"] == "status" and e["title"] == "done"]
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0]["data"]["last_text"], "Two files.")
+        # Full mode (the default): an interactive codex never stops on an approval or the sandbox.
+        args = json.loads((self.state / "start_args").read_text())
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", args)
 
 
 class CodexSecondTurnTest(CodexTurnCompleteTest):
