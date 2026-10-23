@@ -18,6 +18,14 @@ DEDUPE_MINUTES = 30
 # Message subtypes that are real posts. Joins, edits, deletes, topic changes etc. are not alerts.
 _POST_SUBTYPES = (None, "bot_message", "file_share")
 _RESOLVED_RE = re.compile(r"\[resolved\b|^\W*resolved\b|\bstatus:\s*resolved\b", re.I)
+# Status posts that a CI bot creates when a run starts and then edits in place as jobs finish.
+_FAILED_RE = re.compile(r"\b(fail(ed|ure|ing)?|error|cancel(l)?ed|timed out)\b|:x:|:rotating_light:|:red_circle:", re.I)
+_RUNNING_RE = re.compile(r"\b(running|waiting|queued|in progress|started|starting)\b|:arrows_counterclockwise:|:hourglass", re.I)
+_PASSED_RE = re.compile(r"\b(passed|succeeded|success|green)\b|:white_check_mark:|:tada:", re.I)
+# Only posts that look like a CI run's status are held while running or skipped when green; a plain
+# alert ("success rate dropped", "5000 messages queued") always gets its RCA.
+_CI_RE = re.compile(r"actions/runs/|\b(ci|e2e|nightly|sweep|workflow|pipeline|builds?|gate \d+|checks?|jobs?)\b", re.I)
+PENDING_HOURS = 6  # how long an in-progress status post is re-checked for its final state
 
 
 def alert_signature(text: str) -> str:
@@ -29,6 +37,28 @@ def alert_signature(text: str) -> str:
 def is_resolved(text: str) -> bool:
     """Alertmanager's "[RESOLVED] ..." notifications: the alert is over, nothing to explain."""
     return bool(_RESOLVED_RE.search(text))
+
+
+def _status_part(text: str) -> str:
+    """The text minus links and summary lines, which quote commit subjects ("fix: fail closed ...")."""
+    text = re.sub(r"<[^>|]+\|?[^>]*>", " ", text)
+    return "\n".join(line for line in text.splitlines() if not re.match(r"\W*summary:", line, re.I))
+
+
+def run_state(text: str) -> str:
+    """'failed' if any failure shows, else 'running' while jobs are still going, else 'passed'
+    when only success markers are left, else 'other' (a plain alert with no run status)."""
+    is_ci = bool(_CI_RE.search(text))
+    text = _status_part(text)
+    if _FAILED_RE.search(text):
+        return "failed"
+    if not is_ci:
+        return "other"
+    if _RUNNING_RE.search(text):
+        return "running"
+    if _PASSED_RE.search(text):
+        return "passed"
+    return "other"
 
 
 def is_candidate(msg: dict, bot_user_id: Optional[str]) -> bool:
@@ -50,6 +80,7 @@ class AlertGate:
             self.state = {}
         self.seen: dict[str, float] = {}  # signature -> when we last took it
         self.taken: dict[str, float] = {}  # "channel:ts" -> when we took or rejected it
+        self.pending: dict[str, float] = {}  # "channel:ts" of in-progress status posts -> first seen
 
     def admit(self, channel: str, msg: dict, text: str, bot_user_id: Optional[str], now: Optional[float] = None) -> Optional[str]:
         """Return None to run an RCA for this message, else the reason it is skipped.
@@ -63,12 +94,19 @@ class AlertGate:
             return "already handled"
         if not is_candidate(msg, bot_user_id):
             return "not a new top-level post"
-        self.taken[key] = now
         self._prune(now)
+        if text.strip() and not is_resolved(text) and run_state(text) == "running":
+            # Not final yet: the bot edits this post as jobs finish. Look again on the edit or poll.
+            self.pending.setdefault(key, now)
+            return "still running"
+        self.pending.pop(key, None)
+        self.taken[key] = now
         if not text.strip():
             return "empty"
         if is_resolved(text):
             return "resolved notification"
+        if run_state(text) == "passed":
+            return "passed"
         sig = alert_signature(text)
         if now - self.seen.get(sig, 0) < DEDUPE_MINUTES * 60:
             return "repeat of a recent alert"
@@ -81,6 +119,10 @@ class AlertGate:
         self.state["count"] += 1
         self.save()
         return None
+
+    def pending_ts(self, channel: str) -> list[str]:
+        """In-progress status posts in this channel still worth re-checking."""
+        return [k.split(":", 1)[1] for k in self.pending if k.startswith(f"{channel}:")]
 
     def release(self, text: str) -> None:
         """Give back what admit() took for an alert whose RCA was not run (notifications paused):
@@ -104,3 +146,5 @@ class AlertGate:
         for store in (self.taken, self.seen):
             for key in [k for k, at in store.items() if now - at > day]:
                 del store[key]
+        for key in [k for k, at in self.pending.items() if now - at > PENDING_HOURS * 3600]:
+            del self.pending[key]

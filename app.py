@@ -638,6 +638,19 @@ AUTO_RCA_CHANNELS = [c.strip() for c in os.environ.get("NEO_AUTO_RCA_CHANNELS", 
 AUTO_RCA_DAILY_MAX = int(os.environ.get("NEO_AUTO_RCA_DAILY_MAX", "10"))
 AUTO_RCA_POLL_SECONDS = 300
 AUTO_RCA_PROMPT = "An alert just arrived in this thread. Find the root cause (follow your RCA method) and say whether anyone needs to act."
+# Channels where an alert should be fixed, not only explained. Their prompt is prompts/auto-fix.md.
+AUTO_FIX_CHANNELS = [c.strip() for c in os.environ.get("NEO_AUTO_FIX_CHANNELS", "").split(",") if c.strip()]
+AUTO_FIX_PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts", "auto-fix.md")
+
+
+def _alert_prompt(channel: str) -> str:
+    if channel in AUTO_FIX_CHANNELS:
+        try:
+            with open(AUTO_FIX_PROMPT_FILE) as fh:
+                return fh.read().strip()
+        except OSError:
+            log.warning("auto fix prompt %s missing; falling back to RCA only", AUTO_FIX_PROMPT_FILE)
+    return AUTO_RCA_PROMPT
 ALERT_GATE = AlertGate(str(cos_home() / "auto_rca.json"), AUTO_RCA_DAILY_MAX)
 
 
@@ -653,10 +666,11 @@ async def maybe_auto_rca(client, channel: str, msg: dict, via: str) -> None:
         ALERT_GATE.release(text)
         chief.alert_loop(channel, msg["ts"], text, thread_url(channel, msg["ts"]))
         return
-    log.info("auto RCA for alert %s in %s (%s)", msg["ts"], channel, via)
-    req = commands.parse(AUTO_RCA_PROMPT)
+    prompt = _alert_prompt(channel)
+    log.info("auto %s for alert %s in %s (%s)", "fix" if prompt is not AUTO_RCA_PROMPT else "RCA", msg["ts"], channel, via)
+    req = commands.parse(prompt)
     transcript = await _thread_transcript(client, channel, msg["ts"], "")
-    asyncio.create_task(run_headless(client, channel, msg["ts"], None, req, _with_context(transcript, AUTO_RCA_PROMPT),
+    asyncio.create_task(run_headless(client, channel, msg["ts"], None, req, _with_context(transcript, prompt),
                                     kind="alert-rca"))
     chief.alert_loop(channel, msg["ts"], text, thread_url(channel, msg["ts"]))
 
@@ -677,6 +691,11 @@ async def auto_rca(client) -> None:
                 for msg in sorted(resp.get("messages", []), key=lambda m: float(m["ts"])):
                     ALERT_GATE.set_cursor(channel, msg["ts"])
                     await maybe_auto_rca(client, channel, msg, "poll")
+                # Status posts that were still running: their final state arrives as an edit.
+                for ts in ALERT_GATE.pending_ts(channel):
+                    one = await client.conversations_history(channel=channel, latest=ts, oldest=ts, inclusive=True, limit=1)
+                    for msg in one.get("messages", []):
+                        await maybe_auto_rca(client, channel, msg, "poll-edit")
             ALERT_GATE.save()
         except Exception:  # noqa: BLE001 - keep watching
             log.exception("auto RCA pass failed")
@@ -1049,7 +1068,11 @@ async def handle_dm(event: dict, client) -> None:
     `message.channels` / `message.groups`; see manifest.json.
     """
     if event.get("channel") in AUTO_RCA_CHANNELS:
-        await maybe_auto_rca(client, event["channel"], event, "event")
+        if event.get("subtype") == "message_changed" and event.get("message"):
+            # A status post edited in place (e.g. "running" -> "failed"): judge its new text.
+            await maybe_auto_rca(client, event["channel"], event["message"], "edit")
+        else:
+            await maybe_auto_rca(client, event["channel"], event, "event")
         return
     if event.get("subtype") == "file_share" and not (ALLOWED_USER_IDS and event.get("user") not in ALLOWED_USER_IDS):
         await resolve_files(client, event)
