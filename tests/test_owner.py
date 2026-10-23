@@ -51,7 +51,7 @@ class OwnerTest(unittest.TestCase):
     def test_brief_template_takes_the_owner_intro(self):
         template = config.read_prompt("brief.md")
         with patch.dict(os.environ, {"NEO_OWNER_NAME": "Alex", "NEO_OWNER_PROFILE": "an engineer at Acme"}):
-            text = template.format(date="1 May", weekday="Monday", agents="", **config.owner_fields())
+            text = template.format(date="1 May", weekday="Monday", agents="", bot="Neo", **config.owner_fields())
         self.assertIn("I am Alex, an engineer at Acme, reading this", text)
 
     def test_loop_check_deploy_hint(self):

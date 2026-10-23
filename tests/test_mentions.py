@@ -63,6 +63,19 @@ class MentionsTest(unittest.TestCase):
         self.assertEqual([i["ts"] for i in new], ["3.3"])
         self.assertIn("neo's own", self.m.prompt())
 
+    def test_neo_posts_under_its_slack_bot_name_are_dropped(self):
+        # The Slack app can be named anything ("Nio"): its own approval pings must not come back as asks.
+        with patch.dict(os.environ, {"NEO_BOT_NAME": "nio"}):
+            new = self.m.merge({"mentions": [hit("1.1", **{"from": "Nio (bot)"}), hit("2.2", **{"from": "Nio"}),
+                                             hit("3.3", **{"from": "Nikhil"})]}, "r", NOW)
+            self.assertEqual([i["ts"] for i in new], ["3.3"])
+            self.assertIn("Nio", self.m.prompt())
+
+    def test_neo_posts_found_before_the_fix_leave_the_open_list(self):
+        self.m.merge({"mentions": [hit("1.1", **{"from": "Nio (bot)"}), hit("2.2")]}, "r", NOW)  # no bot name known yet
+        with patch.dict(os.environ, {"NEO_BOT_NAME": "nio"}):
+            self.assertEqual([i["ts"] for i in self.m.open_items()], ["2.2"])
+
     def test_prompt_names_the_owner_and_adds_configured_rules(self):
         with patch.dict(os.environ, {"NEO_OWNER_NAME": "Alex", "NEO_OWNER_PROFILE": "an engineer at Acme",
                                      "NEO_MENTIONS_RULES": "Alex does not review PRs.\\nNo replies on Fridays."}):

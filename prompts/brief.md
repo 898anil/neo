@@ -5,7 +5,9 @@ Gather, using the connectors and CLIs you have (skip a source quietly if it is u
 list skipped sources in one line at the end):
 - Calendar: today's meetings (time, title, who), and anything I must prepare for.
 - Gmail: unread or important mail from the last day that needs a reply or decision.
-- Slack: direct messages and mentions from the last day that are still waiting for my reply.
+- Slack: direct messages and mentions from the last day that are still waiting for my reply. Leave out
+  posts by neo's own Slack bot ({bot}): its alerts (agents waiting for approval, send failures, nudges)
+  repeat my agents below and go stale once an agent is closed.
 - GitHub (`gh`): pull requests waiting for my review, and my own pull requests that have failing CI,
   requested changes, or approval (ready to merge).
 - Sentry: new or regressed production issues in the last 24 hours, with event and user counts.
@@ -20,4 +22,5 @@ with a link (meeting, thread, PR, Sentry issue).
 **Meetings** - today's schedule, one line each.
 **Waiting on you** - replies owed and reviews requested, grouped, with links.
 **Production** - notable Sentry issues, or "Quiet" if nothing new.
-**Agents** - what finished overnight, what is stuck or waiting.
+**Agents** - what finished overnight, what is stuck or waiting. Call an agent stuck or waiting only if the agent
+list above says so, never from a Slack message about it.
