@@ -215,6 +215,29 @@ class PausedBotTest(unittest.TestCase):
         asyncio.run(run())
         self.assertEqual(posted, [])
 
+    def test_watch_draft_is_posted_whole_and_apart_from_findings(self):
+        import app
+        client, posted = self.client()
+        draft = "*Bug update · Tue 20 Oct*\n✅ *Shipped:* #2536 " + "x" * 400 + "\n*Asks:* retest"
+
+        async def run():
+            notify = app.watch_checked(client, asyncio.get_running_loop())
+            with patch.object(app, "NOTIFY_CHANNEL", "C1"), patch.object(app.chief, "finding_loops"):
+                notify({"id": "w", "name": "Bugs Triage", "draft_channel": "C9"}, {"status": "done", "id": "r"},
+                       [{"severity": "high", "id": "f1", "key": "design#1", "title": "boom", "what": "bad"},
+                        {"severity": "medium", "id": "f2", "key": "daily-update:2026-10-20",
+                         "title": "Daily bug update draft", "what": draft}])
+            await asyncio.sleep(0.05)
+
+        asyncio.run(run())
+        texts = [p["text"] for p in posted]
+        self.assertEqual(len(texts), 2)
+        mine = next(t for t in texts if "draft for <#C9>" in t)
+        self.assertIn("\n*Asks:* retest", mine)  # whole, line breaks kept
+        self.assertIn("x" * 400, mine)
+        listing = next(t for t in texts if "found 1 new problem" in t)
+        self.assertNotIn("Bug update", listing)
+
     def test_paused_alert_gives_back_its_rca_slot(self):
         from cos.alerts import AlertGate
         gate = AlertGate(str(Path(tempfile.mkdtemp()) / "gate.json"), daily_max=1)
