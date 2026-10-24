@@ -22,7 +22,7 @@ from typing import Optional
 
 from . import fleet
 from .config import owner_fields, split_thread_context
-from .runner import Run, cli_path
+from .runner import Run, claude_available, cli_path
 from .store import JsonStore
 
 log = logging.getLogger(__name__)
@@ -142,6 +142,8 @@ def recent_topics() -> list[str]:
 
 def make_card(title: str, material: str, timeout: int = 180) -> Optional[dict]:
     # The log is untrusted text: no tools, no MCP servers, no user settings or hooks, an empty cwd.
+    if not claude_available()[0]:
+        return None
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
            "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(CARD_SCHEMA),
            "--", PROMPT.format(title=title, topics=", ".join(recent_topics()) or "none yet",

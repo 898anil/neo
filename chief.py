@@ -111,7 +111,10 @@ async def mention_scheduler() -> None:
         try:
             if await asyncio.to_thread(mentions.due):
                 meta = await asyncio.to_thread(mentions.start)
-                log.info("mentions check started: %s", meta["id"])
+                if meta:
+                    log.info("mentions check started: %s", meta["id"])
+                else:
+                    log.info("mentions check skipped: Claude quota unavailable")
         except Exception:  # noqa: BLE001
             log.exception("mentions check failed to start")
         await asyncio.sleep(60)

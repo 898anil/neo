@@ -161,7 +161,7 @@ class SystemWatchesTest(unittest.TestCase):
         self.job("security-drift", ["/x/bin/python", str(d / "check.py")], StartInterval=3600)
         self.job("security-drift-buckets", ["/x/bin/python", str(d / "check.py"), "buckets"])
         a = self.folder("deploy-watch")
-        self.job("deploy-watch", ["/bin/sh", "-c", f"python -m cos run --mode full {a}/prompt.md"])
+        self.job("deploy-watch", ["/bin/sh", "-c", f"NEO_SCHEDULED=1 python -m cos run --mode full {a}/prompt.md"])
         both = {"com.anil.neo-security-drift": 0, "com.anil.neo-security-drift-buckets": 0}
         calls = []
         with patch.object(system_watches, "launchctl_status", return_value=both), \

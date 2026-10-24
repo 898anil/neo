@@ -30,7 +30,7 @@ from typing import Optional
 
 from . import learn
 from .config import THREAD_CONTEXT_HEAD, split_thread_context
-from .runner import cli_path, runs_dir
+from .runner import claude_available, cli_path, runs_dir
 
 log = logging.getLogger(__name__)
 MODEL = os.environ.get("NEO_AUTONOMY_MODEL", "claude-sonnet-5-5")
@@ -234,6 +234,8 @@ def material(data: dict) -> str:
 def draft(data: dict, timeout: int = 300) -> list[dict]:
     """The model's proposals, or [] when the call fails (the digest still goes out with the numbers)."""
     # Run logs are untrusted text: no tools, no MCP servers, no user settings or hooks, an empty cwd.
+    if not claude_available()[0]:
+        return []
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
            "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA),
            "--", PROMPT.format(max=MAX_PROPOSALS, material=material(data))]

@@ -32,6 +32,22 @@ class AlertGateTest(unittest.TestCase):
         self.assertIsNone(self.admit(msg))
         self.assertEqual(self.admit(msg), "already handled")
 
+    def test_releasing_a_quota_skipped_alert_allows_its_retry(self):
+        msg = post("1.1", "[FIRING:1] PodCrashLooping api", subtype="bot_message", bot_id="B1")
+        self.assertIsNone(self.admit(msg))
+        self.gate.release(msg["text"], "C1", msg["ts"])
+        self.assertIsNone(self.admit(msg))
+
+    def test_quota_retry_survives_a_bot_restart(self):
+        msg = post("1.1", "[FIRING:1] PodCrashLooping api", subtype="bot_message", bot_id="B1")
+        self.gate.defer_retry("C1", msg, msg["text"], 2_000)
+        restored = AlertGate(self.file, daily_max=3)
+        self.assertEqual(restored.pending_retries(), [{
+            "channel": "C1", "msg": {
+                "ts": "1.1", "subtype": "bot_message", "text": msg["text"],
+            }, "reset_at": 2_000,
+        }])
+
     def test_skips_own_posts_replies_and_non_posts(self):
         self.assertIsNotNone(self.admit(post("1.1", "x", user=BOT)))
         self.assertIsNotNone(self.admit(post("1.2", "x", thread_ts="1.0")))

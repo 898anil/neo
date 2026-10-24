@@ -82,12 +82,42 @@ class AlertGate:
         self.save()
         return None
 
-    def release(self, text: str) -> None:
-        """Give back what admit() took for an alert whose RCA was not run (notifications paused):
-        its daily-cap slot and its repeat window, so the same alert after the pause is still looked at."""
+    def release(self, text: str, channel: Optional[str] = None, ts: Optional[str] = None) -> None:
+        """Give back what admit() took for an alert whose RCA was not run.
+
+        Passing the alert identity also allows a deliberate retry of the same message;
+        callers that only need to free the daily-cap/repeat reservation may omit it.
+        """
         self.seen.pop(alert_signature(text), None)
         self.state["count"] = max(0, self.state.get("count", 0) - 1)
+        if channel and ts:
+            self.taken.pop(f"{channel}:{ts}", None)
         self.save()
+
+    def defer_retry(self, channel: str, msg: dict, text: str, reset_at: int) -> dict:
+        """Persist one quota-skipped alert until the provider's stated reset time."""
+        key = f"{channel}:{msg.get('ts')}"
+        retries = self.state.get("quota_retries")
+        if not isinstance(retries, dict):
+            retries = self.state["quota_retries"] = {}
+        saved = {k: msg[k] for k in ("ts", "subtype", "thread_ts", "user") if k in msg}
+        saved["text"] = text
+        retry = {"channel": channel, "msg": saved, "reset_at": int(reset_at)}
+        retries[key] = retry
+        self.save()
+        return retry
+
+    def pending_retries(self) -> list[dict]:
+        retries = self.state.get("quota_retries")
+        if not isinstance(retries, dict):
+            return []
+        return [retry for retry in retries.values() if isinstance(retry, dict)]
+
+    def clear_retry(self, channel: str, ts: str) -> None:
+        retries = self.state.get("quota_retries")
+        if isinstance(retries, dict):
+            retries.pop(f"{channel}:{ts}", None)
+            self.save()
 
     def cursor(self, channel: str) -> Optional[str]:
         return self.state.get(channel)

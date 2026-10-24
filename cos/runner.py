@@ -545,6 +545,37 @@ def save_rate_limits(info: dict) -> None:
         pass
 
 
+def claude_available(now: Optional[float] = None) -> tuple[bool, Optional[int]]:
+    """Whether the latest Claude quota event permits another scheduled attempt.
+
+    A missing or malformed record never blocks work.  The record is only a backoff
+    signal after Claude explicitly rejected a request, and all exhausted windows
+    must have reset before a scheduler should submit again.
+    """
+    try:
+        record = json.loads((cos_home() / "usage.json").read_text())
+    except (OSError, ValueError):
+        return True, None
+    if not isinstance(record, dict):
+        return True, None
+    if record.get("status") != "rejected":
+        return True, None
+    windows = record.get("windows")
+    if not isinstance(windows, dict):
+        return True, None
+    now = time.time() if now is None else now
+    resets = []
+    for window in windows.values():
+        if not isinstance(window, dict):
+            continue
+        try:
+            if float(window.get("used")) >= 1 and float(window.get("resets_at")) > now:
+                resets.append(int(window["resets_at"]))
+        except (OverflowError, TypeError, ValueError):
+            continue
+    return (False, max(resets)) if resets else (True, None)
+
+
 def usage_summary() -> dict:
     """Spend today and over the last 7 days (from run records), plus Claude's latest limits."""
     now = datetime.now(timezone.utc)

@@ -181,6 +181,11 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(got["outcome"], {"result": "", "headline": ""})
         self.assertNotIn("outcome_result", got)
 
+    def test_make_skips_when_claude_quota_is_exhausted(self):
+        with patch.object(self.d, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(self.d.subprocess, "run", side_effect=AssertionError("digest should be skipped")):
+            self.assertIsNone(self.d.make("t", "log"))
+
     def test_status_draws_structured_digests_and_still_serves_old_html_cleaned(self):
         self.d.put("run:r1", {"kind": "fix", "data": SAMPLE, "source_mtime": NOW - 100, "made_at": NOW, "version": self.d.VERSION})
         with patch.object(self.d, "target_for", return_value=target()):

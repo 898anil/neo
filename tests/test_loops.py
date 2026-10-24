@@ -158,6 +158,12 @@ class LoopsTest(unittest.TestCase):
         with patch.object(self.loops, "list_runs", return_value=[{**rows[0], "pid": None, "retry_owner": os.getpid()}]):
             self.assertTrue(self.loops.check_running())
 
+    def test_scheduled_check_does_not_create_a_run_while_claude_is_rate_limited(self):
+        self.loops.open_loop("alert", "k", "needs follow-up", {}, now=T0)
+        with patch.object(self.loops, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(self.loops.Run, "create", side_effect=AssertionError("run should be skipped")):
+            self.assertIsNone(self.loops.start_check())
+
 
     def test_repeat_regression_report_does_not_reset_the_clock(self):
         l = self.loops.open_loop("alert", "k", "t", {}, now=T0)

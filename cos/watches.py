@@ -23,7 +23,7 @@ from typing import Callable, Optional
 
 from . import system_watches
 from .config import workdir
-from .runner import Run, cos_home, list_runs, now_iso
+from .runner import Run, claude_available, cos_home, list_runs, now_iso
 
 EVERY = (30, 60, 120, 240, 1440)  # minutes
 HOURS = ("work", "always")  # work: Monday to Friday, 08:00 to 20:00 local time
@@ -293,7 +293,7 @@ def cli_args() -> tuple[list[str], list[str]]:
     return every_turn, ["--json-schema", json.dumps(FINDINGS_SCHEMA)]
 
 
-def start(watch_id: str, source: str = "schedule") -> dict:
+def start(watch_id: str, source: str = "schedule") -> Optional[dict]:
     """Check now in the background (or return the check already running)."""
     with _lock:
         watch = get(watch_id)
@@ -302,6 +302,8 @@ def start(watch_id: str, source: str = "schedule") -> dict:
         current = running(watch_id)
         if current:
             return current
+        if source == "schedule" and not claude_available()[0]:
+            return None
         every_turn, first_turn = cli_args()
         run = Run.create("claude", prompt(watch), workdir(), "readonly", source=source,
                          extra={"kind": "watch", "watch_id": watch_id, "title": f"Watch: {watch['name']}",

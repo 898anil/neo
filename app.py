@@ -44,7 +44,7 @@ from cos import autonomy, learn, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
-from cos.runner import ENGINES, MODES, Run, cos_home, list_runs, pid_alive  # noqa: E402
+from cos.runner import ENGINES, MODES, Run, claude_available, cos_home, list_runs, pid_alive  # noqa: E402
 
 # Only these Slack user ids may trigger the bot. This is the security gate:
 # a triggered session runs an agent on this machine with tool access, so never
@@ -620,6 +620,32 @@ AUTO_RCA_DAILY_MAX = int(os.environ.get("NEO_AUTO_RCA_DAILY_MAX", "10"))
 AUTO_RCA_POLL_SECONDS = 300
 AUTO_RCA_PROMPT = "An alert just arrived in this thread. Find the root cause (follow your RCA method) and say whether anyone needs to act."
 ALERT_GATE = AlertGate(str(cos_home() / "auto_rca.json"), AUTO_RCA_DAILY_MAX)
+AUTO_RCA_RETRIES: set[str] = set()
+
+
+def _retry_key(retry: dict) -> str:
+    return f"{retry['channel']}:{retry['msg']['ts']}"
+
+
+async def _retry_auto_rca(client, retry: dict) -> None:
+    """Retry one quota-skipped alert after Claude says its exhausted window resets."""
+    await asyncio.sleep(max(0, retry["reset_at"] - time.time()) + 1)
+    AUTO_RCA_RETRIES.discard(_retry_key(retry))
+    ALERT_GATE.clear_retry(retry["channel"], retry["msg"]["ts"])
+    await maybe_auto_rca(client, retry["channel"], retry["msg"], "quota retry")
+
+
+def schedule_pending_auto_rcas(client) -> None:
+    """Restore quota-delayed RCAs after a bot restart without scheduling duplicates."""
+    for retry in ALERT_GATE.pending_retries():
+        try:
+            key = _retry_key(retry)
+            int(retry["reset_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key not in AUTO_RCA_RETRIES:
+            AUTO_RCA_RETRIES.add(key)
+            asyncio.create_task(_retry_auto_rca(client, retry))
 
 
 async def maybe_auto_rca(client, channel: str, msg: dict, via: str) -> None:
@@ -634,8 +660,16 @@ async def maybe_auto_rca(client, channel: str, msg: dict, via: str) -> None:
         ALERT_GATE.release(text)
         chief.alert_loop(channel, msg["ts"], text, thread_url(channel, msg["ts"]))
         return
-    log.info("auto RCA for alert %s in %s (%s)", msg["ts"], channel, via)
     req = commands.parse(AUTO_RCA_PROMPT)
+    available, reset_at = claude_available()
+    if (req.engine or default_engine()) == "claude" and not available:
+        log.info("auto RCA skipped %s in %s (%s): Claude quota exhausted", msg["ts"], channel, via)
+        ALERT_GATE.release(text, channel, msg["ts"])
+        retry = ALERT_GATE.defer_retry(channel, msg, text, reset_at or int(time.time()) + 300)
+        schedule_pending_auto_rcas(client)
+        chief.alert_loop(channel, msg["ts"], text, thread_url(channel, msg["ts"]))
+        return
+    log.info("auto RCA for alert %s in %s (%s)", msg["ts"], channel, via)
     transcript = await _thread_transcript(client, channel, msg["ts"], "")
     asyncio.create_task(run_headless(client, channel, msg["ts"], None, req, _with_context(transcript, AUTO_RCA_PROMPT),
                                     kind="alert-rca"))
@@ -646,6 +680,7 @@ async def auto_rca(client) -> None:
     """Backstop poll: picks up alerts whose `message` event never reached us."""
     if not AUTO_RCA_CHANNELS:
         return
+    schedule_pending_auto_rcas(client)
     log.info("auto RCA on for %s (daily max %d)", AUTO_RCA_CHANNELS, AUTO_RCA_DAILY_MAX)
     while True:
         try:
