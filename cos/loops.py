@@ -23,7 +23,7 @@ import time
 from typing import Callable, Optional
 
 from .config import owner_fields, workdir
-from .runner import Run, list_runs, pid_alive
+from .runner import Run, claude_available, list_runs, pid_alive
 from .store import JsonStore
 
 STORE = JsonStore("loops.json")
@@ -274,6 +274,8 @@ def start_check() -> Optional[dict]:
             return None
         rows = _open_for_check(time.time())
         if not rows:
+            return None
+        if not claude_available()[0]:
             return None
         every_turn, _ = watches.cli_args()
         from .mentions import SLACK_READ  # the alert threads live in Slack: read-only access to them

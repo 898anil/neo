@@ -25,7 +25,7 @@ from typing import Optional
 
 from . import cards, digest_view, fleet
 from .config import owner_fields, owner_name
-from .runner import Run, cli_path, cos_home, valid_run_id
+from .runner import Run, claude_available, cli_path, cos_home, valid_run_id
 
 log = logging.getLogger(__name__)
 MODEL = os.environ.get("NEO_DIGEST_MODEL", "claude-sonnet-5-5")
@@ -193,6 +193,8 @@ def needs_build(target: dict, have: Optional[dict], now: float) -> bool:
 
 def make(title: str, material: str, needs_you: str = "", timeout: int = 420) -> Optional[dict]:
     # The log is untrusted text: no tools, no MCP servers, no user settings or hooks, an empty cwd.
+    if not claude_available()[0]:
+        return None
     needs = f"\nThe card for this task says it needs {owner_name()} for: {needs_you}" if needs_you else ""
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
            "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA)]

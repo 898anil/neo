@@ -108,6 +108,13 @@ class AutonomyTest(unittest.TestCase):
         history = (Path(os.environ["NEO_AUTONOMY_DIR"]) / "history.jsonl").read_text().splitlines()
         self.assertEqual(json.loads(history[-1])["stepped"], 1)
 
+    def test_draft_skips_when_claude_quota_is_exhausted(self):
+        from cos import autonomy
+
+        with patch.object(autonomy, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(autonomy.subprocess, "run", side_effect=AssertionError("review should be skipped")):
+            self.assertEqual(autonomy.draft({"runs": 0, "steps": [], "failed": [], "blocks": {}}), [])
+
     def test_apply_saves_rules_merges_lessons_and_refuses_owner_actions(self):
         from cos import autonomy, learn
         lessons = learn.memory_dir() / learn.LESSONS

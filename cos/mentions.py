@@ -28,7 +28,7 @@ from typing import Optional
 
 from . import watches
 from .config import owner_fields, owner_profile, workdir
-from .runner import Run, list_runs
+from .runner import Run, claude_available, list_runs
 from .store import JsonStore
 
 log = logging.getLogger("neo")
@@ -182,11 +182,13 @@ def cli_args() -> tuple[list[str], list[str]]:
 _lock = threading.Lock()
 
 
-def start(source: str = "schedule") -> dict:
+def start(source: str = "schedule") -> Optional[dict]:
     with _lock:
         current = running()
         if current:
             return current
+        if source == "schedule" and not claude_available()[0]:
+            return None
         every_turn, first_turn = cli_args()
         run = Run.create("claude", prompt(), workdir(), "readonly", source=source,
                          extra={"kind": "mentions", "title": f"Mentions of {owner_fields()['owner']}", "cli_args": every_turn,

@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 from . import fleet
 from .config import owner_fields, read_prompt, workdir
-from .runner import Run, list_runs
+from .runner import Run, claude_available, list_runs
 
 _lock = threading.Lock()
 
@@ -55,12 +55,14 @@ def running() -> Optional[dict]:
     return None
 
 
-def start(source: str = "dashboard", on_done: Optional[Callable[[dict], None]] = None) -> dict:
+def start(source: str = "dashboard", on_done: Optional[Callable[[dict], None]] = None) -> Optional[dict]:
     """Start a brief in the background (or return the one already running)."""
     with _lock:
         current = running()
         if current:
             return current
+        if source == "schedule" and not claude_available()[0]:
+            return None
         now = datetime.now()
         template = read_prompt("brief.md") or "Write my morning brief for {date}.\n\n{agents}"
         prompt = template.format(date=now.strftime("%-d %B %Y"), weekday=now.strftime("%A"), agents=_agents_summary(), **owner_fields())
