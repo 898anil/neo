@@ -186,6 +186,9 @@ class PausedBotTest(unittest.TestCase):
             async def chat_postMessage(self, **kw):
                 posted.append(kw)
                 return {"ts": "1.0"}
+
+            async def conversations_replies(self, **kw):
+                return {"messages": []}
         return Client(), posted
 
     def test_pause_and_resume_commands_answer_in_the_thread(self):
@@ -236,6 +239,34 @@ class PausedBotTest(unittest.TestCase):
         started.assert_not_called()
         loop.assert_called_once()  # still on the dashboard
         self.assertEqual(posted, [])
+
+    def test_auto_rca_releases_its_slot_when_claude_quota_is_exhausted(self):
+        import app
+        client, posted = self.client()
+        app.AUTO_RCA_RETRIES.clear()
+        with patch.object(app.ALERT_GATE, "admit", return_value=None), \
+             patch.object(app, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(app.ALERT_GATE, "release") as release, \
+             patch.object(app.ALERT_GATE, "defer_retry", return_value={"channel": "C1", "msg": {"ts": "1.0", "text": "alert"}, "reset_at": 2_000}), \
+             patch.object(app.ALERT_GATE, "pending_retries", return_value=[{"channel": "C1", "msg": {"ts": "1.0", "text": "alert"}, "reset_at": 2_000}]), \
+             patch.object(app.chief, "alert_loop") as loop, \
+             patch.object(app.asyncio, "create_task", side_effect=lambda coroutine: coroutine.close()) as create_task:
+            asyncio.run(app.maybe_auto_rca(client, "C1", {"ts": "1.0", "text": "alert"}, "event"))
+        create_task.assert_called_once()
+        release.assert_called_once_with("alert", "C1", "1.0")
+        loop.assert_called_once()  # retained for follow-up once quota recovers
+        self.assertEqual(posted, [])
+        app.AUTO_RCA_RETRIES.clear()
+
+    def test_auto_rca_restores_a_persisted_quota_retry(self):
+        import app
+        app.AUTO_RCA_RETRIES.clear()
+        retry = {"channel": "C1", "msg": {"ts": "1.0", "text": "alert"}, "reset_at": 2_000}
+        with patch.object(app.ALERT_GATE, "pending_retries", return_value=[retry]), \
+             patch.object(app.asyncio, "create_task", side_effect=lambda coroutine: coroutine.close()) as create_task:
+            app.schedule_pending_auto_rcas(self.client()[0])
+        create_task.assert_called_once()
+        app.AUTO_RCA_RETRIES.clear()
 
 
 if __name__ == "__main__":

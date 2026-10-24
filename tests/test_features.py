@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -92,6 +93,109 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(u["today_usd"], 1.25)
         self.assertEqual(u["week_by_kind"], {"brief": 1.25})
         self.assertEqual(u["claude_limits"]["windows"]["five_hour"]["used"], 0.4)
+
+    def test_rejected_unexpired_quota_blocks_scheduled_claude_work(self):
+        from cos import runner
+
+        home = tempfile.mkdtemp()
+        with patch.dict(os.environ, {"COS_HOME": home}):
+            runner.save_rate_limits({
+                "status": "rejected",
+                "unifiedWindows": {
+                    "seven_day": {"utilization": 1, "resetsAt": 2_000},
+                },
+            })
+            self.assertEqual(runner.claude_available(now=1_000), (False, 2_000))
+            self.assertEqual(runner.claude_available(now=2_000), (True, None))
+
+    def test_latest_of_multiple_exhausted_quota_windows_controls_backoff(self):
+        from cos import runner
+
+        home = tempfile.mkdtemp()
+        with patch.dict(os.environ, {"COS_HOME": home}):
+            runner.save_rate_limits({
+                "status": "rejected",
+                "unifiedWindows": {
+                    "five_hour": {"utilization": 1, "resetsAt": 1_500},
+                    "seven_day": {"utilization": 1, "resetsAt": 2_000},
+                    "monthly": {"utilization": 0.5, "resetsAt": 3_000},
+                },
+            })
+            self.assertEqual(runner.claude_available(now=1_000), (False, 2_000))
+            self.assertEqual(runner.claude_available(now=2_000), (True, None))
+
+    def test_malformed_quota_records_fail_open(self):
+        from cos import runner
+
+        home = Path(tempfile.mkdtemp())
+        with patch.dict(os.environ, {"COS_HOME": str(home)}):
+            for record in (
+                "[]",
+                '{"status": "rejected", "windows": []}',
+                '{"status": "rejected", "windows": {"seven_day": []}}',
+                '{"status": "rejected", "windows": {"seven_day": {"used": 1, "resets_at": 1e999}}}',
+            ):
+                (home / "usage.json").write_text(record)
+                self.assertEqual(runner.claude_available(now=1_000), (True, None))
+
+
+class BriefQuotaTest(unittest.TestCase):
+    def test_scheduled_brief_skips_when_claude_quota_is_exhausted(self):
+        from cos import brief
+
+        with patch.object(brief, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(brief.Run, "create", side_effect=AssertionError("brief should be skipped")):
+            self.assertIsNone(brief.start("schedule"))
+
+    def test_dashboard_brief_still_starts_when_claude_quota_is_exhausted(self):
+        from cos import brief
+
+        run = unittest.mock.Mock()
+        run.meta.return_value = {"id": "brief"}
+        with patch.object(brief, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(brief, "running", return_value=None), \
+             patch.object(brief.Run, "create", return_value=run) as create, \
+             patch.object(brief.threading, "Thread") as thread:
+            self.assertEqual(brief.start("dashboard"), {"id": "brief"})
+        create.assert_called_once()
+        thread.return_value.start.assert_called_once()
+
+
+class CliQuotaTest(unittest.TestCase):
+    def test_quota_guard_skips_claude_cli_run_before_creating_it(self):
+        from cos import cli
+
+        args = types.SimpleNamespace(
+            engine="claude", prompt="check", cwd=".", mode="readonly", debug=False, scheduled=True,
+        )
+        with patch.object(cli, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(cli.Run, "create", side_effect=AssertionError("run should be skipped")):
+            self.assertEqual(cli.cmd_run(args), 0)
+
+    def test_manual_cli_run_is_not_suppressed_by_scheduled_quota_backoff(self):
+        from cos import cli
+
+        args = types.SimpleNamespace(
+            engine="claude", prompt="check", cwd=".", mode="readonly", debug=False, scheduled=False,
+        )
+        run = unittest.mock.Mock(id="manual")
+        run.meta.return_value = {"mode": "readonly"}
+        run.execute.return_value = {"status": "done", "cost_usd": 0, "last_turn_seconds": 0}
+        with patch.object(cli, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(cli.Run, "create", return_value=run) as create:
+            self.assertEqual(cli.cmd_run(args), 0)
+        create.assert_called_once()
+
+    def test_scheduler_environment_marks_cli_runs_for_quota_backoff(self):
+        from cos import cli
+
+        args = types.SimpleNamespace(
+            engine="claude", prompt="check", cwd=".", mode="readonly", debug=False, scheduled=False,
+        )
+        with patch.dict(os.environ, {"NEO_SCHEDULED": "1"}), \
+             patch.object(cli, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(cli.Run, "create", side_effect=AssertionError("run should be skipped")):
+            self.assertEqual(cli.cmd_run(args), 0)
 
 
 if __name__ == "__main__":

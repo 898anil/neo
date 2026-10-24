@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import pause
-from .runner import ENGINES, MODES, TERMINAL, Run, list_runs, valid_run_id
+from .runner import ENGINES, MODES, TERMINAL, Run, claude_available, list_runs, valid_run_id
 
 COLORS = {
     "prompt": "\033[1;36m",
@@ -50,6 +50,12 @@ def render(event: dict, show_debug: bool = False, color: bool = True) -> str | N
 
 
 def cmd_run(args) -> int:
+    scheduled = getattr(args, "scheduled", False) or os.environ.get("NEO_SCHEDULED") == "1"
+    if args.engine == "claude" and scheduled:
+        available, reset_at = claude_available()
+        if not available:
+            print(f"skipped: Claude quota is exhausted until {reset_at}", file=sys.stderr)
+            return 0
     run = Run.create(args.engine, args.prompt, args.cwd, args.mode, source="cli")
     print(f"run {run.id}  ({args.engine}, {args.mode})  dashboard: /#{run.id}", file=sys.stderr)
     color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -186,6 +192,7 @@ def main(argv=None) -> int:
                    help="readonly: no edits or unapproved commands; edit: file edits allowed; full: no guardrails")
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--debug", action="store_true", help="also show hooks, rate limits and other low-level events")
+    p.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("continue", help="send a follow-up prompt to an existing run's session")

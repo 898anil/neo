@@ -62,6 +62,11 @@ class WatchTestCase(unittest.TestCase):
 
 
 class WatchesTest(WatchTestCase):
+    def test_scheduled_watch_skips_run_creation_while_claude_is_rate_limited(self):
+        with patch.object(self.watches, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(self.watches.Run, "create", side_effect=AssertionError("run should be skipped")):
+            self.assertIsNone(self.watches.start("sentry", "schedule"))
+
     def test_built_in_watches_are_created_once(self):
         rows = self.watches.load()
         self.assertEqual([w["id"] for w in rows], ["sentry", "prod-logs", "ci-main"])
