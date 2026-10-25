@@ -295,6 +295,7 @@ def _learn_from(target: dict, card: dict, events: list[dict]) -> None:
     try:
         ok, cwd, user = owner_driven(target)
         if ok:
-            learn.capture(card, cwd=cwd, source=target["key"], owner_text=owner_words(events), user=user)
+            role = None if target["kind"] == "agent" else Run(target["run_id"]).meta().get("role")
+            learn.capture(card, cwd=cwd, source=target["key"], owner_text=owner_words(events), user=user, role=role)
     except Exception:  # noqa: BLE001 - a memory write must never cost the card
         log.exception("memory capture failed for %s", target["key"])

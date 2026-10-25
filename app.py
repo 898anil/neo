@@ -1277,6 +1277,18 @@ async def reply_to_dm_agent(client, event: dict, channel: str, thread_ts: Option
 
 # What only people with the full role may do: these drive the owner's sessions or neo's own messages.
 FULL_ONLY = ("approve", "deny", "keys", "close", "pause", "resume")
+# What acts on the thread's run: only its starter or the owner (keys can type into a live agent).
+RUN_CONTROLS = ("approve", "deny", "keys", "close", "stop", "status")
+
+
+def _active_run(thread_ts: str, entry: Optional[dict], live) -> Optional[dict]:
+    """Who the run going in this thread belongs to, as a session entry ({user, role}): the live agent,
+    else the headless run, else the thread's entry. Runs from before people were tracked are the owner's."""
+    run = live.irun.run if live and live.irun else HEADLESS.get(thread_ts)
+    if run is None:
+        return entry
+    meta = run.meta()
+    return {"user": meta.get("slack_user"), "role": meta.get("role", "full")}
 
 
 async def handle_control(client, channel: str, thread_ts: str, entry: Optional[dict], req, user: Optional[str] = None) -> None:
@@ -1288,10 +1300,6 @@ async def handle_control(client, channel: str, thread_ts: str, entry: Optional[d
         return
     if req.command in FULL_ONLY and people.role(user) != "full":
         await say(f":lock: `{req.command}` isn't available with your role ({people.role(user)}).")
-        return
-    if req.command in ("stop", "status") and people.role(user) != "full" and not _same_asker(entry, user, people.role(user)):
-        await say(f":lock: The run in this thread is someone else's; your role ({people.role(user)}) can only "
-                  f"`{req.command}` your own.")
         return
     if req.command == "default" and user and not _owner_user(user):
         if req.engine:  # everyone else's `default` is their own setting, not neo's
@@ -1327,6 +1335,10 @@ async def handle_control(client, channel: str, thread_ts: str, entry: Optional[d
         return
 
     live = await live_for(client, channel, thread_ts, entry)
+    active = await asyncio.to_thread(_active_run, thread_ts, entry, live)
+    if req.command in RUN_CONTROLS and not _owner_user(user) and not _same_asker(active, user, people.role(user)):
+        await say(f":lock: The run in this thread is someone else's; you can only `{req.command}` your own.")
+        return
     if live and live.irun:
         irun = live.irun
         try:
@@ -1464,9 +1476,8 @@ async def handle_mention(event: dict, client) -> None:
     if req.cwd and not os.path.isdir(req.cwd):
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: Not a folder on this machine: `{req.cwd}`")
         return
-    running = HEADLESS.get(thread_ts)
-    theirs = running is None or _same_asker({"user": running.meta().get("slack_user"), "role": running.meta().get("role", "full")},
-                                            user, people.role(user))
+    running = await asyncio.to_thread(_active_run, thread_ts, None, None)
+    theirs = running is None or _same_asker(running, user, people.role(user))
     stopped_background = thread_ts in ANSWERED and theirs and await _end_background(thread_ts)
     if not stopped_background and (thread_ts in BUSY or thread_ts in HEADLESS):
         await client.chat_postMessage(

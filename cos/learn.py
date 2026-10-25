@@ -227,15 +227,17 @@ def from_owner(text: str, owner_text: str) -> bool:
     return len(words & _words(owner_text)) >= max(1, RULE_OVERLAP * len(words))
 
 
-def capture(card: dict, cwd: Optional[str], source: str, owner_text: str = "", user: Optional[str] = None) -> int:
+def capture(card: dict, cwd: Optional[str], source: str, owner_text: str = "", user: Optional[str] = None,
+            role: Optional[str] = None) -> int:
     """Store what a finished session's card proposes to remember. Returns how many were added.
     owner_text: everything the person who drove the session wrote; a rule must come from it.
-    user: that person's Slack id (None for the owner); their rules go to their own file."""
+    user: that person's Slack id (None for the owner); their rules go to their own file.
+    role: the role the run had (people.ROLES); their current role when not recorded."""
     from . import people
 
     added = 0
     repo = None
-    restricted = people.role(user) != "full"
+    restricted = (role or people.role(user)) != "full"
     for item in card.get("remember") or []:
         if added >= MAX_PER_CAPTURE:
             break

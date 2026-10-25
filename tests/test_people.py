@@ -347,6 +347,18 @@ class SlackTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_watch(client, "C1", "1.0", AJAY, commands.parse(f"watch remove {w['id']}"))
         self.assertEqual(watches.owned_by(AJAY), [])
 
+    async def test_run_controls_only_for_the_runs_starter_or_the_owner(self):
+        import commands
+        from cos.runner import Run
+        client = self.Client()
+        run = Run.create("claude", "hi", str(self.dir), "full", source="slack", extra={"slack_user": OWNER, "role": "full"})
+        with patch.dict(self.app.HEADLESS, {"9.9": run}), patch.object(run, "cancel") as cancel:
+            await self.app.handle_control(client, "C1", "9.9", {"user": AJAY, "role": "full"}, commands.parse("stop"), AJAY)
+            self.assertIn("someone else's", client.posts[-1][1])
+            cancel.assert_not_called()
+            await self.app.handle_control(client, "C1", "9.9", {"user": AJAY, "role": "full"}, commands.parse("stop"), OWNER)
+            cancel.assert_called_once()
+
     def test_only_the_same_person_and_role_continue_a_session(self):
         same = self.app._same_asker
         self.assertTrue(same({"user": AJAY, "role": "full"}, AJAY, "full"))
