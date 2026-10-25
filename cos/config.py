@@ -60,17 +60,20 @@ def _base_brief() -> Optional[str]:
     return read_prompt("slack-agent.md")
 
 
-def agent_brief(cwd: Optional[str] = None) -> Optional[str]:
-    """Standing instructions for every agent we start (how to do an RCA, how to answer), plus neo's
-    memory for the folder it works in (cos/learn.py). Re-read on each run, so editing the files
-    changes behaviour without a restart. A broken memory never stops an agent from starting."""
-    from . import learn
+def agent_brief(cwd: Optional[str] = None, user: Optional[str] = None) -> Optional[str]:
+    """Standing instructions for every agent we start (how to do an RCA, how to answer), plus who is
+    asking (cos/people.py) and neo's memory for that person and the folder it works in (cos/learn.py).
+    user: the Slack id of the person asking; None for the owner. Re-read on each run, so editing the
+    files changes behaviour without a restart. A broken memory never stops an agent from starting,
+    but a person's limits must reach it, so those are not swallowed."""
+    from . import learn, people
 
+    who = people.brief(user)
     try:
-        remembered = learn.brief(cwd)
+        remembered = learn.brief(cwd, user=user)
     except Exception:  # noqa: BLE001 - memory is a bonus, the task is what matters
         remembered = ""
-    parts = [p for p in (_base_brief(), remembered) if p]
+    parts = [p for p in (_base_brief(), who, remembered) if p]
     return "\n\n".join(parts) or None
 
 
