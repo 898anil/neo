@@ -163,8 +163,10 @@ another's runs:
 A run started for someone gets a *Who is asking* section (their name, answer style, usual repos and
 channels, limits), then the team rules, their own rules, and the shared notes and lessons. Rules
 a finished session proposes go to the file of the person who asked for it. A thread's session is
-only continued by the person who started it; anyone else who mentions neo there gets a new session
-of their own, with the thread so far as context.
+only continued by the person who started it; anyone else who mentions neo there gets a session of
+their own beside it, with the thread so far as context (so threads started before this change begin
+a fresh session for anyone but the owner). Only the owner answers their own agents and live sessions
+(and a live session's starter theirs).
 
 Roles, set by the owner (`@neo set role @person <role>`; no role means `full`, the owner is always
 `full`). Everyone still runs with the owner's logins until each person has their own sandbox, so
@@ -172,10 +174,14 @@ these are guard rails, not isolation:
 
 - `full`: as before.
 - `prs-only`: may get code changed and PRs opened. The brief forbids merging, approving, PMR,
-  deploying, prod and infra changes, and sending mail or Slack as the owner; Claude runs also get a
-  `--disallowedTools` list for those commands (Codex has no such flag, so only the brief). No live
-  agents, no approving or driving the owner's agents, no pausing notifications.
-- `read-only`: runs in `readonly` mode (no edits or changing commands), with the same limits.
+  deploying, prod and infra changes, and sending mail or Slack as the owner; runs also get a
+  `--disallowedTools` list for those commands and for the owner's mail, calendar, Drive and Slack.
+  Restricted roles always run Claude (Codex has no way to deny tools). No live agents, no
+  approving, pausing, or stopping someone else's run, and their sessions add no shared lessons or
+  repo notes (their rules stay in their own file).
+- `read-only`: runs without the owner's Claude settings (whose allow list lets edits, pushes and
+  merges through) and may use only the read-only tools the watches use. Watches people add for
+  themselves run the same way.
 
 **The dashboard** (phone-first, one page):
 

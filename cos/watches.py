@@ -322,6 +322,12 @@ def start(watch_id: str, source: str = "schedule") -> Optional[dict]:
         if source == "schedule" and not claude_available()[0]:
             return None
         every_turn, first_turn = cli_args()
+        if watch.get("owner"):
+            from .people import is_owner
+            if not is_owner(watch["owner"]):
+                # Someone else's watch: without the owner's settings, whose allow list would let a
+                # "readonly" run edit, push and merge, only the read-only tools above can run.
+                every_turn = ["--setting-sources", "", *every_turn]
         run = Run.create("claude", prompt(watch), workdir(), "readonly", source=source,
                          extra={"kind": "watch", "watch_id": watch_id, "title": f"Watch: {watch['name']}",
                                 "cli_args": every_turn, "first_turn_args": first_turn})

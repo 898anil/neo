@@ -64,8 +64,8 @@ DASHBOARD_URL = os.environ.get("NEO_DASHBOARD_URL") or (
 
 # Push notifications: DM this Slack user when any agent on this machine needs them.
 NOTIFY_USER = os.environ.get("NEO_NOTIFY_USER") or (sorted(ALLOWED_USER_IDS)[0] if ALLOWED_USER_IDS else None)
-if NOTIFY_USER and not os.environ.get("NEO_OWNER_USER"):
-    os.environ["NEO_OWNER_USER"] = NOTIFY_USER  # cos/people.py: the person neo works for; everyone else is a guest
+if len(ALLOWED_USER_IDS) == 1 and not (os.environ.get("NEO_OWNER_USER") or os.environ.get("NEO_NOTIFY_USER")):
+    os.environ["NEO_OWNER_USER"] = next(iter(ALLOWED_USER_IDS))  # cos/people.py: one person is the owner
 NOTIFY_ENABLED = os.environ.get("NEO_NOTIFY", "1") != "0"
 # Post notifications in this channel (mentioning NOTIFY_USER) instead of a DM. Replies work there
 # with `@neo ...` in the thread; DM replies need the app's messages tab enabled (manifest.json).
@@ -396,9 +396,19 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
     mine = people.load(user)
     who = people.run_settings(user, MODE)
     role = people.role(user)
-    if not _same_asker(entry, user, role):
-        entry = None  # a new session for this person; the thread so far is in the prompt as context
+    key = thread_ts
+    if entry and not _same_asker(entry, user, role):
+        # Someone else's session: this person gets their own, kept beside it, so neither takes over
+        # the other's. The thread so far is in the prompt as context.
+        key = f"{thread_ts}:{user}"
+        entry = await sessions.get_thread(key)
+        if not _same_asker(entry, user, role):
+            entry = None
     engine = req.engine or (entry or {}).get("engine") or mine.get("engine") or default_engine()
+    if who["engine"] and engine != who["engine"]:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text=f"_Your role ({role}) runs on {who['engine']}, so I'm using that instead of {engine}._")
+        engine = who["engine"]
     same_engine = entry and entry.get("runtime") == "headless" and entry.get("engine") == engine
     cwd = req.cwd or WORKDIR
     system = await asyncio.to_thread(agent_brief, cwd, user)  # reads memory and runs git: not on the event loop
@@ -406,8 +416,8 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
              "system_prompt": system, "conclude": bool(system), "slack_user": user, "role": role}
     if who["cli_args"]:
         slack["cli_args"] = who["cli_args"]
-    if who["model"]:
-        slack["model"] = who["model"]
+    if who["model"] and engine == (mine.get("engine") or default_engine()):
+        slack["model"] = who["model"]  # a model id belongs to the engine it was picked for
     if kind:
         slack["kind"] = kind
 
@@ -420,8 +430,8 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
             # Thread from before run tracking: resume its engine session.
             run.update_meta(session_id=entry["session_id"])
             follow_up = True
-    await sessions.set_thread(thread_ts, {"run_id": run.id, "engine": engine, "runtime": "headless",
-                                          "user": user, "role": role})
+    await sessions.set_thread(key, {"run_id": run.id, "engine": engine, "runtime": "headless",
+                                    "user": user, "role": role})
 
     progress = Progress(engine, "headless", run.meta()["mode"], run.id, DASHBOARD_URL)
     reporter = Reporter(client, channel, thread_ts, progress)
@@ -951,7 +961,7 @@ def findings_markdown(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def is_owner(user: Optional[str]) -> bool:
+def is_allowed(user: Optional[str]) -> bool:
     """Only the people the bot works for may change what every later agent is told."""
     return bool(user) and (user in ALLOWED_USER_IDS or user == NOTIFY_USER)
 
@@ -965,7 +975,7 @@ async def handle_memory(client, channel: str, thread_ts: str, user: Optional[str
     async def say(text: str) -> None:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(text))
 
-    if not is_owner(user):
+    if not is_allowed(user):
         await say(":lock: Only the people I work for (ALLOWED_USER_IDS) can read or change my memory.")
         return
     owner = _owner_user(user)
@@ -1021,7 +1031,8 @@ async def handle_settings(client, channel: str, thread_ts: str, user: Optional[s
     if req.field == "role":
         await say(f":white_check_mark: <@{target}> is now *{people.role(target)}*. Their next run uses it.")
     else:
-        await say(f":white_check_mark: Saved. {req.field}: {req.prompt or '_cleared_'}. Your next run uses it.")
+        shown = people.slack_safe(req.prompt) if req.prompt else "_cleared_"
+        await say(f":white_check_mark: Saved. {req.field}: {shown}. Your next run uses it.")
 
 
 async def handle_watch(client, channel: str, thread_ts: str, user: Optional[str], req) -> None:
@@ -1241,6 +1252,8 @@ async def handle_voice_message(event: dict, client) -> None:
 
 async def reply_to_dm_agent(client, event: dict, channel: str, thread_ts: Optional[str],
                             target: Optional[dict], text: str) -> None:
+    if target and not _owner_user(event.get("user")):
+        return  # agent notifications go to the owner's DM; only the owner answers their agents
     if not target:
         await client.chat_postMessage(
             channel=channel, thread_ts=event["ts"],
@@ -1275,6 +1288,10 @@ async def handle_control(client, channel: str, thread_ts: str, entry: Optional[d
         return
     if req.command in FULL_ONLY and people.role(user) != "full":
         await say(f":lock: `{req.command}` isn't available with your role ({people.role(user)}).")
+        return
+    if req.command in ("stop", "status") and people.role(user) != "full" and not _same_asker(entry, user, people.role(user)):
+        await say(f":lock: The run in this thread is someone else's; your role ({people.role(user)}) can only "
+                  f"`{req.command}` your own.")
         return
     if req.command == "default" and user and not _owner_user(user):
         if req.engine:  # everyone else's `default` is their own setting, not neo's
@@ -1424,7 +1441,7 @@ async def handle_mention(event: dict, client) -> None:
         return
 
     restricted = people.role(user) != "full"
-    if entry and entry.get("runtime") == "agent" and req.command != "help" and restricted:
+    if entry and entry.get("runtime") == "agent" and req.command != "help" and not _owner_user(user):
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                       text=":lock: This thread drives one of the owner's own agents. Start yours with `@neo <task>` in a new thread.")
         return
@@ -1447,7 +1464,10 @@ async def handle_mention(event: dict, client) -> None:
     if req.cwd and not os.path.isdir(req.cwd):
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: Not a folder on this machine: `{req.cwd}`")
         return
-    stopped_background = thread_ts in ANSWERED and await _end_background(thread_ts)
+    running = HEADLESS.get(thread_ts)
+    theirs = running is None or _same_asker({"user": running.meta().get("slack_user"), "role": running.meta().get("role", "full")},
+                                            user, people.role(user))
+    stopped_background = thread_ts in ANSWERED and theirs and await _end_background(thread_ts)
     if not stopped_background and (thread_ts in BUSY or thread_ts in HEADLESS):
         await client.chat_postMessage(
             channel=channel, thread_ts=thread_ts,
@@ -1465,7 +1485,8 @@ async def handle_mention(event: dict, client) -> None:
     ok = True
     try:
         live = await live_for(client, channel, thread_ts, entry)
-        if live and live.irun and not req.live and not req.engine and restricted:
+        if (live and live.irun and not req.live and not req.engine and not _owner_user(user)
+                and not _same_asker(entry, user, people.role(user))):
             await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                           text=":lock: This is someone else's live agent. Start yours with `@neo <task>` in a new thread.")
             ok = False
@@ -1601,6 +1622,9 @@ async def main() -> None:
         raise SystemExit(f"NEO_MODE must be one of {MODES}")
     if default_engine() not in ENGINES:
         raise SystemExit(f"NEO_DEFAULT_ENGINE must be one of {ENGINES}")
+    if len(ALLOWED_USER_IDS) > 1 and not people.owner_id():
+        raise SystemExit("Set NEO_OWNER_USER (or NEO_NOTIFY_USER) to the owner's Slack id: with several people on "
+                         "ALLOWED_USER_IDS, neo must know whose rules and permissions are the owner's")
     if not ALLOWED_USER_IDS:
         log.warning("ALLOWED_USER_IDS is empty: anyone in the workspace can run agents on this machine")
     global TEAM_URL

@@ -142,6 +142,8 @@ def _parse_set(text: str) -> Optional[Request]:
     m = _SET_RE.match(text)
     if not m or (m.group("value") and not m.group("value")[0].isspace()):
         return None
+    if m.group("field").lower() in ("engine", "model") and len(m.group("value").split()) > 1:
+        return None  # "set my model to opus and rerun" is a task
     return Request("set", field=m.group("field").lower(), prompt=m.group("value").strip())
 
 

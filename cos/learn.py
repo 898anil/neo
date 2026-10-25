@@ -231,8 +231,11 @@ def capture(card: dict, cwd: Optional[str], source: str, owner_text: str = "", u
     """Store what a finished session's card proposes to remember. Returns how many were added.
     owner_text: everything the person who drove the session wrote; a rule must come from it.
     user: that person's Slack id (None for the owner); their rules go to their own file."""
+    from . import people
+
     added = 0
     repo = None
+    restricted = people.role(user) != "full"
     for item in card.get("remember") or []:
         if added >= MAX_PER_CAPTURE:
             break
@@ -240,6 +243,10 @@ def capture(card: dict, cwd: Optional[str], source: str, owner_text: str = "", u
             continue
         if item["kind"] == "rule" and not from_owner(item.get("text", ""), owner_text):
             continue
+        if restricted and item["kind"] == "lesson":
+            continue  # shared lessons reach every run, the owner's too: only full-role sessions add them
+        if restricted:
+            item = {**item, "scope": "own"}  # their repo rules stay theirs
         if item.get("scope") == "repo" and repo is None:
             repo = repo_of(cwd) or ""
         if add(item.get("text", ""), item["kind"], repo=(repo or None) if item.get("scope") == "repo" else None,
@@ -286,17 +293,18 @@ def brief(cwd: Optional[str], budget: int = BRIEF_BUDGET, user: Optional[str] = 
         own = rules_file(user)
     except ValueError:
         own = None  # not a real Slack id: team rules and shared notes only
-    who = "the owner" if people.is_owner(user) else people.name(user)
+    who = "the owner" if people.is_owner(user) else f"<@{user}>"
     parts = [("Team rules (everyone's runs)", memory_dir() / TEAM, budget // 6)]
     if own:
-        parts.append((f"What {who} told you (their standing rules)", own, budget // 3))
+        parts.append((f"What {who} told you (their standing rules)", own, budget // 2))
     if repo and _repo_file(repo):
         parts.append((f"Notes for the {repo} repository", _repo_file(repo), budget // 4))
     parts.append(("Lessons from earlier mistakes", memory_dir() / LESSONS, budget // 4))
-    sections, left = [], budget
+    sections, left, carry = [], budget, 0
     for i, (title, path, share) in enumerate(parts):
-        cap = left if i == len(parts) - 1 else min(left, share)  # unused share rolls forward
+        cap = left if i == len(parts) - 1 else min(left, share + carry)  # unused share rolls forward
         text = _section(title, path, cap)
+        carry = cap - len(text)
         if text:
             sections.append(text)
             left -= len(text)
