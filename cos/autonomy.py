@@ -237,12 +237,12 @@ def draft(data: dict, timeout: int = 300) -> list[dict]:
     if not claude_available()[0]:
         return []
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
-           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA),
-           "--", PROMPT.format(max=MAX_PROPOSALS, material=material(data))]
+           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA)]
+    prompt = PROMPT.format(max=MAX_PROPOSALS, material=material(data))
     cwd = Path(tempfile.gettempdir()) / "neo-autonomy"
     try:
         cwd.mkdir(exist_ok=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=str(cwd))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=prompt, cwd=str(cwd))  # stdin, not argv: `ps` shows argv
         raw = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         log.warning("autonomy draft failed", exc_info=True)

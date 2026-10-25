@@ -145,13 +145,13 @@ def make_card(title: str, material: str, timeout: int = 180) -> Optional[dict]:
     if not claude_available()[0]:
         return None
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
-           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(CARD_SCHEMA),
-           "--", PROMPT.format(title=title, topics=", ".join(recent_topics()) or "none yet",
-                             material=material[-MATERIAL_CHARS:], **owner_fields())]
+           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(CARD_SCHEMA)]
+    prompt = PROMPT.format(title=title, topics=", ".join(recent_topics()) or "none yet",
+                           material=material[-MATERIAL_CHARS:], **owner_fields())
     cwd = Path(tempfile.gettempdir()) / "neo-card"
     try:
         cwd.mkdir(exist_ok=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=str(cwd))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=prompt, cwd=str(cwd))  # stdin, not argv: `ps` shows argv
         raw = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
