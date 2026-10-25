@@ -118,7 +118,7 @@ def engine_env(meta: dict) -> dict:
 def build_command(
     engine: str, prompt: str, mode: str, session_id: Optional[str] = None, system: Optional[str] = None,
     extra_args: Optional[list[str]] = None, conclude: bool = False,
-    system_file: Optional[str] = None, prompt_on_stdin: bool = False,
+    system_file: Optional[str] = None, prompt_on_stdin: bool = False, model: Optional[str] = None,
 ) -> list[str]:
     """system: standing instructions. Claude takes them natively (--append-system-prompt, on every
     turn); Codex has no equivalent flag, so they lead the first prompt of the session.
@@ -127,9 +127,10 @@ def build_command(
     with a Status line (cos/conclusion.py). Scheduled jobs leave it off.
     system_file / prompt_on_stdin: keep the brief, memory and prompt off the command line, where any
     user on this Mac can read them with `ps`. Claude reads system_file (--append-system-prompt-file);
-    the prompt goes on stdin, built by stdin_prompt()."""
+    the prompt goes on stdin, built by stdin_prompt().
+    model: the person's own choice (cos/people.py); else CLAUDE_MODEL / CODEX_MODEL."""
     extra_args = list(extra_args or [])
-    model = os.environ.get(f"{engine.upper()}_MODEL")
+    model = model or os.environ.get(f"{engine.upper()}_MODEL")
     if engine == "claude":
         cmd = [cli_path("claude"), "-p", "--output-format", "stream-json", "--verbose"]
         cmd += CLAUDE_MODE_FLAGS[mode]
@@ -386,7 +387,7 @@ class Run:
                                 system=system, conclude=bool(meta.get("conclude")),
                                 extra_args=(meta.get("cli_args") or [])
                                 + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []),
-                                system_file=system_file, prompt_on_stdin=True)
+                                system_file=system_file, prompt_on_stdin=True, model=meta.get("model"))
             emit(self.append_event({"kind": "prompt", "title": "You", "body": text, "data": {}}, turn))
             raw_path = self.dir / "raw.jsonl"
             offset = raw_path.stat().st_size if raw_path.exists() else 0

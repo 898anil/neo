@@ -269,7 +269,8 @@ class WiringTest(unittest.TestCase):
 class SlackMemoryTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.dir = Path(tempfile.mkdtemp())
-        self.env = patch.dict(os.environ, {"NEO_MEMORY_DIR": str(self.dir)})
+        self.env = patch.dict(os.environ, {"NEO_MEMORY_DIR": str(self.dir), "NEO_OWNER_USER": "UOWNER",
+                                           "NEO_PEOPLE_DIR": str(self.dir / "people-settings")})
         self.env.start()
         import app
         self.app = app

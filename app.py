@@ -40,7 +40,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import autonomy, learn, voice  # noqa: E402
+from cos import autonomy, learn, people, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -64,6 +64,8 @@ DASHBOARD_URL = os.environ.get("NEO_DASHBOARD_URL") or (
 
 # Push notifications: DM this Slack user when any agent on this machine needs them.
 NOTIFY_USER = os.environ.get("NEO_NOTIFY_USER") or (sorted(ALLOWED_USER_IDS)[0] if ALLOWED_USER_IDS else None)
+if len(ALLOWED_USER_IDS) == 1 and not (os.environ.get("NEO_OWNER_USER") or os.environ.get("NEO_NOTIFY_USER")):
+    os.environ["NEO_OWNER_USER"] = next(iter(ALLOWED_USER_IDS))  # cos/people.py: one person is the owner
 NOTIFY_ENABLED = os.environ.get("NEO_NOTIFY", "1") != "0"
 # Post notifications in this channel (mentioning NOTIFY_USER) instead of a DM. Replies work there
 # with `@neo ...` in the thread; DM replies need the app's messages tab enabled (manifest.json).
@@ -375,14 +377,47 @@ async def say_aloud(client, channel: str, thread_ts: str, answer: str) -> None:
 # ----------------------------------------------------------------- headless
 
 
+def _same_asker(entry: Optional[dict], user: Optional[str], role: str) -> bool:
+    """May this person continue the thread's session? Only the person who started it, with the role it
+    started with: someone else's session carries their memory, settings and permissions. Threads from
+    before people were tracked count as the owner's."""
+    if not entry:
+        return False
+    started_by = entry.get("user")
+    if started_by is None and not people.is_owner(user):
+        return False
+    return (started_by is None or started_by == user) and entry.get("role", "full") == role
+
+
 async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dict], req, prompt: str,
-                       kind: Optional[str] = None, spoken: bool = False) -> bool:
-    engine = req.engine or (entry or {}).get("engine") or default_engine()
+                       kind: Optional[str] = None, spoken: bool = False, user: Optional[str] = None) -> bool:
+    """user: the Slack id of who asked (None for the owner's own automatic runs): their memory,
+    settings and role shape the run (cos/people.py)."""
+    mine = people.load(user)
+    who = people.run_settings(user, MODE)
+    role = people.role(user)
+    key = thread_ts
+    if entry and not _same_asker(entry, user, role):
+        # Someone else's session: this person gets their own, kept beside it, so neither takes over
+        # the other's. The thread so far is in the prompt as context.
+        key = f"{thread_ts}:{user}"
+        entry = await sessions.get_thread(key)
+        if not _same_asker(entry, user, role):
+            entry = None
+    engine = req.engine or (entry or {}).get("engine") or mine.get("engine") or default_engine()
+    if who["engine"] and engine != who["engine"]:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text=f"_Your role ({role}) runs on {who['engine']}, so I'm using that instead of {engine}._")
+        engine = who["engine"]
     same_engine = entry and entry.get("runtime") == "headless" and entry.get("engine") == engine
     cwd = req.cwd or WORKDIR
-    system = await asyncio.to_thread(agent_brief, cwd)  # reads memory and runs git: not on the event loop
+    system = await asyncio.to_thread(agent_brief, cwd, user)  # reads memory and runs git: not on the event loop
     slack = {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
-             "system_prompt": system, "conclude": bool(system)}
+             "system_prompt": system, "conclude": bool(system), "slack_user": user, "role": role}
+    if who["cli_args"]:
+        slack["cli_args"] = who["cli_args"]
+    if who["model"] and engine == (mine.get("engine") or default_engine()):
+        slack["model"] = who["model"]  # a model id belongs to the engine it was picked for
     if kind:
         slack["kind"] = kind
 
@@ -390,12 +425,13 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
     if same_engine and entry.get("run_id"):
         run, follow_up = Run(entry["run_id"]), True
     else:
-        run = Run.create(engine, prompt, cwd, MODE, source="slack", extra=slack)
+        run = Run.create(engine, prompt, cwd, who["mode"], source="slack", extra=slack)
         if same_engine and entry.get("session_id"):
             # Thread from before run tracking: resume its engine session.
             run.update_meta(session_id=entry["session_id"])
             follow_up = True
-    await sessions.set_thread(thread_ts, {"run_id": run.id, "engine": engine, "runtime": "headless"})
+    await sessions.set_thread(key, {"run_id": run.id, "engine": engine, "runtime": "headless",
+                                    "user": user, "role": role})
 
     progress = Progress(engine, "headless", run.meta()["mode"], run.id, DASHBOARD_URL)
     reporter = Reporter(client, channel, thread_ts, progress)
@@ -562,13 +598,14 @@ class LiveThread:
             await self.reporter.update(force=True)
 
 
-async def start_live(client, channel: str, thread_ts: str, req, prompt: str) -> bool:
-    engine = req.engine or default_engine()
+async def start_live(client, channel: str, thread_ts: str, req, prompt: str, user: Optional[str] = None) -> bool:
+    engine = req.engine or people.load(user).get("engine") or default_engine()
     cwd = req.cwd or WORKDIR
+    model = people.load(user).get("model")
     live = LiveThread(client, channel, thread_ts)
     LIVE[thread_ts] = live
     label = f"slack-{thread_ts.split('.')[0][-6:]}"
-    system = await asyncio.to_thread(agent_brief, cwd)
+    system = await asyncio.to_thread(agent_brief, cwd, user)
     try:
         live.irun = await asyncio.to_thread(
             InteractiveRun.start,
@@ -577,10 +614,11 @@ async def start_live(client, channel: str, thread_ts: str, req, prompt: str) -> 
             cwd,
             label,
             "slack",
-            {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts)},
+            {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
+             "slack_user": user, "role": "full"},
             Herdr(),
             live.on_event,
-            (),
+            ("--model", model) if model else (),
             system,
         )
     except Exception as exc:  # noqa: BLE001 - HerdrError, ValueError, OSError, ...
@@ -590,7 +628,7 @@ async def start_live(client, channel: str, thread_ts: str, req, prompt: str) -> 
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(f":x: Could not start the live agent:\n{code_block(str(exc), 2000)}"))
         return False
     meta = live.irun.run.meta()
-    await sessions.set_thread(thread_ts, {"run_id": meta["id"], "engine": engine, "runtime": "herdr"})
+    await sessions.set_thread(thread_ts, {"run_id": meta["id"], "engine": engine, "runtime": "herdr", "user": user, "role": "full"})
     remote = await asyncio.to_thread(live.irun.remote_url, 8)
     links = []
     link = agent_link(meta["herdr_session"], meta["herdr_pane"])
@@ -923,34 +961,103 @@ def findings_markdown(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def is_owner(user: Optional[str]) -> bool:
+def is_allowed(user: Optional[str]) -> bool:
     """Only the people the bot works for may change what every later agent is told."""
     return bool(user) and (user in ALLOWED_USER_IDS or user == NOTIFY_USER)
+
+
+def _owner_user(user: Optional[str]) -> bool:
+    """The one person who may change what everyone's runs are told (team rules, roles, autonomy)."""
+    return bool(user) and user == people.owner_id()
 
 
 async def handle_memory(client, channel: str, thread_ts: str, user: Optional[str], req) -> None:
     async def say(text: str) -> None:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(text))
 
-    if not is_owner(user):
+    if not is_allowed(user):
         await say(":lock: Only the people I work for (ALLOWED_USER_IDS) can read or change my memory.")
         return
+    owner = _owner_user(user)
+    whose = None if owner else user  # the owner's own rules stay in me.md
     if req.command == "memory":  # memory can hold internal details: never post it in a shared channel
-        await post_markdown(client, user, None, await asyncio.to_thread(memory_digest))
+        await post_markdown(client, user, None, await asyncio.to_thread(memory_digest, whose, owner))
         if channel != user and not channel.startswith("D"):
             await say(":brain: Sent you my memory in a DM.")
         return
     if req.command == "apply":
+        if not owner:
+            await say(":lock: Only the owner can apply the autonomy review.")
+            return
         await say(await asyncio.to_thread(autonomy.apply, autonomy.parse_apply(req.prompt), thread_ts))
         return
-    where = await asyncio.to_thread(learn.add, req.prompt, "rule", req.repo, f"slack:{channel}/{thread_ts}")
+    team = req.repo == learn.TEAM_REPO
+    if team and not owner:
+        await say(":lock: Only the owner can add team rules. `@neo remember <rule>` saves it as yours.")
+        return
+    if req.repo and not team and people.role(user) != "full":
+        await say(":lock: Repo notes reach everyone's runs; your role can save rules for yourself only "
+                  "(`@neo remember <rule>`).")
+        return
+    repo = None if team else req.repo
+    where = await asyncio.to_thread(learn.add, req.prompt, "rule", repo, f"slack:{channel}/{thread_ts}", whose, team)
     if not where:
         await say(":brain: I already remember that (or there was nothing to remember).")
         return
     note = ""
-    if req.repo and where.startswith("repos/") and not await asyncio.to_thread(_known_repo, req.repo):
-        note = f"\n_I don't see a repository named {req.repo} under {WORKDIR}; I'll use this note when an agent works in one with that name._"
-    await say(f":brain: Saved to `{where}`. Every agent I start from now on will know it.{note}")
+    if repo and where.startswith("repos/") and not await asyncio.to_thread(_known_repo, repo):
+        note = f"\n_I don't see a repository named {repo} under {WORKDIR}; I'll use this note when an agent works in one with that name._"
+    reach = ("Every agent I start from now on, for anyone, will know it." if team or repo
+             else "Every agent I start for you from now on will know it.")
+    await say(f":brain: Saved to `{where}`. {reach}{note}")
+
+
+async def handle_settings(client, channel: str, thread_ts: str, user: Optional[str], req) -> None:
+    async def say(text: str) -> None:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(text))
+
+    if not people.valid_user(user):
+        await say(":x: I can't tell who you are, so I can't keep settings for you.")
+        return
+    if req.command == "settings":
+        await say(await asyncio.to_thread(people.describe, user))
+        return
+    target = req.target if req.field == "role" else user
+    try:
+        await asyncio.to_thread(people.save, target, user, **{req.field: req.prompt})
+    except (ValueError, PermissionError) as exc:
+        await say(f":x: {exc}")
+        return
+    if req.field == "role":
+        await say(f":white_check_mark: <@{target}> is now *{people.role(target)}*. Their next run uses it.")
+    else:
+        shown = people.slack_safe(req.prompt) if req.prompt else "_cleared_"
+        await say(f":white_check_mark: Saved. {req.field}: {shown}. Your next run uses it.")
+
+
+async def handle_watch(client, channel: str, thread_ts: str, user: Optional[str], req) -> None:
+    async def say(text: str) -> None:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(text))
+
+    if not people.valid_user(user):
+        await say(":x: I can't tell who you are, so I can't keep a watch for you.")
+        return
+    if req.field == "remove":
+        watch = await asyncio.to_thread(watches.get, req.target)
+        if not watch or (watch.get("owner") != user and not _owner_user(user)):
+            await say(f":x: You have no watch `{req.target}`. `@neo watches` lists yours.")
+            return
+        await asyncio.to_thread(watches.delete, req.target)
+        await say(f":wastebasket: Removed the *{watch['name']}* watch.")
+        return
+    try:
+        watch = await asyncio.to_thread(watches.save, {"name": req.target, "instructions": req.prompt,
+                                                       "every": req.keys[0], "hours": "work", "owner": user})
+    except ValueError as exc:
+        await say(f":x: {exc}")
+        return
+    await say(f":eyes: Watch `{watch['id']}` checks every {watch['every']} min on work days and DMs you what it finds "
+              f"(read-only checks). `@neo watch remove {watch['id']}` to stop it.")
 
 
 async def route_apply(req, thread_ts: str):
@@ -966,12 +1073,15 @@ def _known_repo(name: str) -> bool:
     return any(p.name == name for p in [root, *root.glob("*"), *root.glob("*/*")] if (p / ".git").exists())
 
 
-def memory_digest() -> str:
-    files = learn.all_files()
+def memory_digest(user: Optional[str] = None, everyone: bool = True) -> str:
+    """everyone: the owner's view (every file, with where it lives); otherwise the team rules, this
+    person's own and the shared notes."""
+    files = learn.all_files(user, everyone)
     if not files:
         return ("I don't remember anything yet. I learn from mistakes in sessions you run and from what you tell me: "
                 "`@neo remember <rule>`.")
-    out = [f"My memory ({learn.memory_dir()}), newest last. Edit or delete lines there any time."]
+    out = ([f"My memory ({learn.memory_dir()}), newest last. Edit or delete lines there any time."] if everyone else
+           ["What I remember for you, newest last: the team rules, your own rules, and notes everyone shares."])
     for f in files:
         out.append(f"\n*{f['name']}*")
         out += [f"• {e['text']}" for e in f["entries"][-15:]]
@@ -980,7 +1090,13 @@ def memory_digest() -> str:
     return "\n".join(out)
 
 
-def watches_digest() -> str:
+def watches_digest(user: Optional[str] = None) -> str:
+    if user and not _owner_user(user):
+        mine = watches.owned_by(user)
+        if not mine:
+            return "You have no watches. Add one: `@neo watch add <name> every 60: <what to check>`."
+        return "*Your watches* (findings go to your DM)\n" + "\n".join(
+            f"• `{w['id']}` {w['name']}, every {w['every']} min{'' if w.get('enabled') else ' (off)'}" for w in mine)
     rows = watches.open_findings()
     active = [w["name"] for w in watches.load() if w.get("enabled")]
     head = f"Watching: {', '.join(active) or 'nothing (add watches in the dashboard, Work tab)'}."
@@ -993,14 +1109,16 @@ def watches_digest() -> str:
 def watch_checked(client, loop):
     """Post what a watch found: new problems (not low severity), or that a scheduled check broke."""
     def notify(watch: dict, meta: dict, new: list[dict]) -> None:
-        chief.finding_loops(new)
-        where = NOTIFY_CHANNEL or NOTIFY_USER
+        personal = bool(watch.get("owner")) and not people.is_owner(watch["owner"])  # someone's own watch: their DM
+        if not personal:
+            chief.finding_loops(new)
+        where = watch["owner"] if personal else (NOTIFY_CHANNEL or NOTIFY_USER)
         if not where:
             return
         if pause.is_paused():
             log.info("watch %s findings not posted: notifications paused (still on the dashboard)", watch["id"])
             return
-        mention = f"<@{NOTIFY_USER}> " if NOTIFY_CHANNEL and NOTIFY_USER else ""
+        mention = f"<@{NOTIFY_USER}> " if NOTIFY_CHANNEL and NOTIFY_USER and not personal else ""
         if meta["status"] != "done":
             earlier = [m for m in list_runs(300) if m.get("kind") == "watch" and m.get("watch_id") == watch["id"] and m["id"] < meta["id"]]
             if meta.get("source") != "schedule" or (earlier and earlier[0]["status"] != "done"):
@@ -1134,6 +1252,8 @@ async def handle_voice_message(event: dict, client) -> None:
 
 async def reply_to_dm_agent(client, event: dict, channel: str, thread_ts: Optional[str],
                             target: Optional[dict], text: str) -> None:
+    if target and not _owner_user(event.get("user")):
+        return  # agent notifications go to the owner's DM; only the owner answers their agents
     if not target:
         await client.chat_postMessage(
             channel=channel, thread_ts=event["ts"],
@@ -1155,12 +1275,39 @@ async def reply_to_dm_agent(client, event: dict, channel: str, thread_ts: Option
 # ----------------------------------------------------------------- controls
 
 
-async def handle_control(client, channel: str, thread_ts: str, entry: Optional[dict], req) -> None:
+# What only people with the full role may do: these drive the owner's sessions or neo's own messages.
+FULL_ONLY = ("approve", "deny", "keys", "close", "pause", "resume")
+# What acts on the thread's run: only its starter or the owner (keys can type into a live agent).
+RUN_CONTROLS = ("approve", "deny", "keys", "close", "stop", "status")
+
+
+def _active_run(thread_ts: str, entry: Optional[dict], live) -> Optional[dict]:
+    """Who the run going in this thread belongs to, as a session entry ({user, role}): the live agent,
+    else the headless run, else the thread's entry. Runs from before people were tracked are the owner's."""
+    run = live.irun.run if live and live.irun else HEADLESS.get(thread_ts)
+    if run is None:
+        return entry
+    meta = run.meta()
+    return {"user": meta.get("slack_user"), "role": meta.get("role", "full")}
+
+
+async def handle_control(client, channel: str, thread_ts: str, entry: Optional[dict], req, user: Optional[str] = None) -> None:
     async def say(text: str) -> None:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(text))
 
     if req.command == "help":
         await say(commands.HELP + (f"\n*Dashboard*: <{DASHBOARD_URL}|everything running on this machine>" if DASHBOARD_URL else ""))
+        return
+    if req.command in FULL_ONLY and people.role(user) != "full":
+        await say(f":lock: `{req.command}` isn't available with your role ({people.role(user)}).")
+        return
+    if req.command == "default" and user and not _owner_user(user):
+        if req.engine:  # everyone else's `default` is their own setting, not neo's
+            await asyncio.to_thread(people.save, user, user, engine=req.engine)
+            await say(f"From now on I use *{req.engine}* for you when you don't name an agent.")
+        else:
+            await say(f"I use *{people.load(user).get('engine') or default_engine()}* for you when you don't name an agent. "
+                      "Change it with `@neo default claude` or `@neo default codex`.")
         return
     if req.command == "default":
         if req.engine:
@@ -1170,7 +1317,7 @@ async def handle_control(client, channel: str, thread_ts: str, entry: Optional[d
             await say(f"I use *{default_engine()}* when you don't name an agent. Change it with `@neo default claude` or `@neo default codex`.")
         return
     if req.command == "watches":
-        await post_markdown(client, channel, thread_ts, await asyncio.to_thread(watches_digest))
+        await post_markdown(client, channel, thread_ts, await asyncio.to_thread(watches_digest, user))
         return
     if req.command == "pause":
         try:
@@ -1188,6 +1335,10 @@ async def handle_control(client, channel: str, thread_ts: str, entry: Optional[d
         return
 
     live = await live_for(client, channel, thread_ts, entry)
+    active = await asyncio.to_thread(_active_run, thread_ts, entry, live)
+    if req.command in RUN_CONTROLS and not _owner_user(user) and not _same_asker(active, user, people.role(user)):
+        await say(f":lock: The run in this thread is someone else's; you can only `{req.command}` your own.")
+        return
     if live and live.irun:
         irun = live.irun
         try:
@@ -1287,20 +1438,32 @@ async def handle_mention(event: dict, client) -> None:
             log.exception("%s failed for thread=%s", req.command, thread_ts)
             await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: `{req.command}` failed: `{type(exc).__name__}: {exc}`")
         return
+    if req.command in ("settings", "set", "watch"):
+        try:
+            await (handle_watch if req.command == "watch" else handle_settings)(client, channel, thread_ts, user, req)
+        except Exception as exc:  # noqa: BLE001 - always answer in the thread
+            log.exception("%s failed for thread=%s", req.command, thread_ts)
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: `{req.command}` failed: `{type(exc).__name__}: {exc}`")
+        return
 
     if req.command == "resume" and entry and not pause.is_paused():
         req = commands.Request("run", prompt="resume")  # "carry on" for this thread's run
     if req.command in ("pause", "resume"):
-        await handle_control(client, channel, thread_ts, entry, req)
+        await handle_control(client, channel, thread_ts, entry, req, user)
         return
 
+    restricted = people.role(user) != "full"
+    if entry and entry.get("runtime") == "agent" and req.command != "help" and not _owner_user(user):
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text=":lock: This thread drives one of the owner's own agents. Start yours with `@neo <task>` in a new thread.")
+        return
     if entry and entry.get("runtime") == "agent" and req.command != "help":
         await answer_agent(client, channel, thread_ts, event["ts"], entry, req, raw)
         return
 
     if req.command != "run":
         try:
-            await handle_control(client, channel, thread_ts, entry, req)
+            await handle_control(client, channel, thread_ts, entry, req, user)
         except Exception as exc:  # noqa: BLE001 - always answer in the thread
             log.exception("control %s failed for thread=%s", req.command, thread_ts)
             await client.chat_postMessage(
@@ -1313,7 +1476,9 @@ async def handle_mention(event: dict, client) -> None:
     if req.cwd and not os.path.isdir(req.cwd):
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: Not a folder on this machine: `{req.cwd}`")
         return
-    stopped_background = thread_ts in ANSWERED and await _end_background(thread_ts)
+    running = await asyncio.to_thread(_active_run, thread_ts, None, None)
+    theirs = running is None or _same_asker(running, user, people.role(user))
+    stopped_background = thread_ts in ANSWERED and theirs and await _end_background(thread_ts)
     if not stopped_background and (thread_ts in BUSY or thread_ts in HEADLESS):
         await client.chat_postMessage(
             channel=channel, thread_ts=thread_ts,
@@ -1331,16 +1496,24 @@ async def handle_mention(event: dict, client) -> None:
     ok = True
     try:
         live = await live_for(client, channel, thread_ts, entry)
-        if live and live.irun and not req.live and not req.engine:
+        if (live and live.irun and not req.live and not req.engine and not _owner_user(user)
+                and not _same_asker(entry, user, people.role(user))):
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                          text=":lock: This is someone else's live agent. Start yours with `@neo <task>` in a new thread.")
+            ok = False
+        elif live and live.irun and not req.live and not req.engine:
             # Follow-up in a live thread goes straight to the running agent.
             await asyncio.to_thread(live.irun.send, req.prompt)
         else:
             transcript = await _thread_transcript(client, channel, thread_ts, event["ts"], requester=user)
             prompt = _with_context(transcript, req.prompt)
-            if req.live:
-                ok = await start_live(client, channel, thread_ts, req, prompt)
+            if req.live and restricted:
+                await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                              text=f"_Live agents need the full role (yours: {people.role(user)}); running it headless instead._")
+            if req.live and not restricted:
+                ok = await start_live(client, channel, thread_ts, req, prompt, user=user)
             else:
-                ok = await run_headless(client, channel, thread_ts, entry, req, prompt, spoken=spoken)
+                ok = await run_headless(client, channel, thread_ts, entry, req, prompt, spoken=spoken, user=user)
     except HerdrError as exc:
         ok = False
         detail = "the agent is waiting for approval; use `@neo approve` or `@neo deny` first" if exc.code == "agent_blocked" else str(exc)
@@ -1460,6 +1633,9 @@ async def main() -> None:
         raise SystemExit(f"NEO_MODE must be one of {MODES}")
     if default_engine() not in ENGINES:
         raise SystemExit(f"NEO_DEFAULT_ENGINE must be one of {ENGINES}")
+    if len(ALLOWED_USER_IDS) > 1 and not people.owner_id():
+        raise SystemExit("Set NEO_OWNER_USER (or NEO_NOTIFY_USER) to the owner's Slack id: with several people on "
+                         "ALLOWED_USER_IDS, neo must know whose rules and permissions are the owner's")
     if not ALLOWED_USER_IDS:
         log.warning("ALLOWED_USER_IDS is empty: anyone in the workspace can run agents on this machine")
     global TEAM_URL

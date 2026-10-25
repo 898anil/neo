@@ -171,8 +171,17 @@ def _update(watch_id: str, **fields) -> None:
         _write("watches.json", rows)
 
 
+MAX_PER_PERSON = 3  # watches someone other than the owner may keep (they run on the owner's quota)
+
+
+def owned_by(user: str) -> list[dict]:
+    """Watches a person added from Slack; their findings go to that person's DM."""
+    return [w for w in load() if w.get("owner") == user]
+
+
 def save(data: dict) -> dict:
-    """Create a watch (no id) or change one. Raises ValueError on bad input."""
+    """Create a watch (no id) or change one. Raises ValueError on bad input. A new watch with an
+    "owner" (a Slack id) is that person's: findings go to their DM, see owned_by()."""
     name = " ".join(str(data.get("name", "")).split())[:60]
     instructions = str(data.get("instructions", "")).strip()
     try:
@@ -204,6 +213,14 @@ def save(data: dict) -> dict:
             while any(w["id"] == watch_id for w in rows):
                 watch_id, n = f"{base}-{n}", n + 1
             watch = {"id": watch_id, **fields, "created_at": now_iso()}
+            owner = data.get("owner")
+            if owner:
+                from .people import is_owner, valid_user
+                if not valid_user(owner):
+                    raise ValueError("owner must be a Slack user id")
+                if not is_owner(owner) and sum(w.get("owner") == owner for w in rows) >= MAX_PER_PERSON:
+                    raise ValueError(f"you already have {MAX_PER_PERSON} watches; remove one first")
+                watch["owner"] = owner
             rows.append(watch)
         _write("watches.json", rows)
         return watch
@@ -305,6 +322,12 @@ def start(watch_id: str, source: str = "schedule") -> Optional[dict]:
         if source == "schedule" and not claude_available()[0]:
             return None
         every_turn, first_turn = cli_args()
+        if watch.get("owner"):
+            from .people import is_owner
+            if not is_owner(watch["owner"]):
+                # Someone else's watch: without the owner's settings, whose allow list would let a
+                # "readonly" run edit, push and merge, only the read-only tools above can run.
+                every_turn = ["--setting-sources", "", *every_turn]
         run = Run.create("claude", prompt(watch), workdir(), "readonly", source=source,
                          extra={"kind": "watch", "watch_id": watch_id, "title": f"Watch: {watch['name']}",
                                 "cli_args": every_turn, "first_turn_args": first_turn})

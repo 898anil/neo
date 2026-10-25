@@ -273,18 +273,19 @@ NOT_OWNER_KINDS = {"mentions", "mention-send", "loops", "watch", "brief", "alert
 NOT_OWNER_PREFIXES = ("pr-",)  # PR reviews and CI fixes read other people's code review and CI logs
 
 
-def owner_driven(target: dict) -> tuple[bool, Optional[str]]:
-    """(may this session write memory, the folder it worked in). Live agents are the owner's own
-    sessions; a run counts when the owner started it from Slack or the dashboard."""
+def owner_driven(target: dict) -> tuple[bool, Optional[str], Optional[str]]:
+    """(may this session write memory, the folder it worked in, the Slack id of who asked or None
+    for the owner). Live agents are the owner's own sessions; a run counts when a person started it
+    from Slack or the owner from the dashboard. Its rules go to that person's own memory."""
     if target["kind"] == "agent":
-        return True, target.get("cwd") or None
+        return True, target.get("cwd") or None, None
     try:
         meta = Run(target["run_id"]).meta()
     except (OSError, ValueError):
-        return False, None
+        return False, None, None
     kind = meta.get("kind") or ""
     ok = meta.get("source") in ("slack", "dashboard") and kind not in NOT_OWNER_KINDS and not kind.startswith(NOT_OWNER_PREFIXES)
-    return ok, meta.get("cwd")
+    return ok, meta.get("cwd"), meta.get("slack_user") or None
 
 
 def _learn_from(target: dict, card: dict, events: list[dict]) -> None:
@@ -292,8 +293,9 @@ def _learn_from(target: dict, card: dict, events: list[dict]) -> None:
         return
     from . import learn
     try:
-        ok, cwd = owner_driven(target)
+        ok, cwd, user = owner_driven(target)
         if ok:
-            learn.capture(card, cwd=cwd, source=target["key"], owner_text=owner_words(events))
+            role = None if target["kind"] == "agent" else Run(target["run_id"]).meta().get("role")
+            learn.capture(card, cwd=cwd, source=target["key"], owner_text=owner_words(events), user=user, role=role)
     except Exception:  # noqa: BLE001 - a memory write must never cost the card
         log.exception("memory capture failed for %s", target["key"])
