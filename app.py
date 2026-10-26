@@ -1106,6 +1106,9 @@ def watches_digest(user: Optional[str] = None) -> str:
             "Reply `@neo live fix 2` (or any instruction) in this thread to start an agent on one.")
 
 
+DRAFT_KEY = "daily-update:"
+
+
 def watch_checked(client, loop):
     """Post what a watch found: new problems (not low severity), or that a scheduled check broke."""
     def notify(watch: dict, meta: dict, new: list[dict]) -> None:
@@ -1126,7 +1129,14 @@ def watch_checked(client, loop):
             link = f" [Open the run]({DASHBOARD_URL}/#{meta['id']})." if DASHBOARD_URL else ""
             text = f"{mention}The **{watch['name']}** watch could not finish its check ({meta['status']}).{link}"
         else:
-            worth = [f for f in new if f["severity"] != "low"]
+            # A watch can write a message for the owner to post (key "daily-update:<date>"). It goes out
+            # whole and on its own, so it can be copied as is, not cut down into the findings list.
+            drafts = [f for f in new if str(f.get("key", "")).lower().startswith(DRAFT_KEY)]
+            for d in drafts:
+                to = f" for <#{watch['draft_channel']}>" if watch.get("draft_channel") else ""
+                draft = f"{mention}**{watch['name']}**: draft{to}, ready to copy\n\n{d.get('what', '')}"
+                asyncio.run_coroutine_threadsafe(post_markdown(client, where, None, draft), loop)
+            worth = [f for f in new if f["severity"] != "low" and f not in drafts]
             if not worth:
                 return
             noun = "problem" if len(worth) == 1 else "problems"
