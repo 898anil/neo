@@ -1,13 +1,14 @@
 """Draw a trace digest from its structured fields (see digest.SCHEMA) as one fixed HTML layout.
 
 The model only fills fields; the page decides how they look, so every digest reads the same way:
-state, what was asked, what came of it, the plan as a checklist, then the cause chain, numbers,
-changes, checks and timeline when the work has them. Everything here is escaped text; the only
+state, what was asked, what came of it, the plan as a checklist, why this option over the others, then
+the cause chain, numbers, changes, checks and timeline when the work has them. Everything here is escaped text; the only
 links are http(s) URLs. Colours come from the trace page's CSS variables (digestDoc in index.html).
 """
 
 from __future__ import annotations
 
+import re
 from html import escape
 from typing import Any, Iterable
 
@@ -21,6 +22,7 @@ TONE_WORD = {"new": "new", "changed": "changed", "broken": "broken", "unsure": "
 CHECK = {"pass": ("mint", "✓"), "fail": ("coral", "✕"), "pending": ("amber", "◷"), "none": ("faint", "–")}
 KIND = {"rca": "Root cause", "plan": "Plan", "fix": "Fix", "investigation": "Investigation", "other": "Digest"}
 CONF = {"high": 3, "medium": 2, "low": 1}
+VISUAL = re.compile(r"https://claude\.ai/(?:code/)?artifact/[A-Za-z0-9-]{8,80}(?![A-Za-z0-9-])")  # same as digest.VISUAL
 
 CSS = """
 .dg{--wash:color-mix(in srgb,var(--text) 6%,transparent);display:grid;gap:22px;max-width:640px;margin:0 auto;font-size:14px;line-height:1.5}
@@ -127,6 +129,19 @@ CSS = """
 .dg details ol.steps{margin-top:6px}
 .dg .tl .ev span{font-size:11.5px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .dg .next{font-size:13.5px}
+.dg .vis{display:inline-flex;align-self:start;justify-self:start;gap:6px;align-items:center;font:600 12.5px var(--mono);padding:7px 12px;border-radius:8px;
+  color:var(--azure);background:color-mix(in srgb,var(--azure) 11%,transparent)}
+.dg .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));gap:8px}
+.dg .opt{display:grid;gap:5px;align-content:start;padding:10px 12px;border-radius:10px;background:var(--panel);box-shadow:inset 0 0 0 1px var(--line);font-size:12.5px;color:var(--muted)}
+.dg .opt.picked{background:color-mix(in srgb,var(--mint) 8%,var(--panel));box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--mint) 70%,transparent)}
+.dg .opt .on{display:flex;justify-content:space-between;gap:8px;align-items:baseline;font-size:13.5px;font-weight:600;color:var(--text)}
+.dg .opt .on .tag{flex:none}.dg .opt .on span{min-width:0;overflow-wrap:anywhere}
+.dg .opt p{display:grid;grid-template-columns:12px 1fr;gap:6px}
+.dg .opt p::before{font:700 12px var(--mono)}
+.dg .opt .pro::before{content:"+";color:var(--mint)}.dg .opt .con::before{content:"−";color:var(--coral)}
+.dg .cwhy{margin-top:10px;font-size:13.5px;color:var(--text)}
+.dg .flip{display:flex;gap:8px;align-items:baseline;margin-top:6px;font-size:12.5px;color:var(--muted)}
+.dg .flip b{font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--amber);flex:none}
 """
 
 
@@ -253,6 +268,36 @@ def _progress(d: dict) -> str:
             f'<details><summary>Plan · {len(steps)} steps</summary><ol class="steps">{"".join(items)}</ol></details>')
 
 
+def _visual(d: dict) -> str:
+    """The agent's full plan visual, when it published one; only claude.ai artifact links count."""
+    url = str(d.get("visual_url") or "").strip()
+    if not VISUAL.fullmatch(url):
+        return ""
+    return f'<a class="vis" href="{url}" target="_blank" rel="noopener">Open visual ↗</a>'
+
+
+def _choice(d: dict) -> str:
+    """The options weighed side by side, the pick first, then why it wins and what would change it."""
+    opts = [o for o in _rows(d.get("options"), 4) if not _blank(o.get("name"))]
+    if len(opts) < 2:
+        return ""
+    # Only one pick: the first option marked picked (the model can mark none or several).
+    first = next((i for i, o in enumerate(opts) if o.get("picked") is True), None)
+    if first is None:
+        return ""
+    opts.insert(0, opts.pop(first))
+    cards = []
+    for i, o in enumerate(opts):
+        picked = i == 0
+        tag = f'<span class="tag" style="{_c("mint")}">Picked</span>' if picked else ""
+        pros = f'<p class="pro">{_t(o.get("pros"), 120)}</p>' if not _blank(o.get("pros")) else ""
+        cons = f'<p class="con">{_t(o.get("cons"), 120)}</p>' if not _blank(o.get("cons")) else ""
+        cards.append(f'<div class="opt{" picked" if picked else ""}"><div class="on"><span>{_t(o.get("name"), 60)}</span>{tag}</div>{pros}{cons}</div>')
+    why = f'<p class="cwhy">{_t(d.get("choice_why"), 200)}</p>' if not _blank(d.get("choice_why")) else ""
+    flip = f'<p class="flip"><b>Would change if</b><span>{_t(d.get("choice_flip"), 160)}</span></p>' if not _blank(d.get("choice_flip")) else ""
+    return _section("Why this choice", f'<div class="opts">{"".join(cards)}</div>{why}{flip}')
+
+
 def _numbers(d: dict) -> str:
     tiles = "".join(f'<div class="tile" style="{_c(TONE.get(_k(x.get("tone")), "text"))}"><b>{_t(x.get("value"), 12)}</b><span>{_t(x.get("label"), 40)}</span></div>'
                     for x in _rows(d.get("numbers"), 4) if not _blank(x.get("value")))
@@ -330,5 +375,5 @@ def render(d: dict) -> str:
     nxt = f'<p class="next">{_t(d.get("next"), 200)}</p>' if not _blank(d.get("next")) else ""
     # When the plan itself is the picture, the progress bar under it would only repeat it.
     progress = _progress(d) if _has_chain(d) else ""
-    body = [_header(d), _diagram(d), _outcome(d), _numbers(d), progress, _checks(d), _timeline(d), _changes(d), nxt, _evidence(d)]
+    body = [_header(d), _visual(d), _diagram(d), _outcome(d), _choice(d), _numbers(d), progress, _checks(d), _timeline(d), _changes(d), nxt, _evidence(d)]
     return f'<style>{CSS}</style><div class="dg">{"".join(p for p in body if p)}</div>'
