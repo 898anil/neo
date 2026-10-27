@@ -140,6 +140,27 @@ class MemoryApplyTest(ServerMixin, unittest.TestCase):
             self.assertTrue(data["review"]["proposals"][0]["applied"])
 
 
+class RunRenameTest(ServerMixin, unittest.TestCase):
+    def post(self, run_id, body):
+        import http.client
+        import json
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", f"/api/runs/{run_id}/rename", body=json.dumps(body), headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp.status
+
+    def test_rename_validates_and_sets_the_title(self):
+        from cos.runner import Run
+        run = Run.create("claude", "do the thing", self.tmp.name, "readonly", source="dashboard")
+        self.assertEqual(self.post(run.id, {"title": "   "}), 400)
+        self.assertEqual(self.post(run.id, {"title": "x" * 121}), 400)
+        self.assertEqual(self.post(run.id, {"title": " HubSpot  sync "}), 200)
+        self.assertEqual(Run(run.id).meta()["title"], "HubSpot sync")
+        self.assertEqual(self.post("nope", {"title": "x"}), 404)
+
+
 class ClipLastTextTest(unittest.TestCase):
     def test_overview_keeps_both_ends_of_a_long_last_text(self):
         text = "A" * 5000 + "Pick one?\n1. yes\n2. no"
