@@ -746,6 +746,15 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] == "seen":
                 fleet.mark_run_seen(run.id)
                 return self._json({"ok": True})
+            if parts[3] == "rename":
+                try:
+                    title = fleet.clean_title((body or {}).get("title", ""))
+                except ValueError as exc:
+                    return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+                if not title:
+                    return self._error(HTTPStatus.BAD_REQUEST, "title is required")
+                run.update_meta(title=title)
+                return self._json({"ok": True})
             if meta.get("runtime", "headless") != "headless":
                 return self._error(HTTPStatus.CONFLICT, "live runs are controlled from Slack or `herdr session attach`")
             if parts[3] == "cancel":
