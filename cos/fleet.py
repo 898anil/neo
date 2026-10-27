@@ -111,7 +111,8 @@ def _agent_row(session: str, agent: dict, runs: dict) -> dict:
         "prompts": prompts,
         "created_at": (run or {}).get("created_at"),
     }
-    row["title"] = titles.read().get(_seen_key(row)) or row["title"]
+    names = titles.read()
+    row["title"] = names.get(_seen_key(row)) or names.get(_title_pane_key(session, agent)) or row["title"]
     row["attention"], row["reason"] = attention(row, run)
     return row
 
@@ -207,9 +208,14 @@ seen = SeenStore()
 
 
 # Names the owner gave agents on the home screen (COS_HOME/titles.json), keyed like seen.json so a
-# name follows the engine session, not a herdr pane id that a later agent may reuse.
+# name follows the engine session, not a herdr pane id that a later agent may reuse. An agent renamed
+# before herdr reports its session id is keyed by pane and agent name until then (_title_pane_key).
 titles = JsonStore("titles.json")
 TITLE_MAX = 120
+
+
+def _title_pane_key(session: str, agent: dict) -> str:
+    return f"pane:{session}/{agent.get('pane_id')}/{agent.get('name')}"
 
 
 def clean_title(text: str) -> str:
@@ -550,9 +556,13 @@ def act(session: str, pane_id: str, action: str, text: str = "", keys: Optional[
     elif action == "rename":
         # An empty name goes back to the agent's own terminal title.
         title = clean_title(text)
-        key = _seen_key(_agent_row(session, herdr.get(pane_id), {}))
+        agent = herdr.get(pane_id)
+        session_id = agent_session_id(agent)
+        pane_key = _title_pane_key(session, agent)
+        key = f"agent:{session_id}" if session_id else pane_key
 
         def put(data: dict) -> None:
+            data.pop(pane_key, None)  # the session key takes over once herdr reports the session id
             if title:
                 data[key] = title
             else:

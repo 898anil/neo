@@ -1156,9 +1156,9 @@ function unfinishedCard(u) {
 function waitingCard(m) {
   const close = h("button", { class: "btn quiet", onclick: async () => {
     close.disabled = true;
-    try { await api("/api/home/close", { method: "POST", body: JSON.stringify({ key: m.key }) }); toast("Closed"); refresh(); }
+    try { await api("/api/home/close", { method: "POST", body: JSON.stringify({ key: m.key }) }); toast("Dismissed"); refresh(); }
     catch (err) { toast(err.message); close.disabled = false; }
-  } }, "Close");
+  } }, "Dismiss");
   return h("div", { class: "ask" },
     h("div", { class: "who" }, h("span", { class: "lamp waiting" }), h("a", linkAttrs(m.href), m.title), h("span", {}, ago(m.at)), h("span", { class: "where" }, whereOf(m))),
     h("div", { class: "what" }, m.line),
@@ -1193,7 +1193,8 @@ function renameItem(m) {
   const name = prompt(m.kind === "agent" ? "Rename (empty = its own title)" : "Rename", m.title || "");
   if (name === null || name.trim() === (m.title || "").trim()) return Promise.resolve();
   if (m.kind === "agent") return actOn(m, "rename", { text: name });
-  return name.trim() ? api(`/api/runs/${enc(m.run_id)}/rename`, { method: "POST", body: JSON.stringify({ title: name }) }) : Promise.resolve();
+  if (!name.trim()) { toast("A task needs a name"); return Promise.resolve(); }
+  return api(`/api/runs/${enc(m.run_id)}/rename`, { method: "POST", body: JSON.stringify({ title: name }) });
 }
 function closeSession(m) {
   const working = m.attention === "working" && !m.idle;
@@ -1204,7 +1205,7 @@ function sessionButtons(d) {
   if (d.kind !== "agent" && d.kind !== "run") return [];
   const btn = (label, fn) => h("button", { class: "btn quiet", onclick: async (e) => {
     const b = e.currentTarget; b.disabled = true;
-    try { await fn(); refresh(); } catch (err) { toast(err.message); } b.disabled = false;
+    try { await fn(); refresh(); } catch (err) { toast(err.message); b.disabled = false; }
   } }, label);
   return [btn("Rename", () => renameItem(d)), d.kind === "agent" ? btn("Close session", () => closeSession(d)) : null].filter(Boolean);
 }

@@ -48,6 +48,21 @@ class RenameActionTest(unittest.TestCase):
         self.assertEqual(self.row()["title"], "claude")
         self.assertEqual(fleet.titles.read(), {})
 
+    def test_a_name_given_before_the_session_id_moves_to_it(self):
+        fleet.act("neo", "w1:p1", "rename", "Early name")
+        self.assertEqual(self.row()["title"], "Early name")
+        self.herdr.get.return_value = {**self.herdr.get.return_value, "agent_session": {"kind": "id", "value": "s-1"}}
+        with mock.patch.object(fleet, "agent_session_id", return_value="s-1"):
+            self.assertEqual(self.row()["title"], "Early name")  # still found by pane until renamed again
+            fleet.act("neo", "w1:p1", "rename", "Later name")
+            self.assertEqual(fleet.titles.read(), {"agent:s-1": "Later name"})
+            self.assertEqual(self.row()["title"], "Later name")
+
+    def test_another_agent_in_the_same_pane_does_not_inherit_the_name(self):
+        fleet.act("neo", "w1:p1", "rename", "Mine")
+        self.herdr.get.return_value = {**self.herdr.get.return_value, "name": "neo-xyz"}
+        self.assertEqual(self.row()["title"], "claude")
+
     def test_rename_rejects_a_long_title(self):
         with self.assertRaises(ValueError):
             fleet.act("neo", "w1:p1", "rename", "x" * (fleet.TITLE_MAX + 1))
