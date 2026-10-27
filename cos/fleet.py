@@ -24,6 +24,7 @@ from .config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD
 from .herdr import Herdr, HerdrError, agent_session_id
 from .interactive import RC_URL_RE, find_transcript
 from .runner import list_runs
+from .store import JsonStore
 
 PANE_RE = re.compile(r"^w[0-9A-Za-z]{1,8}:p[0-9A-Za-z]{1,8}$")  # herdr ids go past 9 with letters: wB:p1
 SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -110,6 +111,7 @@ def _agent_row(session: str, agent: dict, runs: dict) -> dict:
         "prompts": prompts,
         "created_at": (run or {}).get("created_at"),
     }
+    row["title"] = titles.read().get(_seen_key(row)) or row["title"]
     row["attention"], row["reason"] = attention(row, run)
     return row
 
@@ -202,6 +204,19 @@ class SeenStore:
 
 
 seen = SeenStore()
+
+
+# Names the owner gave agents on the home screen (COS_HOME/titles.json), keyed like seen.json so a
+# name follows the engine session, not a herdr pane id that a later agent may reuse.
+titles = JsonStore("titles.json")
+TITLE_MAX = 120
+
+
+def clean_title(text: str) -> str:
+    title = " ".join(str(text or "").split())
+    if len(title) > TITLE_MAX:
+        raise ValueError(f"title must be at most {TITLE_MAX} characters")
+    return title
 
 
 def mark_seen(rows: list[dict]) -> None:
@@ -490,7 +505,7 @@ def remote_url(session: str, pane_id: str) -> Optional[str]:
     return _rc_urls.get(key)
 
 
-ACTIONS = ("prompt", "approve", "deny", "interrupt", "keys", "seen", "resend", "close")
+ACTIONS = ("prompt", "approve", "deny", "interrupt", "keys", "seen", "resend", "close", "rename")
 
 
 def _drop_cache() -> None:
@@ -532,6 +547,17 @@ def act(session: str, pane_id: str, action: str, text: str = "", keys: Optional[
         if run:
             from .runner import Run
             Run(run["id"]).update_meta(status="closed")
+    elif action == "rename":
+        # An empty name goes back to the agent's own terminal title.
+        title = clean_title(text)
+        key = _seen_key(_agent_row(session, herdr.get(pane_id), {}))
+
+        def put(data: dict) -> None:
+            if title:
+                data[key] = title
+            else:
+                data.pop(key, None)
+        titles.update(put)
     else:
         raise ValueError(f"unknown action {action}")
     _drop_cache()

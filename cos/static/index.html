@@ -308,6 +308,10 @@
   .row-wrap .read:hover { background: var(--raise); }
   .row-wrap .row-link { padding-right: 84px; }
   .row-wrap .row-link .when { margin-right: -70px; }
+  .row-wrap .row-acts { position: absolute; right: 12px; bottom: 9px; display: flex; gap: 6px; }
+  .row-wrap .row-acts .read { position: static; }
+  .row-wrap.two .row-link { padding-right: 150px; }
+  .row-wrap.two .row-link .when { margin-right: -136px; }
   .lamp.sm.stuck { box-shadow: none; }
   .today.reading .body { font-size: 16px; line-height: 1.6; max-height: none; }
   .today.reading .body::after { display: none; }
@@ -1104,6 +1108,8 @@ function decideCard(d, o) {
       const c = askCard(a);
       const info = d.card ? moreInfo(d.key, cardBits(d.card)) : null;
       if (info) c.insertBefore(info, c.querySelector(".acts, .reply"));
+      const acts = c.querySelector(".acts");
+      if (acts) acts.append(...sessionButtons(d)); else c.append(h("div", { class: "acts" }, ...sessionButtons(d)));
       return c;
     }
   }
@@ -1118,7 +1124,7 @@ function decideCard(d, o) {
   if (info) c.append(info);
   c.append(h("div", { class: "acts" }, d.do_it ? doItButton(d) : null,
     ...(d.kind === "loop" ? loopLinks(d, !d.do_it) : [h("a", { class: `btn ${d.do_it ? "quiet" : "primary"}`, ...linkAttrs(d.href) }, "Open")]), doneButton(d),
-    d.kind === "loop" ? loopButton(d, "mute", "Mute") : null));
+    d.kind === "loop" ? loopButton(d, "mute", "Mute") : null, ...sessionButtons(d)));
   return c;
 }
 function alsoLine(also) {
@@ -1145,7 +1151,7 @@ function unfinishedCard(u) {
     h("div", { class: "what" }, u.line || "Stopped without a summary. Open it to see where it got to."),
     moreInfo(u.key, [u.risk ? h("div", { class: "risk" }, h("b", {}, "Not done or not verified: "), u.risk) : null,
       u.next ? h("div", { class: "ev" }, h("b", {}, "If you do nothing: "), u.next) : null]),
-    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(u.href) }, "Open"), doneButton(u)));
+    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(u.href) }, "Open"), doneButton(u), ...sessionButtons(u)));
 }
 function waitingCard(m) {
   const close = h("button", { class: "btn quiet", onclick: async () => {
@@ -1158,7 +1164,7 @@ function waitingCard(m) {
     h("div", { class: "what" }, m.line),
     moreInfo(m.key, [m.recommend ? h("div", { class: "rec" }, h("b", {}, "Recommend: "), m.recommend) : null,
       m.also && m.also.length ? alsoLine(m.also) : null]),
-    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(m.href) }, "Open"), close));
+    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(m.href) }, "Open"), close, ...sessionButtons(m)));
 }
 function regressedCard(r) {
   return h("div", { class: "ask regressed" },
@@ -1182,14 +1188,35 @@ function homeRow(m, lamp) {
     m.kind === "loop" ? h("span", { class: "s" }, stageBar(m.stage_index, m.loop && m.loop.regressed)) : null,
     line ? h("span", { class: "said" }, line + extra) : null);
 }
-// A home row with a Close button: loops (alerts, PRs) close every firing they carry; an idle
-// session closes its herdr workspace. Working agents have no button, stop them from their page.
+// Rename an agent or run as it shows on home. An agent's empty name goes back to its own terminal title.
+function renameItem(m) {
+  const name = prompt(m.kind === "agent" ? "Rename (empty = its own title)" : "Rename", m.title || "");
+  if (name === null || name.trim() === (m.title || "").trim()) return Promise.resolve();
+  if (m.kind === "agent") return actOn(m, "rename", { text: name });
+  return name.trim() ? api(`/api/runs/${enc(m.run_id)}/rename`, { method: "POST", body: JSON.stringify({ title: name }) }) : Promise.resolve();
+}
+function closeSession(m) {
+  const working = m.attention === "working" && !m.idle;
+  return confirm(`Close this session?${working ? " It is still working." : ""} The agent stops and its herdr pane is closed.`) ? actOn(m, "close") : Promise.resolve();
+}
+// Rename and Close as card buttons, for agents and runs on the Decide / Stopped / Waiting cards.
+function sessionButtons(d) {
+  if (d.kind !== "agent" && d.kind !== "run") return [];
+  const btn = (label, fn) => h("button", { class: "btn quiet", onclick: async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try { await fn(); refresh(); } catch (err) { toast(err.message); } b.disabled = false;
+  } }, label);
+  return [btn("Rename", () => renameItem(d)), d.kind === "agent" ? btn("Close session", () => closeSession(d)) : null].filter(Boolean);
+}
+// A home row with its buttons: loops (alerts, PRs) Close every firing they carry; an agent gets Rename
+// and Close (closes its herdr workspace, asking first); a run gets Rename.
 function homeItem(m, lamp) {
   const row = homeRow(m, lamp);
   if (m.kind === "loop") return h("div", { class: "row-wrap", "data-ids": (m.loop_ids || [m.loop.id]).join(",") }, row, markRead("Close", () =>
     Promise.all((m.loop_ids || [m.loop.id]).map((id) => api(`/api/loops/${enc(id)}/close`, { method: "POST", body: "{}" })))));
-  if (m.kind === "agent" && m.idle) return h("div", { class: "row-wrap" }, row, markRead("Close", () =>
-    confirm("Close this session? The agent stops and its herdr pane is closed.") ? actOn(m, "close") : Promise.resolve()));
+  if (m.kind === "agent") return h("div", { class: "row-wrap two" }, row,
+    h("span", { class: "row-acts" }, markRead("Rename", () => renameItem(m)), markRead("Close", () => closeSession(m))));
+  if (m.kind === "run") return h("div", { class: "row-wrap" }, row, markRead("Rename", () => renameItem(m)));
   return row;
 }
 function askBox() {

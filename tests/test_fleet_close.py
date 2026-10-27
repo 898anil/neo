@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -23,6 +25,33 @@ class CloseActionTest(unittest.TestCase):
         with mock.patch.object(fleet, "Herdr", return_value=herdr), mock.patch.object(fleet, "_run_index", return_value={}):
             fleet.act("default", "wB:p1", "close")
         herdr.close_workspace.assert_called_once_with("wB")
+
+
+class RenameActionTest(unittest.TestCase):
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {"COS_HOME": tempfile.mkdtemp()})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.herdr = mock.Mock()
+        self.herdr.get.return_value = {"name": "neo-abc", "pane_id": "w1:p1", "agent": "?", "terminal_title_stripped": "claude"}
+        patcher = mock.patch.object(fleet, "Herdr", return_value=self.herdr)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def row(self):
+        return fleet._agent_row("neo", self.herdr.get.return_value, {})
+
+    def test_rename_sets_the_title_and_empty_goes_back(self):
+        fleet.act("neo", "w1:p1", "rename", "  HubSpot   sync fix ")
+        self.assertEqual(self.row()["title"], "HubSpot sync fix")
+        fleet.act("neo", "w1:p1", "rename", "")
+        self.assertEqual(self.row()["title"], "claude")
+        self.assertEqual(fleet.titles.read(), {})
+
+    def test_rename_rejects_a_long_title(self):
+        with self.assertRaises(ValueError):
+            fleet.act("neo", "w1:p1", "rename", "x" * (fleet.TITLE_MAX + 1))
+        self.assertEqual(fleet.titles.read(), {})
 
 
 if __name__ == "__main__":
