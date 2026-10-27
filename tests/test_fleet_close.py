@@ -7,6 +7,19 @@ from cos import fleet
 
 
 class CloseActionTest(unittest.TestCase):
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {"COS_HOME": tempfile.mkdtemp()})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_close_forgets_the_agents_name(self):
+        fleet.titles.write({"pane:default/wB:p1/mine": "Named", "agent:other": "Keep"})
+        herdr = mock.Mock()
+        herdr.get.return_value = {"name": "mine", "pane_id": "wB:p1"}
+        with mock.patch.object(fleet, "Herdr", return_value=herdr), mock.patch.object(fleet, "_run_index", return_value={}):
+            fleet.act("default", "wB:p1", "close")
+        self.assertEqual(fleet.titles.read(), {"agent:other": "Keep"})
+
     def test_close_shuts_the_workspace_and_marks_the_run_closed(self):
         herdr = mock.Mock()
         herdr.get.return_value = {"name": "neo-abc", "workspace_id": "w14", "pane_id": "w14:p1"}
@@ -51,7 +64,6 @@ class RenameActionTest(unittest.TestCase):
     def test_a_name_given_before_the_session_id_moves_to_it(self):
         fleet.act("neo", "w1:p1", "rename", "Early name")
         self.assertEqual(self.row()["title"], "Early name")
-        self.herdr.get.return_value = {**self.herdr.get.return_value, "agent_session": {"kind": "id", "value": "s-1"}}
         with mock.patch.object(fleet, "agent_session_id", return_value="s-1"):
             self.assertEqual(self.row()["title"], "Early name")  # still found by pane until renamed again
             fleet.act("neo", "w1:p1", "rename", "Later name")

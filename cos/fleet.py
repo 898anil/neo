@@ -549,6 +549,7 @@ def act(session: str, pane_id: str, action: str, text: str = "", keys: Optional[
         agent = herdr.get(pane_id)
         workspace = agent.get("workspace_id") or str(pane_id).split(":")[0]
         herdr.close_workspace(workspace)
+        titles.update(lambda data: [data.pop(k, None) for k in (_title_pane_key(session, agent), f"agent:{agent_session_id(agent)}")])
         run = _run_index().get((session, agent.get("name")))
         if run:
             from .runner import Run
@@ -558,6 +559,8 @@ def act(session: str, pane_id: str, action: str, text: str = "", keys: Optional[
         title = clean_title(text)
         agent = herdr.get(pane_id)
         session_id = agent_session_id(agent)
+        if not session_id and not agent.get("name"):
+            raise ValueError("this agent has no id yet; try again in a moment")
         pane_key = _title_pane_key(session, agent)
         key = f"agent:{session_id}" if session_id else pane_key
 
