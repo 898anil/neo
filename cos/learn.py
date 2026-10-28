@@ -8,6 +8,8 @@ Plain Markdown, so you can read, edit, delete and version it like any notes. In 
   people/<id>.md    each other person's own rules, by Slack user id (see people.py)
   lessons.md        mistakes: what went wrong, and what to do instead (shared by everyone)
   repos/<repo>.md   rules and lessons that only apply in one repository (shared by everyone)
+  pending.md        lessons and repo notes from anyone but the owner, until the owner approves them
+                    (approve/reject): what reaches everyone's runs, the owner's too, is the owner's call
 
 Each entry is one bullet, with where it came from in a comment that Markdown viewers hide:
 
@@ -26,6 +28,7 @@ Not to be confused with memory.py, which searches the CLIs' own transcripts.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import re
 import subprocess
@@ -38,12 +41,13 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Optional
 
-ME, LESSONS, TEAM, PEOPLE = "me.md", "lessons.md", "team.md", "people"
+ME, LESSONS, TEAM, PEOPLE, PENDING = "me.md", "lessons.md", "team.md", "people", "pending.md"
 KINDS = ("rule", "lesson")
 MAX_ENTRY = 300  # characters in one entry
 MAX_PER_CAPTURE = 3  # entries one finished session may add
 BRIEF_BUDGET = 6000  # characters of memory in an agent's brief
-HEADINGS = {ME: "# What you told me", LESSONS: "# Lessons from mistakes", TEAM: "# Team rules"}
+HEADINGS = {ME: "# What you told me", LESSONS: "# Lessons from mistakes", TEAM: "# Team rules",
+            PENDING: "# Shared notes waiting for the owner's approval"}
 _ENTRY_RE = re.compile(r"^- (?P<text>.+?)(?:\s*<!--\s*(?P<meta>.*?)\s*-->)?\s*$")
 _REPO_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _COMMENT_RE = re.compile(r"<!-*|-*->")
@@ -124,7 +128,10 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "",
         user: Optional[str] = None, team: bool = False) -> Optional[str]:
     """Append one entry. Returns the file it went to, relative to the memory folder ("me.md",
     "repos/api.md", "people/U123.md"); None when it is empty, of an unknown kind, or already there.
-    user / team: whose rule it is (see rules_file); lessons and repo notes are shared either way."""
+    user / team: whose rule it is (see rules_file); a lesson or repo note from anyone but the owner waits
+    in pending.md for the owner (approve), since it would reach everyone's runs."""
+    from . import people
+
     text = _clean(text)
     if not text or kind not in KINDS:
         return None
@@ -132,6 +139,11 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "",
     if path is None:
         path = rules_file(user, team) if kind == "rule" else memory_dir() / LESSONS
     meta = " ".join(x for x in (date.today().isoformat(), kind, _clean(source)[:80]) if x)
+    shared = path.parent != memory_dir() / PEOPLE and path.name not in (ME, TEAM)
+    if shared and people.valid_user(user) and not people.is_owner(user):
+        target = str(path.relative_to(memory_dir()))
+        meta = f"{date.today().isoformat()} {kind} for:{target} by:{user} {_clean(source)[:80]}".strip()
+        path = memory_dir() / PENDING
     with _locked():
         if any(_norm(e["text"]) == _norm(text) or (kind == "lesson" and adds_little(text, e["text"])) for e in entries(path)):
             return None
@@ -151,6 +163,46 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "",
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"{lead}- {text} <!-- {meta} -->\n")
     return str(path.relative_to(memory_dir()))
+
+
+def pending() -> list[dict]:
+    """Shared notes waiting for the owner: {id, text, kind, target ("lessons.md", "repos/x.md"), by}."""
+    out = []
+    for entry in entries(memory_dir() / PENDING):
+        meta = entry["meta"].split()
+        target = next((m[4:] for m in meta if m.startswith("for:")), "")
+        by = next((m[3:] for m in meta if m.startswith("by:")), "")
+        if target:
+            out.append({"id": hashlib.sha1(f"{target}\0{entry['text']}".encode()).hexdigest()[:10], "text": entry["text"],
+                        "kind": meta[1] if len(meta) > 1 else "lesson", "target": target, "by": by})
+    return out
+
+
+def _drop_pending(item_id: str) -> Optional[dict]:
+    """Take one entry out of pending.md; the entry, or None when it isn't there."""
+    item = next((p for p in pending() if p["id"] == item_id), None)
+    if not item:
+        return None
+    path = memory_dir() / PENDING
+    with _locked():
+        kept = [line for line in path.read_text(encoding="utf-8").splitlines(keepends=True)
+                if not ((m := _ENTRY_RE.match(line.strip())) and m.group("text").strip() == item["text"]
+                        and f"for:{item['target']}" in (m.group("meta") or ""))]
+        path.write_text("".join(kept), encoding="utf-8")
+    return item
+
+
+def approve(item_id: str) -> Optional[str]:
+    """The owner lets a pending note reach everyone's runs. Returns the file it went to."""
+    item = _drop_pending(item_id)
+    if not item:
+        return None
+    repo = item["target"][len("repos/"):-len(".md")] if item["target"].startswith("repos/") else None
+    return add(item["text"], item["kind"], repo=repo, source=f"approved from {item['by']}") or item["target"]
+
+
+def reject(item_id: str) -> bool:
+    return _drop_pending(item_id) is not None
 
 
 def adds_little(new: str, old: str) -> bool:

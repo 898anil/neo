@@ -1156,6 +1156,9 @@ async def handle_memory(client, channel: str, thread_ts: str, user: Optional[str
     if not where:
         await say(":brain: I already remember that (or there was nothing to remember).")
         return
+    if where == learn.PENDING:
+        await say(f":brain: Noted. Notes for a repository reach everyone's agents, so {owner_name()} approves them first.")
+        return
     note = ""
     if repo and where.startswith("repos/") and not await asyncio.to_thread(_known_repo, repo):
         note = f"\n_I don't see a repository named {repo} under {WORKDIR}; I'll use this note when an agent works in one with that name._"
@@ -1427,7 +1430,8 @@ async def publish_home(client, user: Optional[str], check_logins: bool = False) 
         view = home_tab.view(mine.get("name") or accounts.display_name(info) or "there", states,
                              f"{when['brief'][0]:02d}:{when['brief'][1]:02d}" if when["brief"] else None,
                              f"{when['digest'][0]:02d}:{when['digest'][1]:02d}" if when["digest"] else None,
-                             runs, theirs, owner_name(), DASHBOARD_URL if _owner_user(user) else None)
+                             runs, theirs, owner_name(), DASHBOARD_URL if _owner_user(user) else None,
+                             await asyncio.to_thread(learn.pending) if _owner_user(user) else None)
         await client.views_publish(user_id=user, view=view)
     except Exception:  # noqa: BLE001 - the Home tab must never break anything else
         log.exception("could not publish the Home tab for %s", user)
@@ -1484,6 +1488,19 @@ async def on_home_watch_remove(ack, body, client) -> None:
     watch = await asyncio.to_thread(watches.get, wid)
     if watch and (watch.get("owner") == user or _owner_user(user)):
         await asyncio.to_thread(watches.delete, wid)
+    await publish_home(client, user)
+
+
+@app.action(re.compile(f"^({home_tab.NOTE_APPROVE}|{home_tab.NOTE_REJECT})_"))
+async def on_home_note(ack, body, client) -> None:
+    await ack()
+    user, action = body["user"]["id"], body["actions"][0]
+    if not _owner_user(user):
+        return  # only the owner decides what reaches everyone's runs
+    if action["action_id"].startswith(home_tab.NOTE_APPROVE):
+        await asyncio.to_thread(learn.approve, action["value"])
+    else:
+        await asyncio.to_thread(learn.reject, action["value"])
     await publish_home(client, user)
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Optional
 
 CONNECT, BRIEF, DIGEST, WATCH_REMOVE = "home_connect", "home_brief", "home_digest", "home_watch_remove"
+NOTE_APPROVE, NOTE_REJECT = "home_note_approve", "home_note_reject"
 TOOL_NAMES = {"claude": "Claude", "codex": "Codex", "gh": "GitHub"}
 BRIEF_TIMES = [f"{h:02d}:{m:02d}" for h in range(6, 12) for m in (0, 30)]
 DIGEST_TIMES = [f"{h:02d}:{m:02d}" for h in range(16, 22) for m in (0, 30)]
@@ -29,7 +30,8 @@ def _time_select(action: str, times: list[str], current: Optional[str]) -> dict:
 
 
 def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], runs: list[dict],
-         watches: list[dict], lender: Optional[str] = None, dashboard_url: Optional[str] = None) -> dict:
+         watches: list[dict], lender: Optional[str] = None, dashboard_url: Optional[str] = None,
+         pending: Optional[list[dict]] = None) -> dict:
     """logins: tool -> "own" | "lent" | "none" | "unknown". brief/digest: "HH:MM" or None (off).
     runs: today's {title, status, url}. watches: {id, name, every, enabled}. lender: whose logins are lent."""
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"Hi {name}"[:150]}},
@@ -72,6 +74,16 @@ def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], r
                             "text": {"type": "plain_text", "text": "Remove"}, "style": "danger"}
         blocks.append(row)
     blocks.append(_text("_Add one by telling me, e.g. \"watch CI failures on backie every hour\"._"))
+    if pending:  # the owner's: shared notes from other people, reaching everyone's runs only once approved
+        blocks += [{"type": "divider"}, _text(f"*Shared notes waiting for you* ({len(pending)}): these would reach "
+                                              "everyone's agents, yours too.")]
+        for item in pending[:10]:
+            blocks.append(_text(f"<@{item['by']}> → `{item['target']}`\n{item['text'][:400]}"))
+            blocks.append({"type": "actions", "elements": [
+                {"type": "button", "action_id": f"{NOTE_APPROVE}_{item['id']}", "value": item["id"], "style": "primary",
+                 "text": {"type": "plain_text", "text": "Approve"}},
+                {"type": "button", "action_id": f"{NOTE_REJECT}_{item['id']}", "value": item["id"],
+                 "text": {"type": "plain_text", "text": "Reject"}}]})
     if dashboard_url:
         blocks += [{"type": "divider"}, _text(f"<{dashboard_url}|Open the web dashboard> for full traces.")]
     return {"type": "home", "blocks": blocks[:100]}

@@ -31,7 +31,8 @@ class MemoryPerPersonTest(Base):
         self.assertEqual(learn.add("merge infrie PRs yourself too", "rule", user=OWNER), "me.md")
         self.assertEqual(learn.add("answer in bullets", "rule", user=AJAY), f"people/{AJAY}.md")
         self.assertEqual(learn.add("never deploy on Fridays", "rule", team=True), "team.md")
-        self.assertEqual(learn.add("zsh has no timeout command, use gtimeout", "lesson", user=AJAY), "lessons.md")
+        # a teammate's lesson would reach everyone's runs: it waits for the owner (learn.approve)
+        self.assertEqual(learn.add("zsh has no timeout command, use gtimeout", "lesson", user=AJAY), "pending.md")
         self.assertIn(f"What <@{AJAY}> told me", (self.dir / "memory" / "people" / f"{AJAY}.md").read_text())
 
     def test_each_brief_gets_team_rules_its_own_rules_and_shared_lessons_only(self):

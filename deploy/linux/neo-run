@@ -177,11 +177,13 @@ def main() -> int:
     home = account_home()
     spec = read_spec(args.spec_fd)
     (home / "code").mkdir(exist_ok=True, mode=0o700)
+    tmp = home / ".cache" / "tmp"  # their own, not the /tmp every account shares
+    tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
     cwd = resolve_cwd(home, spec.get("cwd") or "")
     if not cwd.is_dir():
         fail(f"no such folder: {cwd}")
     env = {"HOME": str(home), "USER": home.name, "LOGNAME": home.name, "PATH": PATH,
-           "LANG": "C.UTF-8", "TMPDIR": "/tmp", **clean_env(spec.get("env"))}
+           "LANG": "C.UTF-8", "TMPDIR": str(tmp), **clean_env(spec.get("env"))}
     logins, used = login_env(home, spec.get("shared"))
     env.update(logins)
     env.update(git_identity_env(home, str(spec.get("git_name") or ""), str(spec.get("git_email") or "")))

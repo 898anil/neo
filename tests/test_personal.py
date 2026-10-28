@@ -284,3 +284,57 @@ class SlackLoginTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedNotesTest(Base):
+    """What reaches everyone's runs (lessons, repo notes) is the owner's call."""
+
+    def setUp(self):
+        super().setUp()
+        self.mem = patch.dict(os.environ, {"NEO_MEMORY_DIR": str(self.dir / "memory")})
+        self.mem.start()
+
+    def tearDown(self):
+        self.mem.stop()
+        super().tearDown()
+
+    def test_a_teammates_shared_note_waits_and_the_owners_doesnt(self):
+        from cos import learn
+        self.assertEqual(learn.add("deploys need the exit node", "lesson", user=AJAY), learn.PENDING)
+        self.assertEqual(learn.add("backie tests need docker", "rule", repo="backie", user=AJAY), learn.PENDING)
+        self.assertEqual(learn.add("answer in bullets", "rule", user=AJAY), f"people/{AJAY}.md")  # their own: no wait
+        self.assertEqual(learn.add("staging is us-east1", "lesson"), learn.LESSONS)  # the owner's
+        self.assertNotIn("exit node", learn.brief(None))  # not in anyone's runs yet, the owner's included
+        waiting = learn.pending()
+        self.assertEqual({(p["target"], p["by"]) for p in waiting}, {("lessons.md", AJAY), ("repos/backie.md", AJAY)})
+        lesson = next(p for p in waiting if p["target"] == "lessons.md")
+        self.assertEqual(learn.approve(lesson["id"]), "lessons.md")
+        self.assertIn("exit node", learn.brief(None))
+        repo_note = next(p for p in learn.pending())
+        self.assertTrue(learn.reject(repo_note["id"]))
+        self.assertEqual(learn.pending(), [])
+        self.assertFalse((self.dir / "memory" / "repos" / "backie.md").exists())
+
+    def test_only_the_owner_approves(self):
+        import app
+        from cos import learn
+        learn.add("deploys need the exit node", "lesson", user=AJAY)
+        item = learn.pending()[0]
+        body = {"user": {"id": AJAY}, "actions": [{"action_id": f"home_note_approve_{item['id']}", "value": item["id"]}]}
+
+        async def go():
+            from unittest.mock import AsyncMock
+            with patch.object(app, "publish_home", AsyncMock()):
+                await app.on_home_note(AsyncMock(), body, AsyncMock())
+                self.assertEqual(len(learn.pending()), 1)  # Ajay can't approve his own
+                await app.on_home_note(AsyncMock(), {**body, "user": {"id": OWNER}}, AsyncMock())
+        asyncio.run(go())
+        self.assertEqual(learn.pending(), [])
+        self.assertIn("exit node", learn.brief(None))
+
+    def test_the_owners_home_tab_shows_them(self):
+        from cos import home_tab
+        view = home_tab.view("Anil", {}, None, None, [], [], pending=[
+            {"id": "abc123", "text": "deploys need the exit node", "target": "lessons.md", "by": AJAY}])
+        self.assertIn("home_note_approve_abc123", str(view))
+        self.assertIn("exit node", str(view))

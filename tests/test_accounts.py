@@ -97,7 +97,7 @@ class LaunchSpecTest(Base):
                                      "NEO_SHARED_CLAUDE_TOKEN": "sk-lent", "NEO_SHARED_GH_TOKEN": "ghp-lent"}):
             self.assertEqual(accounts.shared_logins(), {"claude_token": "sk-lent", "gh_token": "ghp-lent", "openai_key": ""})
             self.assertEqual(accounts.shared_logins("prs-only")["gh_token"], "")  # it could merge with it
-            self.assertEqual(accounts.shared_logins("read-only")["claude_token"], "sk-lent")
+            self.assertEqual(accounts.shared_logins("read-only")["claude_token"], "")  # only full gets any
         with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-bot", "GH_TOKEN": "ghp-bot"}):
             self.assertEqual(accounts.shared_logins(), {"claude_token": "", "gh_token": "", "openai_key": ""})
 
