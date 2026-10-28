@@ -73,6 +73,7 @@ print(me["DNSName"].rstrip("."), user.get("LoginName", "-"))' 2>/dev/null || tru
     env_unset NEO_DASHBOARD_HOST
     case "$(env_get NEO_DASHBOARD_URL)" in "https://$DNS:$HTTPS_PORT") ;; *) env_unset NEO_DASHBOARD_URL ;; esac
     env_set_default NEO_DASHBOARD_URL "https://$DNS:$HTTPS_PORT"
+    [ "$LOGIN" != "-" ] && env_set_default COS_TAILSCALE_USERS "$LOGIN"
     echo "  https://$DNS:$HTTPS_PORT  (Tailscale logins allowed: $(env_get COS_TAILSCALE_USERS); COS_TOKEN still works)"
   else
     echo "  tailscale serve failed; dashboard stays on http://127.0.0.1:$PORT"
