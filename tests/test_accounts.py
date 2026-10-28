@@ -92,12 +92,14 @@ class LaunchSpecTest(Base):
         os.environ["NEO_ACCOUNT_ENV"] = "EXTRA"
         self.assertEqual(accounts.spec({"cwd": "x"}, ["claude"], env, {})["env"]["EXTRA"], "x")
 
-    def test_the_owners_logins_are_lent_from_the_environment(self):
-        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-owner", "GH_TOKEN": "ghp-owner",
-                                     "NEO_SHARED_GH_TOKEN": "ghp-limited"}):
-            shared = accounts.shared_logins()
-        self.assertEqual(shared["claude_token"], "sk-owner")
-        self.assertEqual(shared["gh_token"], "ghp-limited")  # a narrower token wins
+    def test_only_logins_the_owner_chose_to_lend_are_lent(self):
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-bot", "GH_TOKEN": "ghp-bot",
+                                     "NEO_SHARED_CLAUDE_TOKEN": "sk-lent", "NEO_SHARED_GH_TOKEN": "ghp-lent"}):
+            self.assertEqual(accounts.shared_logins(), {"claude_token": "sk-lent", "gh_token": "ghp-lent", "openai_key": ""})
+            self.assertEqual(accounts.shared_logins("prs-only")["gh_token"], "")  # it could merge with it
+            self.assertEqual(accounts.shared_logins("read-only")["claude_token"], "sk-lent")
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-bot", "GH_TOKEN": "ghp-bot"}):
+            self.assertEqual(accounts.shared_logins(), {"claude_token": "", "gh_token": "", "openai_key": ""})
 
     def test_sudo_keeps_the_spec_pipe_open(self):
         self.assertEqual(accounts.command("neo-ajay", 7),
@@ -197,7 +199,7 @@ class RunInAccountTest(Base):
         cmd = lambda account, fd: [sys.executable, "-c", SPEC_CATCHER, "--spec-fd", str(fd)]  # noqa: E731
         with patch.object(accounts, "command", side_effect=cmd), \
                 patch.dict(os.environ, {"SPEC_OUT": str(out), "SLACK_BOT_TOKEN": "xoxb-secret",
-                                        "CLAUDE_CODE_OAUTH_TOKEN": "sk-owner"}):
+                                        "NEO_SHARED_CLAUDE_TOKEN": "sk-owner"}):
             run = Run.create("claude", "fix the bug", "/home/neo-ajay/code", "full", source="slack",
                              extra={"account": "neo-ajay", "slack_channel": "C1", "slack_thread": "1.2", **extra})
             # _start_as builds an env for sudo; SPEC_OUT has to reach the stand-in too

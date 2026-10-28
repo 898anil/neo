@@ -321,6 +321,10 @@ def start(watch_id: str, source: str = "schedule") -> Optional[dict]:
             return current
         if source == "schedule" and not claude_available()[0]:
             return None
+        from . import accounts
+        if accounts.isolated(watch.get("owner")):
+            # Watches run in neo's own account, which a person's own runs must never reach (cos/accounts.py).
+            raise ValueError("someone else's watch doesn't run while each person has their own account")
         every_turn, first_turn = cli_args()
         if watch.get("owner"):
             from .people import is_owner

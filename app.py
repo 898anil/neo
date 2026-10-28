@@ -1107,6 +1107,9 @@ async def handle_watch(client, channel: str, thread_ts: str, user: Optional[str]
         await asyncio.to_thread(watches.delete, req.target)
         await say(f":wastebasket: Removed the *{watch['name']}* watch.")
         return
+    if accounts.isolated(user):  # watches run in neo's own account, not yours (cos/accounts.py)
+        await say(f":lock: Only {owner_name()} can add watches for now: they run in neo's own account, not your workspace.")
+        return
     try:
         watch = await asyncio.to_thread(watches.save, {"name": req.target, "instructions": req.prompt,
                                                        "every": req.keys[0], "hours": "work", "owner": user})
@@ -1224,6 +1227,8 @@ async def watch_scheduler(client) -> None:
     while True:
         try:
             for watch in await asyncio.to_thread(watches.due):
+                if accounts.isolated(watch.get("owner")):
+                    continue  # someone else's: watches.start refuses it while each person has their own account
                 log.info("watch %s is due", watch["id"])
                 await asyncio.to_thread(watches.start, watch["id"], "schedule")
         except Exception:  # noqa: BLE001 - try again next minute

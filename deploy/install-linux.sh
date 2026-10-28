@@ -88,6 +88,9 @@ else
 fi
 
 say "Per-person accounts (cos/accounts.py; used when .env has NEO_ACCOUNTS=1)"
+# People's accounts are kept out of neo's files by permissions alone: its home, .env and runs are private.
+chmod 700 "$SVC_HOME"
+chmod 600 .env
 getent group neo-people >/dev/null || groupadd --system neo-people
 install -o root -g root -m 755 deploy/linux/neo-run /usr/local/bin/neo-run
 install -o root -g root -m 700 deploy/linux/neo-account /usr/local/sbin/neo-account
@@ -115,6 +118,7 @@ WorkingDirectory=$ROOT
 Environment=HOME=$SVC_HOME
 Environment=PATH=$SVC_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=NEO_ACTIVITY_LOG=$LOG
+UMask=0077
 ExecStart=$PY app.py
 Restart=always
 RestartSec=10

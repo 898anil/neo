@@ -7,8 +7,8 @@ and GitHub logins, and can't read neo's files or anyone else's. The owner's runs
 jobs stay in the service account, where the owner's cloud logins are.
 
 Logins: a person who has logged in to a tool in their account uses that login; for anything else neo
-lends the owner's (NEO_SHARED_CLAUDE_TOKEN / NEO_SHARED_GH_TOKEN / NEO_SHARED_OPENAI_KEY, else
-CLAUDE_CODE_OAUTH_TOKEN / GH_TOKEN / OPENAI_API_KEY), passed for that one turn on neo-run's pipe.
+lends the owner's, if the owner set NEO_SHARED_CLAUDE_TOKEN / NEO_SHARED_GH_TOKEN / NEO_SHARED_OPENAI_KEY,
+passed for that one turn on neo-run's pipe. GitHub is lent to the full role only (shared_logins).
 
 Who may use neo at all (members_only): full members of this workspace. Guests and people from other
 workspaces (Slack Connect) are refused; that needs the users:read scope.
@@ -147,11 +147,14 @@ def brief(account: str) -> str:
             "Other people's folders and neo's own files are not readable from here.")
 
 
-def shared_logins() -> dict:
+def shared_logins(role: str = "full") -> dict:
+    """The owner's logins lent to people who have none of their own: only what the owner put in
+    NEO_SHARED_*, never the bot's own variables by accident. The agent can read what it is lent, so
+    GitHub is lent to the full role only: with it, prs-only and read-only limits would be advice."""
     env = os.environ
-    return {"claude_token": env.get("NEO_SHARED_CLAUDE_TOKEN") or env.get("CLAUDE_CODE_OAUTH_TOKEN") or "",
-            "gh_token": env.get("NEO_SHARED_GH_TOKEN") or env.get("GH_TOKEN") or "",
-            "openai_key": env.get("NEO_SHARED_OPENAI_KEY") or env.get("OPENAI_API_KEY") or ""}
+    return {"claude_token": env.get("NEO_SHARED_CLAUDE_TOKEN") or "",
+            "gh_token": (env.get("NEO_SHARED_GH_TOKEN") or "") if role == "full" else "",
+            "openai_key": env.get("NEO_SHARED_OPENAI_KEY") or ""}
 
 
 def spec(meta: dict, argv: list[str], env: dict, files: dict) -> dict:
@@ -160,7 +163,7 @@ def spec(meta: dict, argv: list[str], env: dict, files: dict) -> dict:
     extra = [k.strip() for k in os.environ.get("NEO_ACCOUNT_ENV", "").split(",") if k.strip()]
     return {"argv": argv, "cwd": meta["cwd"], "files": files,
             "env": {k: env[k] for k in (*ENV_FOR_RUNS, *extra) if env.get(k)},
-            "shared": shared_logins(),
+            "shared": shared_logins(meta.get("role") or "full"),
             "git_name": meta.get("git_name") or "", "git_email": meta.get("git_email") or ""}
 
 

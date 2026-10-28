@@ -18,7 +18,7 @@ spec on that pipe, never on the command line or on disk:
     git_name, git_email   commit identity when this account has none of its own
 
 stdin, stdout and stderr pass straight through to the engine (neo's run files). A SIGTERM from neo
-(relayed by sudo) stops the engine's whole process group.
+(relayed by sudo) stops the engine's whole process group, with SIGKILL 10 seconds later if needed.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from pathlib import Path
 ENGINES = ("claude", "codex")
 PATH = "/usr/local/bin:/usr/bin:/bin"
 REFUSED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "BASH_ENV", "ENV", "IFS")
+KILL_AFTER = 10  # seconds between SIGTERM and SIGKILL
 REFUSED_PREFIXES = ("LD_", "PYTHON", "NODE_OPTIONS", "GIT_CONFIG", "SUDO_")
 
 
@@ -187,18 +188,33 @@ def main() -> int:
     print(f"neo-run: {home.name} in {cwd}; logins " + " ".join(f"{k}={v}" for k, v in used.items()), file=sys.stderr)
     sys.stderr.flush()
 
-    child = subprocess.Popen(argv, cwd=str(cwd), env=env, start_new_session=True)
+    # Handlers before the engine starts: a stop that lands in between must still reach it.
+    child: list = []
+    stopping: list = []
 
-    def forward(signum, _frame):
+    def stop(signum, _frame=None):
+        stopping.append(signum)
+        if child:
+            try:
+                os.killpg(child[0].pid, signum)
+            except ProcessLookupError:
+                pass
+            signal.alarm(KILL_AFTER)  # still there by then: SIGKILL (neo can't signal this account itself)
+
+    def kill(_signum, _frame):
         try:
-            os.killpg(child.pid, signum)
-        except ProcessLookupError:
+            os.killpg(child[0].pid, signal.SIGKILL)
+        except (ProcessLookupError, IndexError):
             pass
 
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, forward)
+        signal.signal(sig, stop)
+    signal.signal(signal.SIGALRM, kill)
     try:
-        code = child.wait()
+        child.append(subprocess.Popen(argv, cwd=str(cwd), env=env, start_new_session=True))
+        if stopping:
+            stop(stopping[-1])
+        code = child[0].wait()
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     return code if code >= 0 else 128 - code
