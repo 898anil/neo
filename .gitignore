@@ -6,6 +6,7 @@ private/
 
 # Local working notes
 docs/superpowers/
+.worktrees/
 .claude/
 
 # Runtime state (COS_HOME defaults to the repo)

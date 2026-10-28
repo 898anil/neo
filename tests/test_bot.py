@@ -384,6 +384,20 @@ if __name__ == "__main__":
 class CodexTurnCompleteTest(InteractiveRunTest):
     """herdr may report Codex as "unknown" forever; the transcript's task_complete ends the turn."""
 
+    def test_full_mode_starts_codex_with_bypass_permissions(self):
+        from cos.herdr import Herdr
+
+        self.set_status("unknown")
+        with patch.dict(os.environ, {"NEO_MODE": "full"}):
+            irun = self.interactive.InteractiveRun.start(
+                "codex", "list files", str(self.work), "l", "slack", None, Herdr("testsess"),
+            )
+        self.runs.append(irun)
+        args = json.loads((self.state / "start_args").read_text())
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", args)
+        self.assertIn("--dangerously-bypass-hook-trust", args)
+        self.assertIn("check_for_update_on_startup=false", args)
+
     def test_task_complete_ends_turn_while_herdr_says_unknown(self):
         from cos.herdr import Herdr
 
