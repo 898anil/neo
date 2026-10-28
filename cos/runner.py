@@ -115,6 +115,36 @@ def engine_env(meta: dict) -> dict:
     return env
 
 
+def _start_as(account: str, meta: dict, cmd: list[str], files: dict, out, err, inp) -> subprocess.Popen:
+    """Start the engine in a person's own account through sudo and neo-run (cos/accounts.py). The
+    launch spec (folder, the run's variables, files, lent logins) goes on a pipe, never on disk or
+    argv; stdin/stdout/stderr are neo's run files as for any run. Stopping it: SIGTERM to sudo's
+    process group, which sudo passes to neo-run, which stops the engine's."""
+    from . import accounts
+
+    spec = json.dumps(accounts.spec(meta, cmd, engine_env(meta), files)).encode()
+    read_fd, write_fd = os.pipe()
+    try:
+        proc = subprocess.Popen(accounts.command(account, read_fd), cwd="/", stdout=out, stderr=err, stdin=inp,
+                                start_new_session=True, pass_fds=(read_fd,),
+                                env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"})
+    except BaseException:
+        os.close(write_fd)
+        raise
+    finally:
+        os.close(read_fd)
+
+    def feed() -> None:  # a thread: a long brief can be bigger than the pipe's buffer
+        try:
+            with os.fdopen(write_fd, "wb") as fh:
+                fh.write(spec)
+        except OSError:
+            pass  # neo-run exited first; its stderr says why
+
+    threading.Thread(target=feed, daemon=True, name=f"spec-{meta['id']}").start()
+    return proc
+
+
 def build_command(
     engine: str, prompt: str, mode: str, session_id: Optional[str] = None, system: Optional[str] = None,
     extra_args: Optional[list[str]] = None, conclude: bool = False,
@@ -187,7 +217,8 @@ def write_private(path: Path, text: str) -> Path:
     return path
 
 
-def validate_request(engine: str, prompt: str, cwd: str, mode: str) -> Optional[str]:
+def validate_request(engine: str, prompt: str, cwd: str, mode: str, local: bool = True) -> Optional[str]:
+    """local=False: the folder is in a person's own account, which neo can't look into; neo-run checks it."""
     if engine not in ENGINES:
         return f"engine must be one of {ENGINES}"
     if mode not in MODES:
@@ -196,7 +227,7 @@ def validate_request(engine: str, prompt: str, cwd: str, mode: str) -> Optional[
         return "prompt is required"
     if len(prompt) > MAX_PROMPT:
         return f"prompt is longer than {MAX_PROMPT} characters"
-    if not cwd or not Path(cwd).expanduser().is_dir():
+    if not cwd or (local and not Path(cwd).expanduser().is_dir()):
         return f"cwd is not a directory: {cwd}"
     return None
 
@@ -254,7 +285,7 @@ class Run:
             mode = "interactive"
             error = validate_request(engine, prompt, cwd, "full")
         else:
-            error = validate_request(engine, prompt, cwd, mode)
+            error = validate_request(engine, prompt, cwd, mode, local=not (extra or {}).get("account"))
         if error:
             raise ValueError(error)
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
@@ -376,18 +407,30 @@ class Run:
         engine, mode, cwd = meta["engine"], meta["mode"], meta["cwd"]
         text = prompt if is_follow_up else meta["prompt"]
         emit = on_event or (lambda _e: None)
+        account = meta.get("account")  # a person's own Linux account (cos/accounts.py), else this one
         try:
             system = "\n\n".join(filter(None, (meta.get("system_prompt"), run_context(meta)))) or None
             session_id = meta["session_id"] if is_follow_up else None
             # Brief, memory and prompt go through 0600 files, never argv (readable by anyone via `ps`).
-            system_file = (str(write_private(self.dir / "system.md", system))
-                           if system and engine == "claude" else None)
+            # A person's account can't read neo's files: neo-run gets them on its spec pipe instead.
+            files: dict = {}
+            if system and engine == "claude":
+                if account:
+                    files["system.md"] = system
+                    system_file = "{file:system.md}"
+                else:
+                    system_file = str(write_private(self.dir / "system.md", system))
+            else:
+                system_file = None
             prompt_path = write_private(self.dir / "prompt.txt", stdin_prompt(engine, text, session_id, system))
             cmd = build_command(engine, text, mode, session_id,
                                 system=system, conclude=bool(meta.get("conclude")),
                                 extra_args=(meta.get("cli_args") or [])
                                 + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []),
                                 system_file=system_file, prompt_on_stdin=True, model=meta.get("model"))
+            if account and meta.get("conclude") and engine == "claude":
+                files["conclusion.py"] = Path(conclusion.__file__).read_text()
+                cmd[cmd.index("--settings") + 1] = conclusion.settings_json("/usr/bin/python3", "{file:conclusion.py}")
             emit(self.append_event({"kind": "prompt", "title": "You", "body": text, "data": {}}, turn))
             raw_path = self.dir / "raw.jsonl"
             offset = raw_path.stat().st_size if raw_path.exists() else 0
@@ -396,8 +439,11 @@ class Run:
             # The engine writes straight to files, not to a pipe into this process: if the bot
             # restarts, the engine keeps running and a new bot picks up where this one stopped.
             with raw_path.open("ab") as out, (self.dir / "stderr.log").open("ab") as err, prompt_path.open("rb") as inp:
-                self._proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err, stdin=inp,
-                                              start_new_session=True, env=engine_env(meta))
+                if account:
+                    self._proc = _start_as(account, meta, cmd, files, out, err, inp)
+                else:
+                    self._proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err, stdin=inp,
+                                                  start_new_session=True, env=engine_env(meta))
         except FileNotFoundError as exc:
             emit(self.append_event({"kind": "error", "title": "Engine not found", "body": str(exc), "data": {}}, turn))
             return self.update_meta(status="failed", pid=None)

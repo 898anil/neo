@@ -87,6 +87,19 @@ else
   echo "  tailscale not found: dashboard stays on http://127.0.0.1:$PORT"
 fi
 
+say "Per-person accounts (cos/accounts.py; used when .env has NEO_ACCOUNTS=1)"
+getent group neo-people >/dev/null || groupadd --system neo-people
+install -o root -g root -m 755 deploy/linux/neo-run /usr/local/bin/neo-run
+install -o root -g root -m 700 deploy/linux/neo-account /usr/local/sbin/neo-account
+SUDOERS_TMP="$(mktemp)"
+sed "s/SVC_USER/$SVC_USER/g" deploy/linux/sudoers > "$SUDOERS_TMP"
+visudo -cqf "$SUDOERS_TMP" || { echo "  sudoers rule did not validate; not installed"; rm -f "$SUDOERS_TMP"; exit 1; }
+install -o root -g root -m 440 "$SUDOERS_TMP" /etc/sudoers.d/neo
+rm -f "$SUDOERS_TMP"
+echo "  /usr/local/bin/neo-run, /usr/local/sbin/neo-account, /etc/sudoers.d/neo"
+echo "  accounts: $(getent group neo-people | cut -d: -f4 | tr ',' ' ' | sed 's/^$/none yet/')"
+echo "  NEO_ACCOUNTS=$(env_get NEO_ACCOUNTS)"
+
 say "systemd unit $UNIT.service"
 install -d -o "$SVC_USER" -g "$SVC_USER" -m 700 "$LOG_DIR"
 cat > "/etc/systemd/system/$UNIT.service" <<UNIT_EOF

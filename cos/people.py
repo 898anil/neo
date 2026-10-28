@@ -10,13 +10,14 @@ ALLOWED_USER_IDS use it too. Every person gets a small JSON file in NEO_PEOPLE_D
   channels   Slack channels they work in
   engine     claude or codex, when they don't name one
   model      model id for that engine (CLAUDE_MODEL / CODEX_MODEL otherwise)
-  role       full | prs-only | read-only; only the owner sets it, and the owner is always full
+  role       full | prs-only | read-only | blocked; only the owner sets it, and the owner is always full
 
 Roles until each person has their own sandbox (everyone still runs with the owner's logins):
   read-only  runs in readonly mode (no edits, no commands that change anything) and no live agents
   prs-only   may change code and open PRs; merging, approving, deploying and prod changes are refused
              by the brief and, for Claude, by --disallowedTools; no live agents
   full       as before
+  blocked    may not use neo at all (app.py refuses them before anything runs)
 
 Their own rules ("remember ...") live in neo's memory (cos/learn.py, people/<id>.md).
 """
@@ -30,7 +31,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-ROLES = ("full", "prs-only", "read-only")
+ROLES = ("full", "prs-only", "read-only", "blocked")
 ENGINES = ("claude", "codex")
 FIELDS = ("name", "style", "repos", "channels", "engine", "model", "role")
 MAX_TEXT = 300

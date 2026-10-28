@@ -42,8 +42,8 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import autonomy, learn, people, voice  # noqa: E402
-from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, workdir  # noqa: E402
+from cos import accounts, autonomy, learn, people, voice  # noqa: E402
+from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
 from cos.runner import ENGINES, MODES, Run, claude_available, cos_home, list_runs, pid_alive  # noqa: E402
@@ -97,6 +97,7 @@ app = AsyncApp(token=os.environ.pop("SLACK_BOT_TOKEN"))
 # The bot's own user id, resolved at startup so its messages can be labelled as
 # the assistant's when reconstructing a thread transcript.
 BOT_USER_ID: str | None = None
+TEAM_ID: str | None = None  # this workspace, for refusing people from other ones (cos/accounts.py)
 # Workspace URL (https://<team>.slack.com/), for thread permalinks shown on the dashboard.
 TEAM_URL: str | None = None
 
@@ -412,10 +413,32 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
                                       text=f"_Your role ({role}) runs on {who['engine']}, so I'm using that instead of {engine}._")
         engine = who["engine"]
     same_engine = entry and entry.get("runtime") == "headless" and entry.get("engine") == engine
-    cwd = req.cwd or WORKDIR
+    account = None
+    if accounts.isolated(user):  # their own Linux account (cos/accounts.py), created on first use
+        info = await slack_user(client, user)
+        try:
+            account = await asyncio.to_thread(accounts.ensure, user, mine.get("name") or accounts.display_name(info) or user)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("could not set up an account for %s", user)
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                          text=f":x: I couldn't set up your workspace on this machine: `{exc}`")
+            return False
+    cwd = accounts.cwd_for(account, req.cwd) if account else (req.cwd or WORKDIR)
     system = await asyncio.to_thread(agent_brief, cwd, user)  # reads memory and runs git: not on the event loop
+    if account:
+        system = "\n\n".join(filter(None, (system, accounts.brief(account))))
     slack = {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
              "system_prompt": system, "conclude": bool(system), "slack_user": user, "role": role}
+    if account:
+        profile = ((await slack_user(client, user)) or {}).get("profile") or {}
+        slack.update(account=account, git_name=mine.get("name") or profile.get("real_name") or "",
+                     git_email=profile.get("email") or "")
+        # A session started in another account (or before accounts) can't be resumed from this one.
+        try:
+            earlier = Run(entry["run_id"]).meta().get("account") if same_engine and entry.get("run_id") else None
+        except (OSError, ValueError):
+            earlier = None
+        same_engine = bool(same_engine) and earlier == account
     if who["cli_args"]:
         slack["cli_args"] = who["cli_args"]
     if who["model"] and engine == (mine.get("engine") or default_engine()):
@@ -963,6 +986,38 @@ def findings_markdown(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_SLACK_USERS: dict[str, tuple[float, Optional[dict]]] = {}
+
+
+async def slack_user(client, user: str) -> Optional[dict]:
+    """users.info's user (needs users:read), cached for an hour; a failed lookup is retried after a minute."""
+    hit = _SLACK_USERS.get(user)
+    if hit and time.monotonic() < hit[0]:
+        return hit[1]
+    try:
+        info = (await client.users_info(user=user)).get("user")
+        ttl = 3600
+    except Exception as exc:  # noqa: BLE001 - e.g. missing_scope until the app is reinstalled with users:read
+        log.warning("users.info %s failed: %s", user, exc)
+        info, ttl = None, 60
+    _SLACK_USERS[user] = (time.monotonic() + ttl, info)
+    return info
+
+
+async def refusal(client, user: Optional[str]) -> Optional[str]:
+    """Why this person may not use neo, or None. The owner always may; anyone the owner set to blocked
+    may not; with members_only (cos/accounts.py) guests and other workspaces may not."""
+    if people.is_owner(user):
+        return None
+    if people.role(user) == "blocked":
+        return f"You're not set up to use me. Ask {owner_name()} if you need access."
+    if not accounts.members_only():
+        return None
+    if not people.valid_user(user):
+        return "I can't tell who you are, so I can't run anything for you."
+    return accounts.member_refusal(await slack_user(client, user), TEAM_ID)
+
+
 def is_allowed(user: Optional[str]) -> bool:
     """Only the people the bot works for may change what every later agent is told."""
     return bool(user) and (user in ALLOWED_USER_IDS or user == NOTIFY_USER)
@@ -1216,6 +1271,10 @@ async def handle_dm(event: dict, client) -> None:
     user = event.get("user")
     if ALLOWED_USER_IDS and user not in ALLOWED_USER_IDS:
         return
+    why = await refusal(client, user)
+    if why:
+        await client.chat_postMessage(channel=event["channel"], thread_ts=event.get("thread_ts") or event["ts"], text=why)
+        return
     channel, text = event["channel"], _clean_prompt(event.get("text", ""))
     thread_ts = event.get("thread_ts")
     target = await sessions.get_thread(f"dm:{thread_ts}") if thread_ts else None
@@ -1238,6 +1297,8 @@ async def handle_voice_message(event: dict, client) -> None:
         return
     if event.get("channel_type") != "im" and BOT_USER_ID and f"<@{BOT_USER_ID}" in (event.get("text") or ""):
         return  # app_mention handles it (Slack sends none in DMs); answering here too would run it twice
+    if await refusal(client, user):
+        return  # a clip in a thread may not even be meant for neo: no reply
     channel, thread_ts = event["channel"], event.get("thread_ts")
     if event.get("channel_type") == "im":
         target = await sessions.get_thread(f"dm:{thread_ts}") if thread_ts else None
@@ -1416,6 +1477,14 @@ async def handle_mention(event: dict, client) -> None:
         return  # Silently ignore anyone not on the allowlist.
 
     channel = event["channel"]
+    why = await refusal(client, user)
+    if why:
+        try:  # only they see it
+            await client.chat_postEphemeral(channel=channel, user=user, text=why,
+                                            thread_ts=event.get("thread_ts") or event["ts"])
+        except Exception:  # noqa: BLE001 - e.g. a channel neo can't post ephemerals in
+            log.info("refused %s: %s", user, why)
+        return
     if event.get("files"):
         await resolve_files(client, event)
     # Reply inside the mention's thread; start a new thread on a top-level mention.
@@ -1475,7 +1544,7 @@ async def handle_mention(event: dict, client) -> None:
     if not req.prompt:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=commands.HELP)
         return
-    if req.cwd and not os.path.isdir(req.cwd):
+    if req.cwd and not accounts.isolated(user) and not os.path.isdir(req.cwd):  # in their own account, neo-run checks it
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: Not a folder on this machine: `{req.cwd}`")
         return
     running = await asyncio.to_thread(_active_run, thread_ts, None, None)
@@ -1512,7 +1581,10 @@ async def handle_mention(event: dict, client) -> None:
             if req.live and restricted:
                 await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                               text=f"_Live agents need the full role (yours: {people.role(user)}); running it headless instead._")
-            if req.live and not restricted:
+            elif req.live and accounts.isolated(user):
+                await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                              text="_Live agents don't run in your own workspace yet; running it headless instead._")
+            if req.live and not restricted and not accounts.isolated(user):
                 ok = await start_live(client, channel, thread_ts, req, prompt, user=user)
             else:
                 ok = await run_headless(client, channel, thread_ts, entry, req, prompt, spoken=spoken, user=user)
@@ -1628,7 +1700,7 @@ def _start_dashboard() -> None:
 
 
 async def main() -> None:
-    global BOT_USER_ID
+    global BOT_USER_ID, TEAM_ID
     exit_with_parent()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     faulthandler.register(signal.SIGUSR1, all_threads=True)  # `kill -USR1 <pid>`: every thread's stack to stderr
@@ -1652,6 +1724,7 @@ async def main() -> None:
     else:
         raise SystemExit("Slack unreachable")
     BOT_USER_ID = auth["user_id"]
+    TEAM_ID = auth.get("team_id")
     TEAM_URL = auth.get("url")
     _start_dashboard()
     log.info(

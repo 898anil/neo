@@ -59,10 +59,11 @@ def decide(payload: dict) -> dict | None:
     return {"decision": "block", "reason": REASON}
 
 
-def settings_json() -> str:
-    """--settings value that installs this hook for one session."""
+def settings_json(python: str | None = None, script: str | None = None) -> str:
+    """--settings value that installs this hook for one session. python / script: another interpreter and
+    copy of this file, for a run in a person's own account (cos/accounts.py), which can't read neo's."""
     # -I: cos/ is the script's folder; a future cos/types.py must not shadow the standard library.
-    command = f"{shlex.quote(sys.executable)} -I {shlex.quote(str(Path(__file__).resolve()))}"
+    command = f"{shlex.quote(python or sys.executable)} -I {shlex.quote(script or str(Path(__file__).resolve()))}"
     return json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": command, "timeout": 10}]}]}})
 
 

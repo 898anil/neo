@@ -1,0 +1,8 @@
+# neo's sudo rights (installed by deploy/install-linux.sh as /etc/sudoers.d/neo, with SVC_USER filled in).
+#
+# The service account may create a person's account and start runs as accounts in neo-people, and
+# nothing else. !use_pty keeps the engine's output going straight into neo's run files;
+# closefrom_override lets neo hand neo-run its launch spec on a pipe (sudo -C).
+Defaults:SVC_USER !use_pty, closefrom_override
+SVC_USER ALL=(root) NOPASSWD: /usr/local/sbin/neo-account ensure *
+SVC_USER ALL=(%neo-people) NOPASSWD: /usr/local/bin/neo-run --spec-fd *

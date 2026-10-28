@@ -1,0 +1,208 @@
+#!/usr/bin/python3 -I
+"""Start one agent turn as a person's own account (neo-<name>); installed root-owned as /usr/local/bin/neo-run.
+
+neo (the service account) runs it through sudo, which the sudoers rule allows only for accounts in the
+neo-people group:
+
+    sudo -n -C <fd+1> -u neo-ajay /usr/local/bin/neo-run --spec-fd <fd>
+
+sudo clears the environment and closes other files, so everything the turn needs comes as one JSON
+spec on that pipe, never on the command line or on disk:
+
+    argv      the engine command; "{file:NAME}" in it becomes the path of files[NAME]
+    cwd       folder inside this account's home ("" for ~/code)
+    env       variables for the engine (run id, Slack thread, model); a few names are refused
+    files     {NAME: text} written to a private folder for this turn (the system prompt)
+    shared    the owner's logins, used only for what this account has not logged in to itself:
+              claude_token, gh_token, openai_key
+    git_name, git_email   commit identity when this account has none of its own
+
+stdin, stdout and stderr pass straight through to the engine (neo's run files). A SIGTERM from neo
+(relayed by sudo) stops the engine's whole process group.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pwd
+import re
+import shutil
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+ENGINES = ("claude", "codex")
+PATH = "/usr/local/bin:/usr/bin:/bin"
+REFUSED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "BASH_ENV", "ENV", "IFS")
+REFUSED_PREFIXES = ("LD_", "PYTHON", "NODE_OPTIONS", "GIT_CONFIG", "SUDO_")
+
+
+def fail(message: str) -> "None":
+    print(f"neo-run: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def read_spec(fd: int) -> dict:
+    with os.fdopen(fd, "rb") as fh:
+        spec = json.loads(fh.read().decode("utf-8"))
+    if not isinstance(spec, dict) or not isinstance(spec.get("argv"), list) or not spec["argv"]:
+        fail("spec needs a non-empty argv")
+    return spec
+
+
+def account_home() -> Path:
+    me = pwd.getpwuid(os.getuid())
+    if os.getuid() == 0 or not me.pw_name.startswith("neo-"):
+        fail(f"refusing to run as {me.pw_name}: only neo-<name> accounts")
+    return Path(me.pw_dir)
+
+
+def resolve_cwd(home: Path, cwd: str) -> Path:
+    """The folder inside this account's home; ~/code when not given."""
+    target = Path(cwd).expanduser() if cwd else home / "code"
+    if not target.is_absolute():
+        target = home / "code" / target
+    real, home = Path(os.path.realpath(target)), Path(os.path.realpath(home))
+    if real != home and home not in real.parents:
+        fail(f"folder is outside {home}: {cwd}")
+    return real
+
+
+def engine_path(name: str) -> str:
+    if name not in ENGINES:
+        fail(f"not an engine: {name}")
+    found = shutil.which(name, path=PATH)
+    if not found:
+        fail(f"{name} is not installed in {PATH}")
+    return found
+
+
+def clean_env(given: dict) -> dict:
+    out = {}
+    for key, value in (given or {}).items():
+        key, value = str(key), str(value)
+        if key in REFUSED_ENV or key.startswith(REFUSED_PREFIXES) or "=" in key or not key:
+            continue
+        out[key] = value
+    return out
+
+
+def own_logins(home: Path) -> dict:
+    """Which tools this account has logged in to itself."""
+    return {
+        "claude": (home / ".claude" / ".credentials.json").is_file(),
+        "gh": (home / ".config" / "gh" / "hosts.yml").is_file(),
+        "codex": (home / ".codex" / "auth.json").is_file(),
+    }
+
+
+def login_env(home: Path, shared: dict) -> tuple[dict, dict]:
+    """Variables that give the engine the owner's logins for what this account lacks, and which login
+    each tool ends up with ("own", "shared" or "none")."""
+    own, env, used = own_logins(home), {}, {}
+    shared = shared or {}
+    for tool, key, var in (("claude", "claude_token", "CLAUDE_CODE_OAUTH_TOKEN"),
+                           ("gh", "gh_token", "GH_TOKEN"),
+                           ("codex", "openai_key", "OPENAI_API_KEY")):
+        if own[tool]:
+            used[tool] = "own"
+        elif shared.get(key):
+            env[var] = str(shared[key])
+            used[tool] = "shared"
+        else:
+            used[tool] = "none"
+    if used["gh"] == "shared":  # git over https uses the same token through gh
+        env.update({"GIT_CONFIG_COUNT": "2",
+                    "GIT_CONFIG_KEY_0": "credential.https://github.com.helper", "GIT_CONFIG_VALUE_0": "",
+                    "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
+                    "GIT_CONFIG_VALUE_1": "!" + (shutil.which("gh", path=PATH) or "gh") + " auth git-credential"})
+    return env, used
+
+
+def git_identity_env(home: Path, name: str, email: str) -> dict:
+    """The person's name on commits, when this account has no git identity of its own."""
+    if (home / ".gitconfig").is_file() and "name" in (home / ".gitconfig").read_text(errors="replace"):
+        return {}
+    env = {}
+    if name:
+        env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = name
+    if email:
+        env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = email
+    return env
+
+
+def write_files(home: Path, run_id: str, files: dict) -> tuple[Path, dict]:
+    """files into ~/.neo-run/<run id>/ (0700); returns the folder and NAME -> path."""
+    safe_id = "".join(c for c in run_id if c.isalnum() or c in "-_") or "run"
+    folder = home / ".neo-run" / safe_id
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    paths = {}
+    for name, text in (files or {}).items():
+        if "/" in name or name.startswith("."):
+            fail(f"bad file name: {name}")
+        path = folder / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(str(text))
+        paths[name] = str(path)
+    return folder, paths
+
+
+FILE_RE = re.compile(r"\{file:([A-Za-z0-9_.-]+)\}")
+
+
+def fill(argv: list, paths: dict) -> list:
+    """Replace each {file:NAME} (a whole argument or inside one, e.g. the hook command in --settings)."""
+    def path(match: "re.Match") -> str:
+        if match.group(1) not in paths:
+            fail(f"argv names a file the spec doesn't carry: {match.group(1)}")
+        return paths[match.group(1)]
+
+    return [FILE_RE.sub(path, str(arg)) for arg in argv]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--spec-fd", type=int, required=True)
+    args = parser.parse_args()
+    os.umask(0o077)
+    home = account_home()
+    spec = read_spec(args.spec_fd)
+    (home / "code").mkdir(exist_ok=True, mode=0o700)
+    cwd = resolve_cwd(home, spec.get("cwd") or "")
+    if not cwd.is_dir():
+        fail(f"no such folder: {cwd}")
+    env = {"HOME": str(home), "USER": home.name, "LOGNAME": home.name, "PATH": PATH,
+           "LANG": "C.UTF-8", "TMPDIR": "/tmp", **clean_env(spec.get("env"))}
+    logins, used = login_env(home, spec.get("shared"))
+    env.update(logins)
+    env.update(git_identity_env(home, str(spec.get("git_name") or ""), str(spec.get("git_email") or "")))
+    run_id = str((spec.get("env") or {}).get("NEO_RUN_ID") or os.getpid())
+    folder, paths = write_files(home, run_id, spec.get("files"))
+    argv = fill(spec["argv"], paths)
+    argv[0] = engine_path(os.path.basename(argv[0]))  # neo's path to it may differ; use this machine's
+    print(f"neo-run: {home.name} in {cwd}; logins " + " ".join(f"{k}={v}" for k, v in used.items()), file=sys.stderr)
+    sys.stderr.flush()
+
+    child = subprocess.Popen(argv, cwd=str(cwd), env=env, start_new_session=True)
+
+    def forward(signum, _frame):
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, forward)
+    try:
+        code = child.wait()
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return code if code >= 0 else 128 - code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

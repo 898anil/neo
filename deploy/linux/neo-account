@@ -1,0 +1,73 @@
+#!/usr/bin/python3 -I
+"""Create a person's own account for neo's runs; installed root-owned as /usr/local/sbin/neo-account.
+
+    sudo -n /usr/local/sbin/neo-account ensure neo-ajay U0123ABCD
+
+Idempotent. The account gets no password and no login shell, a private home (0700) with ~/code, and
+the neo-people group, which is what lets neo start runs as it (sudoers). The Slack id is kept in the
+account's comment ("neo:<id>"): an existing account that belongs to someone else is refused, so one
+account never serves two people. Prints the account's home.
+"""
+
+from __future__ import annotations
+
+import grp
+import os
+import pwd
+import re
+import subprocess
+import sys
+
+GROUP = "neo-people"
+ACCOUNT_RE = re.compile(r"^neo-[a-z][a-z0-9-]{0,22}$")
+USER_RE = re.compile(r"^[UW][A-Z0-9]{2,20}$")
+
+
+def fail(message: str) -> "None":
+    print(f"neo-account: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def ensure(account: str, slack_id: str) -> str:
+    if not ACCOUNT_RE.match(account):
+        fail(f"not a neo account name: {account!r}")
+    if not USER_RE.match(slack_id):
+        fail(f"not a Slack user id: {slack_id!r}")
+    comment = f"neo:{slack_id}"
+    try:
+        grp.getgrnam(GROUP)
+    except KeyError:
+        subprocess.run(["groupadd", "--system", GROUP], check=True)
+    try:
+        existing = pwd.getpwnam(account)
+    except KeyError:
+        existing = None
+    if existing:
+        if existing.pw_gecos != comment:
+            fail(f"{account} already exists and isn't {slack_id}'s ({existing.pw_gecos or 'no comment'})")
+        if existing.pw_uid < 1000:
+            fail(f"{account} is a system account")
+    else:
+        subprocess.run(["useradd", "--create-home", "--shell", "/usr/sbin/nologin", "--comment", comment,
+                        "--groups", GROUP, account], check=True)
+    entry = pwd.getpwnam(account)
+    home = entry.pw_dir
+    os.chmod(home, 0o700)
+    code = os.path.join(home, "code")
+    if not os.path.isdir(code):
+        os.mkdir(code, 0o700)
+        os.chown(code, entry.pw_uid, entry.pw_gid)
+    return home
+
+
+def main(argv: list[str]) -> int:
+    if os.geteuid() != 0:
+        fail("run as root (through sudo)")
+    if len(argv) != 3 or argv[0] != "ensure":
+        fail("usage: neo-account ensure neo-<name> <slack id>")
+    print(ensure(argv[1], argv[2]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

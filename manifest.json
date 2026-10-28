@@ -25,7 +25,9 @@
         "groups:history",
         "im:history",
         "files:read",
-        "files:write"
+        "files:write",
+        "users:read",
+        "users:read.email"
       ]
     }
   },

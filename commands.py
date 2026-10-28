@@ -8,7 +8,7 @@ Grammar (after the @neo mention is stripped):
     watches                                       what your watches found
     pause [30m|2h|1d] | resume                    stop / restart the messages neo posts on its own
     settings | set my <field> [value]              your own settings (cos/people.py)
-    set role <@user> <full|prs-only|read-only>    owner only
+    set role <@user> <full|prs-only|read-only|blocked>    owner only
     watch add <name> every <minutes>: <what>      your own watch, findings to your DM
     watch remove <id>
     help
