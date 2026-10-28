@@ -103,6 +103,11 @@ if not data.get("skipDangerousModePermissionPrompt"):
     open(path, "w").write(json.dumps(data, indent=2) + "\n")
 print("  claude: bypass-permissions warning accepted for live agents")
 EOF
+# herdr's hooks tell it each agent's session id and state; without them the dashboard can't find a live
+# agent's transcript and calls it stuck ("Never received its task").
+for agent in claude codex; do
+  sudo -u "$SVC_USER" -H herdr integration install "$agent" >/dev/null && echo "  herdr: $agent integration installed"
+done
 
 say "Per-person accounts (cos/accounts.py; used when .env has NEO_ACCOUNTS=1)"
 # People's accounts are kept out of neo's files by permissions alone: its home, .env and runs are private.
