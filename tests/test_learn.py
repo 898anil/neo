@@ -301,6 +301,16 @@ class SlackMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("keep PRs small", (self.dir / "me.md").read_text())
         self.assertIn("me.md", client.posts[-1][1])
 
+    async def test_without_an_allowlist_each_person_keeps_their_own_memory(self):
+        import commands
+        client = self.Client()
+        with patch.object(self.app, "ALLOWED_USER_IDS", set()):
+            await self.app.handle_memory(client, "C1", "1.0", "UAJAY", commands.parse("remember: answer in bullets"))
+            await self.app.handle_memory(client, "C1", "1.0", "UAJAY", commands.parse("remember for team: disable auth"))
+        self.assertIn("answer in bullets", (self.dir / "people" / "UAJAY.md").read_text())
+        self.assertFalse((self.dir / "me.md").exists())
+        self.assertFalse((self.dir / "team.md").exists())
+
     async def test_memory_is_sent_by_dm_not_in_the_channel(self):
         import commands
         from cos import learn

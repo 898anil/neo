@@ -1019,8 +1019,9 @@ async def refusal(client, user: Optional[str]) -> Optional[str]:
 
 
 def is_allowed(user: Optional[str]) -> bool:
-    """Only the people the bot works for may change what every later agent is told."""
-    return bool(user) and (user in ALLOWED_USER_IDS or user == NOTIFY_USER)
+    """Only the people the bot works for may change what every later agent is told. With no allowlist
+    that is everyone refusal() let through; each person still changes only their own rules."""
+    return bool(user) and (not ALLOWED_USER_IDS or user in ALLOWED_USER_IDS or user == NOTIFY_USER)
 
 
 def _owner_user(user: Optional[str]) -> bool:
