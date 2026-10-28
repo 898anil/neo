@@ -36,12 +36,12 @@ _DEVICE_CODE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4,6}\b")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
-def start(account: str, argv: list[str]) -> subprocess.Popen:
-    """The CLI in this account, nothing lent, stdin/stdout piped (stderr joins stdout)."""
+def start(account: str, argv: list[str], stdin=subprocess.PIPE) -> subprocess.Popen:
+    """The CLI in this account, nothing lent, stdout piped (stderr joins it); stdin piped unless given."""
     spec = json.dumps(accounts.spec({"cwd": accounts.cwd_for(account, None), "lend": False}, argv, {}, {})).encode()
     read_fd, write_fd = os.pipe()
     try:
-        proc = subprocess.Popen(accounts.command(account, read_fd), cwd="/", stdin=subprocess.PIPE,
+        proc = subprocess.Popen(accounts.command(account, read_fd), cwd="/", stdin=stdin,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
                                 pass_fds=(read_fd,), env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"})
     finally:
@@ -150,8 +150,7 @@ def begin(user: str, account: str, tool: str) -> Login:
 
 def run(account: str, tool: str, action: str, timeout: float = 60) -> tuple[int, str]:
     """A quick logout/status command in the account: (exit code, output)."""
-    proc = start(account, ARGV[(tool, action)])
-    proc.stdin.close()
+    proc = start(account, ARGV[(tool, action)], stdin=subprocess.DEVNULL)
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
