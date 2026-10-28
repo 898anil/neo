@@ -5,7 +5,7 @@
 
 Idempotent. The account gets no password and no login shell, a private home (0700) with ~/code, and
 the neo-people group, which is what lets neo start runs as it (sudoers). The Slack id is kept in the
-account's comment ("neo:<id>"): an existing account that belongs to someone else is refused, so one
+account's comment ("neo <id>"): an existing account that belongs to someone else is refused, so one
 account never serves two people. Prints the account's home.
 """
 
@@ -33,7 +33,7 @@ def ensure(account: str, slack_id: str) -> str:
         fail(f"not a neo account name: {account!r}")
     if not USER_RE.match(slack_id):
         fail(f"not a Slack user id: {slack_id!r}")
-    comment = f"neo:{slack_id}"
+    comment = f"neo {slack_id}"
     try:
         grp.getgrnam(GROUP)
     except KeyError:
