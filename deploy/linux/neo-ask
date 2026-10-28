@@ -1,0 +1,46 @@
+#!/usr/bin/python3 -I
+"""Ask another person's chief of staff (cos/broker.py); installed as /usr/local/bin/neo-ask.
+
+    neo-ask --tried "what I already tried" [--to <name>] "one self-contained question"
+
+Only works inside a run neo started: the run's NEO_RUN_ID, NEO_A2A_TOKEN and NEO_A2A_URL say who is asking.
+Prints the answer (or why there is none) and waits for it, up to 15 minutes.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Ask another person's chief of staff.")
+    parser.add_argument("question")
+    parser.add_argument("--tried", required=True, help="what you already tried yourself, and why it wasn't enough")
+    parser.add_argument("--to", default="", help="whose chief of staff to ask (a first name), if you know")
+    args = parser.parse_args()
+    url, token, run_id = (os.environ.get(k, "") for k in ("NEO_A2A_URL", "NEO_A2A_TOKEN", "NEO_RUN_ID"))
+    if not (url and token and run_id):
+        print("neo-ask only works inside a run neo started (and not while answering someone else's question).")
+        return 2
+    body = json.dumps({"run_id": run_id, "question": args.question, "tried": args.tried, "to": args.to}).encode()
+    req = urllib.request.Request(f"{url}/api/a2a/ask", data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "X-Neo-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=900) as resp:
+            out = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        print(f"neo-ask refused: {exc.read().decode(errors='replace')[:300]}")
+        return 1
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        print(f"neo-ask couldn't reach neo: {exc}")
+        return 1
+    status, by = out.get("status", "?"), out.get("by")
+    print(f"[{status}{' from ' + by + chr(39) + 's chief of staff' if by else ''}]\n{out.get('text', '')}")
+    return 0 if status == "answered" else 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

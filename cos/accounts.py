@@ -32,7 +32,8 @@ from typing import Optional
 
 NEO_RUN = "/usr/local/bin/neo-run"
 NEO_ACCOUNT = "/usr/local/sbin/neo-account"
-ENV_FOR_RUNS = ("NEO_RUN_ID", "NEO_SLACK_CHANNEL", "NEO_SLACK_THREAD", "CLAUDE_MODEL", "CODEX_MODEL")
+ENV_FOR_RUNS = ("NEO_RUN_ID", "NEO_SLACK_CHANNEL", "NEO_SLACK_THREAD", "CLAUDE_MODEL", "CODEX_MODEL",
+                "NEO_A2A_TOKEN", "NEO_A2A_URL")  # the last two: neo-ask, as this run (cos/broker.py)
 _lock = threading.Lock()
 
 

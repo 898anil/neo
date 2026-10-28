@@ -115,6 +115,7 @@ chmod 700 "$SVC_HOME"
 chmod 600 .env
 getent group neo-people >/dev/null || groupadd --system neo-people
 install -o root -g root -m 755 deploy/linux/neo-run /usr/local/bin/neo-run
+install -o root -g root -m 755 deploy/linux/neo-ask /usr/local/bin/neo-ask  # one CoS asks another (cos/broker.py)
 install -o root -g root -m 700 deploy/linux/neo-account /usr/local/sbin/neo-account
 SUDOERS_TMP="$(mktemp)"
 sed "s/SVC_USER/$SVC_USER/g" deploy/linux/sudoers > "$SUDOERS_TMP"

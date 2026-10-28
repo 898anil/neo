@@ -21,11 +21,12 @@ from .runner import claude_available, cli_path
 MODEL = os.environ.get("NEO_INTENT_MODEL", "claude-haiku-5-5")
 MAX_CHARS = 400  # a longer message is a task, not a request about neo
 INTENTS = ("none", "connect", "disconnect", "connections", "brief_time", "digest_time", "watch_add",
-           "watch_remove", "watches", "setting", "remember", "memory", "help")
+           "watch_remove", "watches", "setting", "remember", "memory", "sharing", "help")
 _LIKELY = re.compile(
     r"\b(brief|digest|log ?in|log ?out|sign (?:me )?(?:in|out)|connect|disconnect|github|codex|claude|"
     r"account|watch(?:es|ing)?|remind|remember|forget|memory|setting|settings|my style|my repos?|"
-    r"my channels?|my engine|my model|call me|time ?zone|help|what can you do|set me up|onboard)\b", re.I)
+    r"my channels?|my engine|my model|call me|time ?zone|help|what can you do|set me up|onboard|"
+    r"share|sharing|my cos|other cos|answer (?:questions|teammates|other))\b", re.I)
 
 SCHEMA = {
     "type": "object",
@@ -56,6 +57,8 @@ Intents:
   engine = claude or codex, model; value: the new value, "" to clear)
 - remember: a standing rule for their own future runs (what: the rule, in their words)
 - memory: show what neo remembers for them
+- sharing: what their CoS may answer when other people's CoS ask it (value: the whole new policy in their words,
+  merged with what they said before if they are only adding to it)
 - help: what neo can do, or to be set up / onboarded
 - none: anything else. A task for an agent (fix, build, review, investigate, explain, write, check something
   once) is none, even if it mentions GitHub, Claude, a brief or a watch.
@@ -108,5 +111,7 @@ def check(found) -> Optional[dict]:
     if intent == "setting" and not found.get("field"):
         return None
     if intent == "remember" and not str(found.get("what") or "").strip():
+        return None
+    if intent == "sharing" and not str(found.get("value") or "").strip():
         return None
     return found

@@ -44,7 +44,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import accounts, autonomy, home_tab, intent, learn, logins, onboarding, people, voice  # noqa: E402
+from cos import accounts, autonomy, broker, home_tab, intent, learn, logins, onboarding, people, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -431,8 +431,8 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
             return False
     cwd = accounts.cwd_for(account, req.cwd) if account else (req.cwd or WORKDIR)
     system = await asyncio.to_thread(agent_brief, cwd, user)  # reads memory and runs git: not on the event loop
-    if account:
-        system = "\n\n".join(filter(None, (system, accounts.brief(account))))
+    # what this CoS is for and may not do, and to resolve things itself before asking another (cos/broker.py)
+    system = "\n\n".join(filter(None, (system, broker.charter(user), accounts.brief(account) if account else "")))
     slack = {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
              "system_prompt": system, "conclude": bool(system), "slack_user": user, "role": role}
     if account:
@@ -1338,6 +1338,18 @@ async def handle_intent(client, channel: str, thread_ts: str, user: Optional[str
     """Do what a plain-text request about neo asked, then offer Undo where a change can be put back."""
     if not people.valid_user(user):
         return
+    if found["intent"] == "sharing":
+        before = (broker.STATE.read().get("policies") or {}).get(user, "")
+        now = await asyncio.to_thread(broker.set_policy, user, found["value"])
+        token = secrets.token_hex(8)
+        UNDO.update(lambda d: d.update({token: {"op": "policy", "prev": before, "user": user, "at": time.time()}}))
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f"Your CoS now shares by this policy: {now}",
+                                      blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": clip(
+                                          f":handshake: When other people's CoS ask yours, it follows this:\n>{now}", 2900)}},
+                                              {"type": "actions", "elements": [{"type": "button", "action_id": "neo_undo", "value": token,
+                                                                                "text": {"type": "plain_text", "text": "Undo"}}]}])
+        asyncio.create_task(publish_home(client, user))
+        return
     if found["intent"] == "help":
         step = await asyncio.to_thread(onboarding.step_of, user)
         if step in onboarding.STEPS:
@@ -1384,6 +1396,8 @@ async def on_undo(ack, body, client) -> None:
         await asyncio.to_thread(watches.delete, entry["id"])
     elif entry["op"] == "watch_removed":
         await asyncio.to_thread(watches.save, entry["watch"])
+    elif entry["op"] == "policy":
+        await asyncio.to_thread(broker.set_policy, user, entry["prev"])
     await client.chat_update(channel=channel, ts=ts, text=":leftwards_arrow_with_hook: Undone.", blocks=[])
     await publish_home(client, user)
 
@@ -1431,10 +1445,18 @@ async def publish_home(client, user: Optional[str], check_logins: bool = False) 
                              f"{when['brief'][0]:02d}:{when['brief'][1]:02d}" if when["brief"] else None,
                              f"{when['digest'][0]:02d}:{when['digest'][1]:02d}" if when["digest"] else None,
                              runs, theirs, owner_name(), DASHBOARD_URL if _owner_user(user) else None,
-                             await asyncio.to_thread(learn.pending) if _owner_user(user) else None)
+                             await asyncio.to_thread(learn.pending) if _owner_user(user) else None,
+                             broker.policy(user), _exchanges(user))
         await client.views_publish(user_id=user, view=view)
     except Exception:  # noqa: BLE001 - the Home tab must never break anything else
         log.exception("could not publish the Home tab for %s", user)
+
+
+def _exchanges(user: str, limit: int = 6) -> list[dict]:
+    """Recent questions between this person's CoS and others', newest first, for their Home tab."""
+    rows = [e for e in broker.STATE.read().get("log") or [] if user in (e.get("asker"), e.get("target"))]
+    return [{"incoming": e.get("target") == user, "other": e["asker"] if e.get("target") == user else e["target"],
+             "question": e.get("question", ""), "decision": e.get("decision", "")} for e in reversed(rows[-limit:])]
 
 
 def _runs_since(user: str, since: float) -> list[dict]:
@@ -1664,6 +1686,44 @@ def watch_checked(client, loop):
                     "Reply `@neo live fix 1` (or any instruction) in this thread to start an agent on one.")
         asyncio.run_coroutine_threadsafe(post_markdown(client, where, None, text), loop)
     return notify
+
+
+async def broker_outbox(client) -> None:
+    """Post what the broker (cos/broker.py) has for people: exchanges between CoS, escalations with
+    Send/Decline buttons, and answers their owner released."""
+    while True:
+        try:
+            for item in await asyncio.to_thread(broker.take_outbox):
+                try:
+                    if item.get("buttons"):
+                        await client.chat_postMessage(channel=item["user"], text=clip(item["text"]), blocks=[
+                            {"type": "section", "text": {"type": "mrkdwn", "text": clip(item["text"], 2900)}},
+                            {"type": "actions", "elements": [
+                                {"type": "button", "action_id": "a2a_send", "value": item["request"], "style": "primary",
+                                 "text": {"type": "plain_text", "text": "Send my draft"}},
+                                {"type": "button", "action_id": "a2a_decline", "value": item["request"],
+                                 "text": {"type": "plain_text", "text": "Decline"}}]}])
+                    elif item.get("channel") and item.get("thread"):
+                        await client.chat_postMessage(channel=item["channel"], thread_ts=item["thread"], text=clip(item["text"]))
+                    else:
+                        await post_markdown(client, item["user"], None, item["text"])
+                except Exception:  # noqa: BLE001 - one undeliverable message must not drop the rest
+                    log.exception("broker message to %s failed", item.get("user"))
+        except Exception:  # noqa: BLE001 - try again shortly
+            log.exception("broker outbox failed")
+        await asyncio.sleep(5)
+
+
+@app.action(re.compile("^a2a_(send|decline)$"))
+async def on_a2a_decision(ack, body, client) -> None:
+    await ack()
+    user, action = body["user"]["id"], body["actions"][0]
+    send = action["action_id"] == "a2a_send"
+    item = await asyncio.to_thread(broker.resolve, action["value"], user, send)
+    note = ("Already decided." if not item else ":white_check_mark: Sent your CoS's draft." if send else ":no_entry: Declined.")
+    kept = [b for b in body["message"].get("blocks", []) if b.get("type") != "actions"]
+    await client.chat_update(channel=body["channel"]["id"], ts=body["message"]["ts"], text=note,
+                             blocks=kept + [{"type": "context", "elements": [{"type": "mrkdwn", "text": note}]}])
 
 
 async def held_scheduler(client) -> None:
@@ -2230,6 +2290,7 @@ async def main() -> None:
     watchers = asyncio.create_task(watch_scheduler(app.client))  # noqa: F841
     held = asyncio.create_task(held_scheduler(app.client))  # noqa: F841
     personal = asyncio.create_task(personal_scheduler(app.client)) if accounts.enabled() else None  # noqa: F841
+    outbox = asyncio.create_task(broker_outbox(app.client))  # noqa: F841
     chief_jobs = chief.start(app.client, NOTIFY_CHANNEL, NOTIFY_USER, DASHBOARD_URL)  # noqa: F841
     RESUMED.extend(await finish_adopted_slack_runs(app.client))  # hold the tasks so they are not collected
     await resume_live_runs(app.client)

@@ -31,7 +31,7 @@ def _time_select(action: str, times: list[str], current: Optional[str]) -> dict:
 
 def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], runs: list[dict],
          watches: list[dict], lender: Optional[str] = None, dashboard_url: Optional[str] = None,
-         pending: Optional[list[dict]] = None) -> dict:
+         pending: Optional[list[dict]] = None, policy: str = "", exchanges: Optional[list[dict]] = None) -> dict:
     """logins: tool -> "own" | "lent" | "none" | "unknown". brief/digest: "HH:MM" or None (off).
     runs: today's {title, status, url}. watches: {id, name, every, enabled}. lender: whose logins are lent."""
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"Hi {name}"[:150]}},
@@ -74,6 +74,14 @@ def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], r
                             "text": {"type": "plain_text", "text": "Remove"}, "style": "danger"}
         blocks.append(row)
     blocks.append(_text("_Add one by telling me, e.g. \"watch CI failures on backie every hour\"._"))
+    if policy:
+        blocks += [{"type": "divider"}, _text("*Questions from other people's CoS*: yours answers, declines or asks you, "
+                                              f"by this policy (change it by telling me):\n>{policy[:1500]}")]
+        decided = {"answer": "answered", "deny": "declined", "ask_owner": "asked you", "sent": "you sent it",
+                   "declined": "you declined"}
+        for row in (exchanges or [])[:6]:
+            arrow = f"<@{row['other']}> asked" if row["incoming"] else f"You asked <@{row['other']}>"
+            blocks.append(_text(f"{arrow}: _{row['question'][:150]}_ ({decided.get(row['decision'], row['decision'])})"))
     if pending:  # the owner's: shared notes from other people, reaching everyone's runs only once approved
         blocks += [{"type": "divider"}, _text(f"*Shared notes waiting for you* ({len(pending)}): these would reach "
                                               "everyone's agents, yours too.")]

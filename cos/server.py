@@ -510,7 +510,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._stream(run)
         self._error(HTTPStatus.NOT_FOUND, "not found")
 
+    def _a2a_ask(self):
+        """neo-ask: one CoS asks another (cos/broker.py). Its own auth: the asking run's token, from the
+        local machine only; who asks is the run's person, never what the request claims."""
+        from . import broker
+
+        if not self._local_host() or "Tailscale-User-Login" in self.headers:
+            return self._error(HTTPStatus.FORBIDDEN, "neo-ask works from this machine only")
+        body = self._read_json() or {}
+        run_id = str(body.get("run_id") or "")
+        if not valid_run_id(run_id) or not broker.verify(run_id, str(self.headers.get("X-Neo-Token") or "")):
+            return self._error(HTTPStatus.FORBIDDEN, "not a run of mine")
+        return self._json(broker.ask(run_id, str(body.get("question") or ""), str(body.get("tried") or ""),
+                                     str(body.get("to") or "") or None))
+
     def do_POST(self):
+        if urlparse(self.path).path == "/api/a2a/ask":
+            return self._a2a_ask()
         if not self._authorized():
             return self._error(HTTPStatus.FORBIDDEN, "not allowed: use localhost, an allowed Tailscale login, or COS_TOKEN")
         if not self._same_origin_json():

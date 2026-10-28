@@ -109,6 +109,12 @@ def engine_env(meta: dict) -> dict:
     """The bot's environment plus this run's id and Slack thread (none inherited from the bot)."""
     env = {k: v for k, v in os.environ.items() if k not in ("NEO_SLACK_CHANNEL", "NEO_SLACK_THREAD")}
     env["NEO_RUN_ID"] = meta["id"]
+    for name in ("NEO_A2A_TOKEN", "NEO_A2A_URL"):
+        env.pop(name, None)
+    port = os.environ.get("NEO_DASHBOARD_PORT")
+    if port and meta.get("kind") != "a2a-answer":  # an answering CoS can't ask anyone in turn (cos/broker.py)
+        from .broker import token
+        env["NEO_A2A_TOKEN"], env["NEO_A2A_URL"] = token(meta["id"]), f"http://127.0.0.1:{port}"
     target = _slack_target(meta)
     if target:
         env["NEO_SLACK_CHANNEL"], env["NEO_SLACK_THREAD"] = target
