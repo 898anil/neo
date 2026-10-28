@@ -14,11 +14,13 @@ Every run is recorded under runs/<run_id>/ and shown by the dashboard (cos/serve
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import threading
 import time
 from datetime import datetime
@@ -1629,6 +1631,7 @@ async def main() -> None:
     global BOT_USER_ID
     exit_with_parent()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    faulthandler.register(signal.SIGUSR1, all_threads=True)  # `kill -USR1 <pid>`: every thread's stack to stderr
     if MODE not in MODES:
         raise SystemExit(f"NEO_MODE must be one of {MODES}")
     if default_engine() not in ENGINES:

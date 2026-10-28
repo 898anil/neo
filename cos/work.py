@@ -7,6 +7,7 @@ cached and refreshed in the background, because the query takes a few seconds.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -33,7 +34,8 @@ FRESH_SECONDS = 120
 
 _lock = threading.Lock()
 _state: dict = {"data": None, "fetched_at": 0.0, "error": None, "refreshing": False}
-_repo_dirs: dict = {"map": {}, "at": 0.0}
+REPO_DIRS_SECONDS = 600
+_repo_dirs: dict = {"map": {}, "names": {}, "at": 0.0, "scanning": False}
 
 
 def _gh() -> str:
@@ -98,18 +100,16 @@ def prs(force: bool = False) -> dict:
                 "error": _state["error"], "refreshing": _state["refreshing"]}
 
 
-def repo_dir(name_with_owner: str) -> Optional[str]:
-    """The local clone of a GitHub repo under the work folder, matched by its origin remote."""
-    if time.time() - _repo_dirs["at"] > 600:
-        found = {}
+def _scan_repo_dirs() -> None:
+    """Map origin slugs and folder names to the git clones under the work folder. Runs off the request
+    path: under launchd, listing ~/Documents can fail (EINTR) or hang on macOS privacy (TCC)."""
+    found, names = {}, {}
+    try:
         root = Path(workdir())
-        try:
-            children = sorted(root.iterdir()) if root.is_dir() else []
-        except OSError:  # e.g. EINTR listing ~/Documents under launchd: keep the last map, retry next call
-            return _repo_dirs["map"].get(name_with_owner)
-        for child in children:
+        for child in sorted(root.iterdir()) if root.is_dir() else []:
             if not (child / ".git").exists():
                 continue
+            names.setdefault(child.name, str(child))
             try:
                 url = subprocess.run(["git", "-C", str(child), "remote", "get-url", "origin"],
                                      capture_output=True, text=True, timeout=5).stdout.strip()
@@ -118,8 +118,28 @@ def repo_dir(name_with_owner: str) -> Optional[str]:
             slug = url.rstrip("/").removesuffix(".git").split("github.com")[-1].lstrip(":/")
             if slug and slug not in found:  # first match wins (the main clone sorts before -wt copies)
                 found[slug] = str(child)
-        _repo_dirs.update(map=found, at=time.time())
-    return _repo_dirs["map"].get(name_with_owner)
+    except OSError:  # unreadable: keep the last map until the next scan is due
+        logging.getLogger(__name__).warning("could not list the work folder %s", workdir(), exc_info=True)
+        with _lock:
+            _repo_dirs.update(at=time.time(), scanning=False)
+        return
+    with _lock:
+        _repo_dirs.update(map=found, names=names, at=time.time(), scanning=False)
+
+
+def repo_dir(name_with_owner: str, by_name: bool = True) -> Optional[str]:
+    """The local clone of a GitHub repo under the work folder, matched by its origin remote, else (by_name)
+    by a folder of the repo's name. Never waits on the disk: answers from the last scan."""
+    with _lock:
+        start = time.time() - _repo_dirs["at"] > REPO_DIRS_SECONDS and not _repo_dirs["scanning"]
+        if start:
+            _repo_dirs["scanning"] = True
+        found = _repo_dirs["map"].get(name_with_owner)
+        if not found and by_name:
+            found = _repo_dirs["names"].get(name_with_owner.split("/")[-1])
+    if start:
+        threading.Thread(target=_scan_repo_dirs, daemon=True, name="repo-dirs").start()
+    return found
 
 
 def merge(pr: dict) -> str:
