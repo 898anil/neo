@@ -169,6 +169,25 @@ class PersonalBriefTest(Base):
         self.assertIsNone(brief.running())  # the owner's brief isn't theirs
         self.assertIsNone(brief.latest())
 
+    def test_their_brief_isnt_kept_after_it_was_sent(self):
+        from cos import cards
+        from cos.runner import Run
+        run = Run.create("claude", "brief", "/home/neo-ajay/code", "full",
+                         extra={"kind": "brief", "account": "neo-ajay", "slack_user": AJAY, "lend": False})
+        (run.dir / "events.jsonl").write_text('{"kind": "result", "body": "Mail from the CFO about layoffs"}\n')
+        (run.dir / "raw.jsonl").write_text("secret mail\n")
+        run.update_meta(status="done")
+        brief.forget(run)
+        self.assertEqual(sorted(p.name for p in run.dir.iterdir()), ["events.jsonl", "meta.json"])
+        self.assertNotIn("CFO", (run.dir / "events.jsonl").read_text())
+        self.assertEqual(cards.pending({"tasks": [run.meta()]}), [])
+
+    def test_nothing_extra_reaches_a_run_that_lends_nothing(self):
+        with patch.dict(os.environ, {"NEO_ACCOUNT_ENV": "DATADOG_API_KEY"}):
+            env = {"DATADOG_API_KEY": "dd-owner", "NEO_RUN_ID": "r1"}
+            self.assertNotIn("DATADOG_API_KEY", accounts.spec({"cwd": "/x", "lend": False}, ["claude"], env, {})["env"])
+            self.assertEqual(accounts.spec({"cwd": "/x"}, ["claude"], env, {})["env"]["DATADOG_API_KEY"], "dd-owner")
+
 
 class WatchTest(Base):
     def test_someones_own_watch_runs_in_their_account(self):
@@ -181,6 +200,41 @@ class WatchTest(Base):
             meta = watches.start(watch["id"], "dashboard")
         self.assertEqual((meta["account"], meta["slack_user"]), ("neo-ajay", AJAY))
         self.assertEqual(meta["cwd"], str(Path(accounts.home("neo-ajay") + "/code").resolve()))
+
+    def test_their_watch_gets_only_what_their_role_is_lent_and_stops_when_blocked(self):
+        from cos import watches
+        accounts._save_registry({AJAY: "neo-ajay"})
+        people.save(AJAY, OWNER, role="prs-only")
+        watch = watches.save({"name": "ci", "instructions": "check CI", "every": 60, "hours": "always", "owner": AJAY})
+        with patch("cos.watches.claude_available", return_value=(True, "")), \
+                patch("cos.runner.Run.execute", lambda self: self.update_meta(status="done")), \
+                patch.object(watches, "checked"), \
+                patch.dict(os.environ, {"NEO_SHARED_GH_TOKEN": "ghp-owner", "NEO_SHARED_CLAUDE_TOKEN": "sk-owner"}):
+            meta = watches.start(watch["id"], "dashboard")
+            self.assertEqual(meta["role"], "prs-only")
+            self.assertEqual(accounts.spec(meta, ["claude"], {}, {})["shared"]["gh_token"], "")  # GitHub: full only
+            people.save(AJAY, OWNER, role="blocked")
+            for _ in range(50):
+                if not watches.running(watch["id"]):
+                    break
+                asyncio.run(asyncio.sleep(0.02))
+            self.assertIsNone(watches.start(watch["id"], "schedule"))
+
+    def test_watch_scheduler_skips_people_neo_no_longer_works_for(self):
+        import app
+        from cos import watches
+        watch = watches.save({"name": "ci", "instructions": "check CI", "every": 60, "hours": "always", "owner": AJAY})
+        started = []
+
+        async def go():
+            with patch.object(watches, "due", return_value=[watch]), \
+                    patch.object(watches, "start", side_effect=lambda *a: started.append(a)), \
+                    patch.object(app, "may_use", return_value=False), \
+                    patch("app.asyncio.sleep", side_effect=asyncio.CancelledError):
+                with self.assertRaises(asyncio.CancelledError):
+                    await app.watch_scheduler(None)
+        asyncio.run(go())
+        self.assertEqual(started, [])
 
 
 class SlackLoginTest(Base):

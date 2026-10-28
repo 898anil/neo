@@ -186,10 +186,11 @@ def spec(meta: dict, argv: list[str], env: dict, files: dict) -> dict:
     the run's own variables pass (never the bot's Slack tokens), plus names in NEO_ACCOUNT_ENV.
     meta "lend" False: nothing of the owner's is lent (a personal brief must read the person's own
     mail and calendar, or nothing)."""
-    extra = [k.strip() for k in os.environ.get("NEO_ACCOUNT_ENV", "").split(",") if k.strip()]
+    lend = meta.get("lend", True)
+    extra = [k.strip() for k in os.environ.get("NEO_ACCOUNT_ENV", "").split(",") if k.strip()] if lend else []
     return {"argv": argv, "cwd": meta["cwd"], "files": files,
             "env": {k: env[k] for k in (*ENV_FOR_RUNS, *extra) if env.get(k)},
-            "shared": shared_logins(meta.get("role") or "full") if meta.get("lend", True) else {},
+            "shared": shared_logins(meta.get("role") or "full") if lend else {},
             "git_name": meta.get("git_name") or "", "git_email": meta.get("git_email") or ""}
 
 

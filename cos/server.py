@@ -677,8 +677,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(HTTPStatus.CONFLICT, str(exc))
             cwd = work.repo_dir(pr["repo"]) or workdir()
             standing = agent_brief(cwd)
+            # account None: the checkout is neo's own (work.repo_dir), so the review runs where it is, like live agents
             extra = {"kind": f"pr-{parts[2]}", "pr_url": pr["url"], "system_prompt": standing, "conclude": bool(standing),
-                     "title": f"Review: {pr['title']}" if parts[2] == "review" else f"Fix CI: {pr['title']}"}
+                     "title": f"Review: {pr['title']}" if parts[2] == "review" else f"Fix CI: {pr['title']}", "account": None}
             try:
                 if parts[2] == "review":
                     run = Run.create(default_engine(), work.review_prompt(pr), cwd, "full", source="dashboard", extra=extra)
@@ -730,7 +731,9 @@ class Handler(BaseHTTPRequestHandler):
                     cwd=cwd,
                     mode=str(body.get("mode", "readonly")),
                     source="dashboard",
-                    extra={"system_prompt": (standing := agent_brief(cwd)), "conclude": bool(standing), "branch": branch},
+                    # account None: a folder (or worktree) on neo's own disk, picked on the owner's dashboard
+                    extra={"system_prompt": (standing := agent_brief(cwd)), "conclude": bool(standing), "branch": branch,
+                           "account": None},
                 )
             except ValueError as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))

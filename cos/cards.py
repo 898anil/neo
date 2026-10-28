@@ -177,8 +177,8 @@ def pending(overview: dict) -> list[dict]:
     cards = STORE.read()
     out = []
     for meta in overview.get("tasks", []):
-        if meta.get("status") not in ("done", "failed"):
-            continue
+        if meta.get("status") not in ("done", "failed") or (meta.get("kind") == "brief" and meta.get("slack_user")):
+            continue  # someone's own brief is theirs (brief.forget)
         key, mtime = f"run:{meta['id']}", _run_mtime(meta)
         if (cards.get(key) or {}).get("source_mtime", -1) < mtime:
             out.append({"key": key, "kind": "run", "run_id": meta["id"], "title": meta.get("title") or meta["id"], "mtime": mtime,

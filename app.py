@@ -964,11 +964,10 @@ async def brief_scheduler(client) -> None:
             due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if now.weekday() in BRIEF_DAYS and now >= due:
                 today = now.strftime("%Y-%m-%d")
-                already = any(m.get("kind") == "brief" and m.get("source") == "schedule" and not m.get("slack_user")
-                              and m["created_at"][:10] >= today
-                              for m in list_runs(60))
+                already = (PERSONAL.read().get("owner") or {}).get("brief_day") == today
                 if not already and not pause.is_paused():  # held back while paused; written if the pause ends today
                     log.info("writing the morning brief")
+                    PERSONAL.update(lambda d: d.setdefault("owner", {}).update(brief_day=today))
                     await asyncio.to_thread(morning.start, "schedule", posted)
         except Exception:  # noqa: BLE001 - try again next minute
             log.exception("brief scheduler failed")
@@ -1007,10 +1006,10 @@ async def personal_scheduler(client) -> None:
     while True:
         try:
             for user, account in (await asyncio.to_thread(accounts.everyone)).items():
-                if not accounts.isolated(user) or people.role(user) == "blocked":
+                if not accounts.isolated(user) or not await may_use(client, user):
                     continue
                 info = await slack_user(client, user)
-                if not info or info.get("deleted"):
+                if not info:
                     continue
                 try:
                     now = datetime.now(ZoneInfo(info.get("tz") or "UTC"))
@@ -1100,6 +1099,16 @@ async def refusal(client, user: Optional[str]) -> Optional[str]:
     if not people.valid_user(user):
         return "I can't tell who you are, so I can't run anything for you."
     return accounts.member_refusal(await slack_user(client, user), TEAM_ID)
+
+
+async def may_use(client, user: Optional[str]) -> bool:
+    """Whether neo still works for this person: what a mention checks, for work they set up earlier
+    (their watches, brief and digest)."""
+    if _owner_user(user):
+        return True
+    if ALLOWED_USER_IDS and user not in ALLOWED_USER_IDS:
+        return False
+    return not await refusal(client, user)
 
 
 def is_allowed(user: Optional[str]) -> bool:
@@ -1203,6 +1212,7 @@ async def handle_watch(client, channel: str, thread_ts: str, user: Optional[str]
 
 
 LOGINS: dict[str, logins.Login] = {}  # DM message ts -> a Claude sign-in waiting for the code they reply with
+SIGNING_IN: set[str] = set()  # people whose sign-in is starting: one at a time
 
 
 async def _account_of(client, user: str) -> str:
@@ -1240,16 +1250,28 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
         code, out = await asyncio.to_thread(logins.run, account, tool, "logout")
         await say(f":wave: Signed your workspace out of {tool}." if code == 0 else f":x: Couldn't sign out of {tool}: `{out.strip()[-200:]}`")
         return
-    for ts, waiting in list(LOGINS.items()):
-        if waiting.user == user:
-            waiting.stop()
-            LOGINS.pop(ts, None)
-    login = await asyncio.to_thread(logins.begin, user, account, tool)
-    try:
-        url, code = await asyncio.to_thread(login.link)
-    except RuntimeError as exc:
-        await say(f":x: The {tool} sign-in didn't start: `{exc}`")
+    if user in SIGNING_IN:
+        await say(":hourglass: Your sign-in is already starting; check your DMs.")
         return
+    SIGNING_IN.add(user)
+    try:
+        for ts, waiting in list(LOGINS.items()):
+            if waiting.user == user:
+                waiting.stop()
+                LOGINS.pop(ts, None)
+        login = await asyncio.to_thread(logins.begin, user, account, tool)
+        try:
+            url, code = await asyncio.to_thread(login.link)
+        except RuntimeError as exc:
+            await say(f":x: The {tool} sign-in didn't start: `{exc}`")
+            return
+        await _send_sign_in(client, channel, user, tool, login, url, code, say)
+    finally:
+        SIGNING_IN.discard(user)
+
+
+async def _send_sign_in(client, channel: str, user: str, tool: str, login: logins.Login, url: str,
+                        code: Optional[str], say) -> None:
     if tool == "claude":
         text = (f"*Sign in to Claude for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* Claude account.\n"
                 "2. Copy the code the page shows you and reply with it *in this thread*.\nThe link works for 15 minutes.")
@@ -1406,6 +1428,8 @@ async def watch_scheduler(client) -> None:
     while True:
         try:
             for watch in await asyncio.to_thread(watches.due):
+                if watch.get("owner") and not await may_use(client, watch["owner"]):
+                    continue  # blocked, off the allowlist, a guest now or gone: their watch waits
                 log.info("watch %s is due", watch["id"])
                 await asyncio.to_thread(watches.start, watch["id"], "schedule")
         except Exception:  # noqa: BLE001 - try again next minute
@@ -1897,6 +1921,9 @@ async def main() -> None:
     if len(ALLOWED_USER_IDS) > 1 and not people.owner_id():
         raise SystemExit("Set NEO_OWNER_USER (or NEO_NOTIFY_USER) to the owner's Slack id: with several people on "
                          "ALLOWED_USER_IDS, neo must know whose rules and permissions are the owner's")
+    if accounts.enabled() and not people.valid_user(people.owner_id()):
+        raise SystemExit("NEO_ACCOUNTS=1 needs NEO_OWNER_USER (or NEO_NOTIFY_USER): the owner's runs and scheduled "
+                         "jobs run in the owner's own account")
     if not ALLOWED_USER_IDS:
         log.warning("ALLOWED_USER_IDS is empty: anyone in the workspace can run agents on this machine")
     global TEAM_URL

@@ -120,11 +120,25 @@ def start_for(user: str, account: str, name: str, now: datetime,
         except Exception as exc:  # noqa: BLE001 - recorded in the run
             run.append_event({"kind": "error", "title": "Brief failed", "body": repr(exc), "data": {}}, 1)
             meta = run.update_meta(status="failed", pid=None)
-        if on_done:
-            on_done({**meta, "text": _final_text(run.id) if meta.get("status") == "done" else ""})
+        try:
+            if on_done:
+                on_done({**meta, "text": _final_text(run.id) if meta.get("status") == "done" else ""})
+        finally:
+            forget(run)
 
     threading.Thread(target=work, daemon=True, name=f"brief-{run.id}").start()
     return run.meta()
+
+
+def forget(run: Run) -> None:
+    """Once a person's brief went to their DM, keep only the run's record: what it read from their mail,
+    calendar and Slack must not stay in neo's runs, which the owner's dashboard shows."""
+    for path in run.dir.iterdir():
+        if path.name != "meta.json" and path.is_file():
+            path.unlink(missing_ok=True)
+    (run.dir / "events.jsonl").write_text(json.dumps(
+        {"kind": "text", "title": "Sent by DM", "body": "This brief went to its owner by DM; its contents aren't kept.",
+         "data": {}}) + "\n")
 
 
 def _final_text(run_id: str) -> str:

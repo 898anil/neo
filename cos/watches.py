@@ -324,9 +324,13 @@ def start(watch_id: str, source: str = "schedule") -> Optional[dict]:
         from . import accounts
         cwd, extra = workdir(), {}
         if accounts.isolated(watch.get("owner")):  # someone's own watch runs in their own account (cos/accounts.py)
-            from .people import name
+            from .people import name, role
+            if role(watch["owner"]) == "blocked":
+                return None
             account = accounts.ensure(watch["owner"], name(watch["owner"]))
-            cwd, extra = accounts.cwd_for(account, None), {"account": account, "slack_user": watch["owner"]}
+            # their role decides what of the owner's is lent to it (GitHub to full only), as for their runs
+            cwd, extra = accounts.cwd_for(account, None), {"account": account, "slack_user": watch["owner"],
+                                                           "role": role(watch["owner"])}
         every_turn, first_turn = cli_args()
         if watch.get("owner"):
             from .people import is_owner

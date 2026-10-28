@@ -44,6 +44,9 @@ def start(account: str, argv: list[str], stdin=subprocess.PIPE) -> subprocess.Po
         proc = subprocess.Popen(accounts.command(account, read_fd), cwd="/", stdin=stdin,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
                                 pass_fds=(read_fd,), env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"})
+    except BaseException:
+        os.close(write_fd)
+        raise
     finally:
         os.close(read_fd)
     with os.fdopen(write_fd, "wb") as fh:  # small: fits the pipe's buffer
@@ -155,7 +158,11 @@ def run(account: str, tool: str, action: str, timeout: float = 60) -> tuple[int,
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         os.killpg(proc.pid, 15)
-        out, _ = proc.communicate()
+        try:
+            out, _ = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, 9)
+            out, _ = proc.communicate()
     return proc.returncode, _ANSI.sub("", out.decode(errors="replace"))
 
 
