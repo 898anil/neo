@@ -1,7 +1,7 @@
 {
   "display_information": {
     "name": "Neo",
-    "description": "Run Claude Code or Codex on this machine by mentioning @neo, with every step shown in the thread.",
+    "description": "Your chief of staff: runs coding agents for you, watches what matters, and sends you a morning brief.",
     "background_color": "#1f1f1f"
   },
   "features": {
@@ -10,7 +10,7 @@
       "always_online": true
     },
     "app_home": {
-      "home_tab_enabled": false,
+      "home_tab_enabled": true,
       "messages_tab_enabled": true,
       "messages_tab_read_only_enabled": false
     }
@@ -37,11 +37,12 @@
         "app_mention",
         "message.im",
         "message.channels",
-        "message.groups"
+        "message.groups",
+        "app_home_opened"
       ]
     },
     "interactivity": {
-      "is_enabled": false
+      "is_enabled": true
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,

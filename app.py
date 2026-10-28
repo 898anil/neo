@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import signal
 import threading
@@ -43,7 +44,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import accounts, autonomy, learn, logins, people, voice  # noqa: E402
+from cos import accounts, autonomy, home_tab, intent, learn, logins, onboarding, people, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -1276,16 +1277,262 @@ async def _send_sign_in(client, channel: str, user: str, tool: str, login: login
         text = (f"*Sign in to Claude for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* Claude account.\n"
                 "2. Copy the code the page shows you and reply with it *in this thread*.\nThe link works for 15 minutes.")
     else:
-        text = (f"*Sign in to Codex for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* ChatGPT account.\n"
+        label, account = ("Codex", "ChatGPT") if tool == "codex" else ("GitHub", "GitHub")
+        text = (f"*Sign in to {label} for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* {account} account.\n"
                 f"2. Enter this code: `{code}`\nI'll say here when it's done. It works for 15 minutes.")
     dm = await client.chat_postMessage(channel=user, text=text, unfurl_links=False)
-    if not channel.startswith("D"):
+    if not channel.startswith(("D", "U")):
         await say(":envelope_with_arrow: I sent you a DM to sign in.")
     if tool == "claude":
         LOGINS[dm["ts"]] = login
         asyncio.create_task(_expire_login(dm["ts"]))
     else:
         asyncio.create_task(_finish_device_login(client, dm["channel"], dm["ts"], login))
+
+
+# ----------------------------------------------------------------- plain text, onboarding, Home tab
+
+UNDO = JsonStore("undo.json")  # token -> what an Undo button puts back
+LOGIN_STATE: dict[str, tuple[float, dict]] = {}  # Slack id -> (until, tool -> own|lent|none|unknown)
+
+
+def _commands_for(user: str, found: dict) -> tuple[Optional[commands.Request], Optional[dict], str]:
+    """(the request a command would have made, what Undo puts back, what to say instead) for an intent."""
+    kind = found["intent"]
+    if kind in ("connect", "disconnect"):
+        return commands.Request("login" if kind == "connect" else "logout", engine=found["tool"]), None, ""
+    if kind == "connections":
+        return commands.Request("logins"), None, ""
+    if kind in ("brief_time", "digest_time", "setting"):
+        field = kind.split("_")[0] if kind != "setting" else found["field"]
+        value = str(found.get("time") if kind != "setting" else found.get("value") or "").strip()
+        undo = {"op": "set", "field": field, "prev": people.load(user).get(field, "")}
+        return commands.Request("set", field=field, prompt=value), undo, ""
+    if kind == "watch_add":
+        every = min(watches.EVERY, key=lambda e: abs(e - int(found["every"])))
+        req = commands.Request("watch", field="add", target=found["name"].strip()[:60], prompt=found["what"].strip(),
+                               keys=[str(every)])
+        return req, {"op": "watch_added", "name": req.target}, ""
+    if kind == "watch_remove":
+        name = found["name"].strip().lower()
+        mine = watches.load() if _owner_user(user) else watches.owned_by(user)
+        match = ([w for w in mine if name in (w["id"], w["name"].lower())]
+                 or [w for w in mine if name in w["name"].lower()])
+        if len(match) != 1:
+            names = ", ".join(f"`{w['id']}` {w['name']}" for w in mine) or "none"
+            return None, None, f"Which watch? Yours: {names}."
+        return commands.Request("watch", field="remove", target=match[0]["id"]), {"op": "watch_removed", "watch": match[0]}, ""
+    if kind == "watches":
+        return commands.Request("watches"), None, ""
+    if kind == "remember":
+        return commands.Request("remember", prompt=found["what"].strip()), None, ""
+    if kind == "memory":
+        return commands.Request("memory"), None, ""
+    return None, None, ""
+
+
+async def handle_intent(client, channel: str, thread_ts: str, user: Optional[str], found: dict) -> None:
+    """Do what a plain-text request about neo asked, then offer Undo where a change can be put back."""
+    if not people.valid_user(user):
+        return
+    if found["intent"] == "help":
+        step = await asyncio.to_thread(onboarding.step_of, user)
+        if step in onboarding.STEPS:
+            await post_onboarding_step(client, user, step)
+        else:
+            text, blocks = onboarding.message("done", None, False, False)
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text, blocks=blocks)
+        return
+    req, undo, say_instead = await asyncio.to_thread(_commands_for, user, found)
+    if not req:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=say_instead or commands.HELP)
+        return
+    if req.command in ("remember", "memory"):
+        await handle_memory(client, channel, thread_ts, user, req)
+    elif req.command == "watches":
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(watches_digest(user)))
+    else:
+        handler = {"watch": handle_watch, "login": handle_login, "logout": handle_login, "logins": handle_login}
+        await handler.get(req.command, handle_settings)(client, channel, thread_ts, user, req)
+    if undo and undo["op"] == "watch_added":
+        made = [w for w in watches.owned_by(user) if w["name"] == undo["name"]]
+        undo = {"op": "watch_delete", "id": made[-1]["id"]} if made else None
+    if undo:
+        token = secrets.token_hex(8)
+        UNDO.update(lambda d: d.update({token: {**undo, "user": user, "at": time.time()}}))
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text="Undo?", blocks=[{
+            "type": "actions", "elements": [{"type": "button", "action_id": "neo_undo", "value": token,
+                                             "text": {"type": "plain_text", "text": "Undo"}}]}])
+    asyncio.create_task(publish_home(client, user))
+
+
+@app.action("neo_undo")
+async def on_undo(ack, body, client) -> None:
+    await ack()
+    user, token = body["user"]["id"], body["actions"][0]["value"]
+    entry = UNDO.update(lambda d: d.pop(token, None) if (d.get(token) or {}).get("user") == user else None)
+    channel, ts = body["channel"]["id"], body["message"]["ts"]
+    if not entry:
+        await client.chat_update(channel=channel, ts=ts, text="Nothing to undo.", blocks=[])
+        return
+    if entry["op"] == "set":
+        await asyncio.to_thread(people.save, user, user, **{entry["field"]: entry["prev"]})
+    elif entry["op"] == "watch_delete":
+        await asyncio.to_thread(watches.delete, entry["id"])
+    elif entry["op"] == "watch_removed":
+        await asyncio.to_thread(watches.save, entry["watch"])
+    await client.chat_update(channel=channel, ts=ts, text=":leftwards_arrow_with_hook: Undone.", blocks=[])
+    await publish_home(client, user)
+
+
+def _lent(user: str) -> dict:
+    lent = accounts.shared_logins(people.role(user))
+    return {"claude": bool(lent["claude_token"]), "codex": bool(lent["openai_key"]), "gh": bool(lent["gh_token"])}
+
+
+async def login_states(client, user: str, fresh: bool = False) -> dict:
+    """tool -> own | lent | none | unknown for this person's account (cached ten minutes: each check is a CLI run)."""
+    hit = LOGIN_STATE.get(user)
+    if hit and time.monotonic() < hit[0] and not fresh:
+        return hit[1]
+    if not accounts.enabled():
+        return {tool: "unknown" for tool in logins.TOOLS}
+    account = await _account_of(client, user)
+    lent, states = _lent(user), {}
+    for tool in logins.TOOLS:
+        own = await asyncio.to_thread(logins.signed_in, account, tool)
+        states[tool] = "unknown" if own is None else "own" if own else "lent" if lent[tool] else "none"
+    LOGIN_STATE[user] = (time.monotonic() + 600, states)
+    return states
+
+
+async def publish_home(client, user: Optional[str], check_logins: bool = False) -> None:
+    """This person's Home tab, from what neo knows now."""
+    if not people.valid_user(user):
+        return
+    try:
+        why = await refusal(client, user)
+        if why or (ALLOWED_USER_IDS and user not in ALLOWED_USER_IDS):
+            await client.views_publish(user_id=user, view={"type": "home", "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": why or "I'm not set up to work for you yet."}}]})
+            return
+        hit = LOGIN_STATE.get(user)
+        states = await login_states(client, user) if check_logins else (hit[1] if hit else {})
+        info = await slack_user(client, user)
+        mine = people.load(user)
+        when = {f: people.daily(user, f) for f in ("brief", "digest")}
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        runs = [{"title": r["title"], "status": r["status"], "url": r.get("url")} for r in await asyncio.to_thread(_runs_since, user, today)]
+        theirs = watches.load() if _owner_user(user) else watches.owned_by(user)
+        view = home_tab.view(mine.get("name") or accounts.display_name(info) or "there", states,
+                             f"{when['brief'][0]:02d}:{when['brief'][1]:02d}" if when["brief"] else None,
+                             f"{when['digest'][0]:02d}:{when['digest'][1]:02d}" if when["digest"] else None,
+                             runs, theirs, owner_name(), DASHBOARD_URL if _owner_user(user) else None)
+        await client.views_publish(user_id=user, view=view)
+    except Exception:  # noqa: BLE001 - the Home tab must never break anything else
+        log.exception("could not publish the Home tab for %s", user)
+
+
+def _runs_since(user: str, since: float) -> list[dict]:
+    rows = []
+    for meta in list_runs(400):
+        if meta.get("slack_user") != user or meta.get("kind") == "brief":
+            continue
+        try:
+            if datetime.fromisoformat(meta["created_at"]).timestamp() < since:
+                continue
+        except (KeyError, ValueError):
+            continue
+        what = " ".join((meta.get("title") or meta.get("prompt") or "").split())
+        rows.append({"title": what.rpartition(OWNER_MESSAGE_MARK)[2].strip() or what, "status": meta["status"],
+                     "url": meta.get("slack_url")})
+    return rows
+
+
+@app.event("app_home_opened")
+async def on_home_opened(event: dict, client) -> None:
+    if event.get("tab") != "home":
+        return
+    user = event.get("user")
+    await publish_home(client, user)
+    await publish_home(client, user, check_logins=True)  # the sign-in checks take a few seconds
+    await maybe_onboard(client, user)
+
+
+@app.action(re.compile(f"^{home_tab.CONNECT}_"))
+async def on_home_connect(ack, body, client) -> None:
+    await ack()
+    user = body["user"]["id"]
+    if await may_use(client, user):
+        await handle_login(client, user, None, user, commands.Request("login", engine=body["actions"][0]["value"]))
+
+
+@app.action(re.compile(f"^({home_tab.BRIEF}|{home_tab.DIGEST})$"))
+async def on_home_time(ack, body, client) -> None:
+    await ack()
+    user, action = body["user"]["id"], body["actions"][0]
+    field = "brief" if action["action_id"] == home_tab.BRIEF else "digest"
+    if await may_use(client, user):
+        await asyncio.to_thread(people.save, user, user, **{field: action["selected_option"]["value"]})
+    await publish_home(client, user)
+
+
+@app.action(re.compile(f"^{home_tab.WATCH_REMOVE}_"))
+async def on_home_watch_remove(ack, body, client) -> None:
+    await ack()
+    user, wid = body["user"]["id"], body["actions"][0]["value"]
+    watch = await asyncio.to_thread(watches.get, wid)
+    if watch and (watch.get("owner") == user or _owner_user(user)):
+        await asyncio.to_thread(watches.delete, wid)
+    await publish_home(client, user)
+
+
+async def maybe_onboard(client, user: Optional[str]) -> None:
+    """The first time someone uses neo: a short guided setup by DM (cos/onboarding.py)."""
+    if not people.valid_user(user) or _owner_user(user) or not accounts.enabled():
+        return
+    if await asyncio.to_thread(onboarding.step_of, user) is not None or not await may_use(client, user):
+        return
+    await asyncio.to_thread(onboarding.set_step, user, onboarding.STEPS[0])
+    info = await slack_user(client, user)
+    name = people.load(user).get("name") or accounts.display_name(info) or "there"
+    await client.chat_postMessage(channel=user, text=onboarding.welcome(name))
+    await post_onboarding_step(client, user, onboarding.STEPS[0])
+
+
+async def post_onboarding_step(client, user: str, step: str) -> None:
+    lent = _lent(user)
+    text, blocks = onboarding.message(step, owner_name(), lent["claude"], lent["gh"])
+    await client.chat_postMessage(channel=user, text=text, blocks=blocks)
+
+
+async def onboarding_choice(client, user: str, channel: str, step: str, choice: str) -> None:
+    """Act on one step's answer (a button or a plain reply), then show the next step."""
+    if await asyncio.to_thread(onboarding.step_of, user) != step:
+        return  # an old button
+    if step in ("claude", "gh") and choice == "connect":
+        await handle_login(client, channel, None, user, commands.Request("login", engine=step))
+    elif step == "brief":
+        await asyncio.to_thread(people.save, user, user, brief=choice)
+    following = onboarding.next_step(step)
+    await asyncio.to_thread(onboarding.set_step, user, following)
+    await post_onboarding_step(client, user, following)
+    asyncio.create_task(publish_home(client, user))
+
+
+@app.action(re.compile(f"^{onboarding.ACTION}_"))
+async def on_onboarding(ack, body, client) -> None:
+    await ack()
+    user = body["user"]["id"]
+    step, _, choice = body["actions"][0]["value"].partition(":")
+    label = body["actions"][0]["text"]["text"]
+    channel, ts = body["channel"]["id"], body["message"]["ts"]
+    if await asyncio.to_thread(onboarding.step_of, user) != step:
+        return
+    kept = [b for b in body["message"].get("blocks", []) if b.get("type") != "actions"]
+    await client.chat_update(channel=channel, ts=ts, text=body["message"].get("text", ""),
+                             blocks=kept + [{"type": "context", "elements": [{"type": "mrkdwn", "text": f":white_check_mark: {label}"}]}])
+    await onboarding_choice(client, user, channel, step, choice)
 
 
 async def _expire_login(ts: str) -> None:
@@ -1297,9 +1544,12 @@ async def _expire_login(ts: str) -> None:
 
 async def _finish_device_login(client, channel: str, ts: str, login: logins.Login) -> None:
     done = await asyncio.to_thread(login.wait)
-    text = (":white_check_mark: Signed in to Codex. Your Codex runs use your own account from now on." if done
-            else ":x: The Codex sign-in didn't finish. Start again with `@neo login codex`.")
+    label = home_tab.TOOL_NAMES.get(login.tool, login.tool)
+    text = (f":white_check_mark: Signed in to {label}. Your agents use your own account from now on." if done
+            else f":x: The {label} sign-in didn't finish. Say \"connect my {label.lower()}\" to try again.")
     await client.chat_postMessage(channel=channel, thread_ts=ts, text=text)
+    LOGIN_STATE.pop(login.user, None)
+    await publish_home(client, login.user, check_logins=True)
 
 
 async def answer_login(client, channel: str, thread_ts: str, user: str, text: str) -> None:
@@ -1310,6 +1560,8 @@ async def answer_login(client, channel: str, thread_ts: str, user: str, text: st
     ok, why = await asyncio.to_thread(login.answer, text.strip().strip("`").strip())
     if ok:
         LOGINS.pop(thread_ts, None)
+        LOGIN_STATE.pop(user, None)
+        asyncio.create_task(publish_home(client, user, check_logins=True))
         when = people.daily(user, "brief")
         brief = (f" I'll DM you a morning brief at {when[0]:02d}:{when[1]:02d} on work days, from your own mail, "
                  "calendar and Slack (`@neo set my brief off` to stop)." if when and accounts.isolated(user) else "")
@@ -1486,6 +1738,11 @@ async def handle_dm(event: dict, client) -> None:
     if thread_ts and thread_ts in LOGINS:
         await answer_login(client, channel, thread_ts, user, event.get("text", ""))
         return
+    step = await asyncio.to_thread(onboarding.step_of, user)
+    choice = onboarding.reply(step, text) if step in onboarding.STEPS else None
+    if choice:
+        await onboarding_choice(client, user, channel, step, choice)
+        return
     target = await sessions.get_thread(f"dm:{thread_ts}") if thread_ts else None
     if not target and thread_ts and await sessions.get_thread(thread_ts):
         await handle_mention(event, client)  # a typed follow-up in a DM thread a voice note started
@@ -1527,11 +1784,7 @@ async def reply_to_dm_agent(client, event: dict, channel: str, thread_ts: Option
     if target and not _owner_user(event.get("user")):
         return  # agent notifications go to the owner's DM; only the owner answers their agents
     if not target:
-        await client.chat_postMessage(
-            channel=channel, thread_ts=event["ts"],
-            text="Reply in the thread of an agent notification to answer that agent. "
-                 "To start work, mention me in a channel (`@neo <task>`) or send me a voice note here.",
-        )
+        await handle_mention(event, client)  # plain text in a DM is a request, as `@neo ...` is in a channel
         return
     # Only explicit control words; "yes"/"no" are ordinary answers to a question.
     action = {"approve": "approve", "deny": "deny", "esc": "interrupt", "stop": "interrupt"}.get(text.lower().strip(), "prompt")
@@ -1694,6 +1947,7 @@ async def handle_mention(event: dict, client) -> None:
         except Exception:  # noqa: BLE001 - e.g. a channel neo can't post ephemerals in
             log.info("refused %s: %s", user, why)
         return
+    asyncio.create_task(maybe_onboard(client, user))
     if event.get("files"):
         await resolve_files(client, event)
     # Reply inside the mention's thread; start a new thread on a top-level mention.
@@ -1711,6 +1965,15 @@ async def handle_mention(event: dict, client) -> None:
              user, channel, thread_ts, req.command, req.engine, req.live)
 
     req = await route_apply(req, thread_ts)
+    if req.command == "run" and not entry and intent.likely(raw):  # "send my brief at 8": about neo, not a task
+        found = await asyncio.to_thread(intent.classify, raw)
+        if found:
+            try:
+                await handle_intent(client, channel, thread_ts, user, found)
+            except Exception as exc:  # noqa: BLE001 - always answer in the thread
+                log.exception("intent %s failed for thread=%s", found.get("intent"), thread_ts)
+                await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: That didn't work: `{exc}`")
+            return
     if req.command in ("remember", "memory", "apply"):
         try:
             await handle_memory(client, channel, thread_ts, user, req)

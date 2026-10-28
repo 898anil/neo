@@ -283,6 +283,13 @@ class NeoRunTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.mod.engine_path("bash")
 
+    def test_gh_only_signs_in_and_out(self):
+        for args in (["api", "user"], ["auth", "token"], ["repo", "clone", "x/y"], []):
+            with self.assertRaises(SystemExit, msg=args):
+                self.mod.engine_path("gh", args)
+        with patch.object(self.mod.shutil, "which", return_value="/usr/bin/gh"):
+            self.assertEqual(self.mod.engine_path("gh", ["auth", "login", "--web"]), "/usr/bin/gh")
+
     def test_commits_carry_the_persons_name_unless_the_account_has_its_own(self):
         self.assertEqual(self.mod.git_identity_env(self.home, "Ajay", "ajay@x.com")["GIT_AUTHOR_NAME"], "Ajay")
         (self.home / ".gitconfig").write_text("[user]\n  name = Ajay K\n")

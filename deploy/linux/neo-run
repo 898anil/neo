@@ -9,7 +9,8 @@ neo-people group:
 sudo clears the environment and closes other files, so everything the turn needs comes as one JSON
 spec on that pipe, never on the command line or on disk:
 
-    argv      the engine command; "{file:NAME}" in it becomes the path of files[NAME]
+    argv      the engine command (claude or codex, or `gh auth login|status|logout` to sign the
+              account in to GitHub); "{file:NAME}" in it becomes the path of files[NAME]
     cwd       folder inside this account's home ("" for ~/code)
     env       variables for the engine (run id, Slack thread, model); a few names are refused
     files     {NAME: text} written to a private folder for this turn (the system prompt)
@@ -35,6 +36,7 @@ import sys
 from pathlib import Path
 
 ENGINES = ("claude", "codex")
+GH_ALLOWED = (("auth", "login"), ("auth", "status"), ("auth", "logout"))  # gh only signs the account in or out
 PATH = "/usr/local/bin:/usr/bin:/bin"
 REFUSED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "BASH_ENV", "ENV", "IFS")
 KILL_AFTER = 10  # seconds between SIGTERM and SIGKILL
@@ -72,8 +74,10 @@ def resolve_cwd(home: Path, cwd: str) -> Path:
     return real
 
 
-def engine_path(name: str) -> str:
-    if name not in ENGINES:
+def engine_path(name: str, args: list = ()) -> str:
+    if name == "gh" and tuple(args[:2]) in GH_ALLOWED:
+        pass
+    elif name not in ENGINES:
         fail(f"not an engine: {name}")
     found = shutil.which(name, path=PATH)
     if not found:
@@ -184,7 +188,7 @@ def main() -> int:
     run_id = str((spec.get("env") or {}).get("NEO_RUN_ID") or os.getpid())
     folder, paths = write_files(home, run_id, spec.get("files"))
     argv = fill(spec["argv"], paths)
-    argv[0] = engine_path(os.path.basename(argv[0]))  # neo's path to it may differ; use this machine's
+    argv[0] = engine_path(os.path.basename(argv[0]), argv[1:])  # neo's path to it may differ; use this machine's
     print(f"neo-run: {home.name} in {cwd}; logins " + " ".join(f"{k}={v}" for k, v in used.items()), file=sys.stderr)
     sys.stderr.flush()
 

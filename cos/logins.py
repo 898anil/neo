@@ -6,6 +6,7 @@ login it saves is theirs (~/.claude, ~/.codex in their home) and their runs use 
           link and passes the code they reply with to the CLI's stdin.
   codex   `codex login --device-auth` prints a link and a one-time code; it finishes by itself once
           they enter the code in the browser.
+  gh      `gh auth login --web` does the same for GitHub (and sets git up to use it over https).
 A sign-in that nobody finishes is stopped after WAIT_SECONDS.
 """
 
@@ -21,7 +22,7 @@ from typing import Optional
 
 from . import accounts
 
-TOOLS = ("claude", "codex")
+TOOLS = ("claude", "codex", "gh")
 WAIT_SECONDS = 15 * 60
 ARGV = {
     ("claude", "login"): ["claude", "auth", "login"],
@@ -30,6 +31,9 @@ ARGV = {
     ("codex", "login"): ["codex", "login", "--device-auth"],
     ("codex", "logout"): ["codex", "logout"],
     ("codex", "status"): ["codex", "login", "status"],
+    ("gh", "login"): ["gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"],
+    ("gh", "logout"): ["gh", "auth", "logout", "--hostname", "github.com"],
+    ("gh", "status"): ["gh", "auth", "status", "--hostname", "github.com"],
 }
 _URL = re.compile(r"https://[^\s<>\"']+")
 _DEVICE_CODE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4,6}\b")
@@ -94,7 +98,7 @@ class Login:
 
     def link(self, timeout: float = 60) -> tuple[str, Optional[str]]:
         """(sign-in link, codex's one-time code or None). Raises RuntimeError when the CLI shows none."""
-        if self.tool == "codex":
+        if self.tool != "claude":
             found = self._wait_for(lambda text: _URL.search(text) and _DEVICE_CODE.search(text), timeout)
         else:
             found = self._wait_for(lambda text: _URL.search(text), timeout)
@@ -103,7 +107,7 @@ class Login:
             self.stop()
             raise RuntimeError(_tail(text) or "the sign-in didn't start")
         code = _DEVICE_CODE.search(text)
-        return _URL.search(text).group(0), (code.group(0) if self.tool == "codex" and code else None)
+        return _URL.search(text).group(0), (code.group(0) if self.tool != "claude" and code else None)
 
     def answer(self, code: str, timeout: float = 90) -> tuple[bool, str]:
         """Pass the browser's code to `claude auth login`. (signed in, what to tell them)."""
@@ -178,7 +182,7 @@ def signed_in(account: str, tool: str) -> Optional[bool]:
             return bool(json.loads(match.group(0)).get("loggedIn")) if match else None
         except json.JSONDecodeError:
             return None
-    if "not logged in" in out.lower():
+    if "not logged in" in out.lower() or "not logged into" in out.lower():
         return False
     return True if code == 0 and "logged in" in out.lower() else None
 
