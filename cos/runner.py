@@ -89,31 +89,66 @@ def cli_path(engine: str) -> str:
     return os.environ.get(f"{engine.upper()}_CLI_PATH") or shutil.which(engine) or engine
 
 
+def _slack_target(meta: dict) -> Optional[tuple[str, str]]:
+    channel, thread = meta.get("slack_channel"), meta.get("slack_thread")
+    return (str(channel), str(thread)) if channel and thread else None
+
+
+def run_context(meta: dict) -> Optional[str]:
+    """Where this run answers. Agents register deploy watches with the deploy's slack_channel and
+    slack_thread; never told its thread, an agent wrote null and deploy-watch refused the watch."""
+    target = _slack_target(meta)
+    if not target:
+        return None
+    return (f"This run answers in Slack channel {target[0]}, thread_ts {target[1]} (also $NEO_SLACK_CHANNEL and "
+            "$NEO_SLACK_THREAD). Use exactly these as slack_channel and slack_thread for any deploy-watch "
+            "entry you register.")
+
+
+def engine_env(meta: dict) -> dict:
+    """The bot's environment plus this run's id and Slack thread (none inherited from the bot)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("NEO_SLACK_CHANNEL", "NEO_SLACK_THREAD")}
+    env["NEO_RUN_ID"] = meta["id"]
+    target = _slack_target(meta)
+    if target:
+        env["NEO_SLACK_CHANNEL"], env["NEO_SLACK_THREAD"] = target
+    return env
+
+
 def build_command(
     engine: str, prompt: str, mode: str, session_id: Optional[str] = None, system: Optional[str] = None,
     extra_args: Optional[list[str]] = None, conclude: bool = False,
+    system_file: Optional[str] = None, prompt_on_stdin: bool = False, model: Optional[str] = None,
 ) -> list[str]:
     """system: standing instructions. Claude takes them natively (--append-system-prompt, on every
     turn); Codex has no equivalent flag, so they lead the first prompt of the session.
     extra_args: more CLI options for the engine (for example Claude's --allowedTools, --json-schema).
     conclude: an agent session (it has the agent brief): Claude gets the Stop hook that makes each turn end
-    with a Status line (cos/conclusion.py). Scheduled jobs leave it off."""
+    with a Status line (cos/conclusion.py). Scheduled jobs leave it off.
+    system_file / prompt_on_stdin: keep the brief, memory and prompt off the command line, where any
+    user on this Mac can read them with `ps`. Claude reads system_file (--append-system-prompt-file);
+    the prompt goes on stdin, built by stdin_prompt().
+    model: the person's own choice (cos/people.py); else CLAUDE_MODEL / CODEX_MODEL."""
     extra_args = list(extra_args or [])
-    model = os.environ.get(f"{engine.upper()}_MODEL")
+    model = model or os.environ.get(f"{engine.upper()}_MODEL")
     if engine == "claude":
         cmd = [cli_path("claude"), "-p", "--output-format", "stream-json", "--verbose"]
         cmd += CLAUDE_MODE_FLAGS[mode]
         if conclude:
             cmd += ["--settings", conclusion.settings_json()]
-        if system:
+        if system_file:
+            cmd += ["--append-system-prompt-file", system_file]
+        elif system:
             cmd += ["--append-system-prompt", system]
         if model:
             cmd += ["--model", model]
         if session_id:
             cmd += ["--resume", session_id]
+        if prompt_on_stdin:
+            return cmd + extra_args
         return cmd + extra_args + ["--", prompt]  # "--": a prompt starting with "-" is not an option
     if engine == "codex":
-        if system and not session_id:
+        if system and not session_id and not prompt_on_stdin:
             prompt = f"{system}\n\n---\n\n{prompt}"
         if mode == "full":
             access = ["--dangerously-bypass-approvals-and-sandbox"]
@@ -131,8 +166,25 @@ def build_command(
         cmd += ["--"]  # a prompt (or id) starting with "-" is not an option
         if session_id:
             cmd += [session_id]
-        return cmd + [prompt]
+        return cmd + ["-" if prompt_on_stdin else prompt]  # "-": codex reads the prompt from stdin
     raise ValueError(f"unknown engine: {engine}")
+
+
+def stdin_prompt(engine: str, prompt: str, session_id: Optional[str] = None, system: Optional[str] = None) -> str:
+    """What the engine reads on stdin with build_command(prompt_on_stdin=True): the prompt, and for
+    Codex's first turn the standing instructions ahead of it (Codex has no system-prompt flag)."""
+    if engine == "codex" and system and not session_id:
+        return f"{system}\n\n---\n\n{prompt}"
+    return prompt
+
+
+def write_private(path: Path, text: str) -> Path:
+    """Write text readable only by this user (0600), replacing any earlier file."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.chmod(path, 0o600)  # O_CREAT's mode is ignored when the file already existed
+    return path
 
 
 def validate_request(engine: str, prompt: str, cwd: str, mode: str) -> Optional[str]:
@@ -319,16 +371,23 @@ class Run:
             turn = meta["turns"] + 1
             self._cancelled = False
             self._last_error, self._turn_answered = None, False
-            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None, "retry_owner": None})
+            self.write_meta({**meta, "status": "running", "turns": turn, "pid": None, "retry_owner": None, "conclusion": None})
 
         engine, mode, cwd = meta["engine"], meta["mode"], meta["cwd"]
         text = prompt if is_follow_up else meta["prompt"]
         emit = on_event or (lambda _e: None)
         try:
-            cmd = build_command(engine, text, mode, meta["session_id"] if is_follow_up else None,
-                                system=meta.get("system_prompt"), conclude=bool(meta.get("conclude")),
+            system = "\n\n".join(filter(None, (meta.get("system_prompt"), run_context(meta)))) or None
+            session_id = meta["session_id"] if is_follow_up else None
+            # Brief, memory and prompt go through 0600 files, never argv (readable by anyone via `ps`).
+            system_file = (str(write_private(self.dir / "system.md", system))
+                           if system and engine == "claude" else None)
+            prompt_path = write_private(self.dir / "prompt.txt", stdin_prompt(engine, text, session_id, system))
+            cmd = build_command(engine, text, mode, session_id,
+                                system=system, conclude=bool(meta.get("conclude")),
                                 extra_args=(meta.get("cli_args") or [])
-                                + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []))
+                                + (meta.get("first_turn_args") or [] if keep_first_turn_args or not is_follow_up else []),
+                                system_file=system_file, prompt_on_stdin=True, model=meta.get("model"))
             emit(self.append_event({"kind": "prompt", "title": "You", "body": text, "data": {}}, turn))
             raw_path = self.dir / "raw.jsonl"
             offset = raw_path.stat().st_size if raw_path.exists() else 0
@@ -336,9 +395,9 @@ class Run:
             self._stderr_offset = stderr_path.stat().st_size if stderr_path.exists() else 0
             # The engine writes straight to files, not to a pipe into this process: if the bot
             # restarts, the engine keeps running and a new bot picks up where this one stopped.
-            with raw_path.open("ab") as out, (self.dir / "stderr.log").open("ab") as err:
-                self._proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
-                                              start_new_session=True)
+            with raw_path.open("ab") as out, (self.dir / "stderr.log").open("ab") as err, prompt_path.open("rb") as inp:
+                self._proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err, stdin=inp,
+                                              start_new_session=True, env=engine_env(meta))
         except FileNotFoundError as exc:
             emit(self.append_event({"kind": "error", "title": "Engine not found", "body": str(exc), "data": {}}, turn))
             return self.update_meta(status="failed", pid=None)
@@ -442,6 +501,8 @@ class Run:
                 cost_usd=round(cost, 4),
                 raw_offset=offset,
                 last_turn_seconds=round(time.time() - started, 1),
+                # The agent's own Status line for this turn (cos/conclusion.py); home sorts the run by it.
+                conclusion=conclusion.status_of(last_text) if status == "done" else None,
             )
         return final
 
@@ -514,6 +575,37 @@ def save_rate_limits(info: dict) -> None:
         tmp.replace(cos_home() / "usage.json")
     except OSError:
         pass
+
+
+def claude_available(now: Optional[float] = None) -> tuple[bool, Optional[int]]:
+    """Whether the latest Claude quota event permits another scheduled attempt.
+
+    A missing or malformed record never blocks work.  The record is only a backoff
+    signal after Claude explicitly rejected a request, and all exhausted windows
+    must have reset before a scheduler should submit again.
+    """
+    try:
+        record = json.loads((cos_home() / "usage.json").read_text())
+    except (OSError, ValueError):
+        return True, None
+    if not isinstance(record, dict):
+        return True, None
+    if record.get("status") != "rejected":
+        return True, None
+    windows = record.get("windows")
+    if not isinstance(windows, dict):
+        return True, None
+    now = time.time() if now is None else now
+    resets = []
+    for window in windows.values():
+        if not isinstance(window, dict):
+            continue
+        try:
+            if float(window.get("used")) >= 1 and float(window.get("resets_at")) > now:
+                resets.append(int(window["resets_at"]))
+        except (OverflowError, TypeError, ValueError):
+            continue
+    return (False, max(resets)) if resets else (True, None)
 
 
 def usage_summary() -> dict:

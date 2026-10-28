@@ -25,7 +25,7 @@ from typing import Optional
 
 from . import cards, digest_view, fleet
 from .config import owner_fields, owner_name
-from .runner import Run, cli_path, cos_home, valid_run_id
+from .runner import Run, claude_available, cli_path, cos_home, valid_run_id
 
 log = logging.getLogger(__name__)
 MODEL = os.environ.get("NEO_DIGEST_MODEL", "claude-sonnet-5-5")
@@ -46,7 +46,8 @@ def _rows(props: dict, most: int) -> dict:
 SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["kind", "state", "state_note", "intent", "outcome_result", "outcome_headline", "needs_you", "plan",
-                 "chain", "numbers", "changes", "checks", "timeline", "next", "confidence", "confidence_why", "evidence"],
+                 "chain", "options", "choice_why", "choice_flip", "numbers", "changes", "checks", "timeline", "next",
+                 "confidence", "confidence_why", "evidence"],
     "properties": {
         "kind": {"type": "string", "enum": KINDS},
         "state": {"type": "string", "enum": ["working", "needs_you", "blocked", "done", "failed", "stopped"]},
@@ -58,6 +59,8 @@ SCHEMA = {
         "plan": _rows({"step": _S, "status": {"type": "string", "enum": ["done", "doing", "todo", "failed", "skipped"]}, "note": _S}, 8),
         "chain": {"type": "object", "required": ["title", "nodes"], "additionalProperties": False, "properties": {
             "title": _S, "nodes": _rows({"label": _S, "detail": _S, "tone": _TONE, "via": _S}, 6)}},
+        "options": _rows({"name": _S, "picked": {"type": "boolean"}, "pros": _S, "cons": _S}, 4),
+        "choice_why": _S, "choice_flip": _S,
         "numbers": _rows({"value": _S, "label": _S, "tone": _TONE}, 4),
         "changes": _rows({"path": _S, "added": {"type": ["integer", "null"]}, "removed": {"type": ["integer", "null"]},
                           "kind": {"type": "string", "enum": ["new", "edited", "deleted"]}}, 10),
@@ -93,6 +96,11 @@ Write for a phone screen: plain words, no markdown, no emoji, no sentence over 1
   node (empty on the last). rca: the cause chain from trigger to symptom, the broken node tone "broken". plan: the
   new flow, new parts "new", changed parts "changed". fix: the code path the change sits on, the changed part
   "changed" or "new". investigation: question, the sources checked, the answer. title at most 4 words.
+- options: when the work chooses between ways to do something (a plan, a recommendation, a fix approach), the
+  2 to 4 options the log weighs, the chosen one first with picked true and the rest false: name at most 5 words,
+  pros and cons each at most 12 words. Only options the log names; an empty list when it weighed no alternatives.
+- choice_why: why the pick beats the others, at most 18 words. choice_flip: the fact or result that would change
+  the pick, at most 14 words. Both empty when options is empty.
 - numbers: up to 4 stat tiles from counts in the log (value at most 8 characters, label at most 4 words);
   tone broken for bad numbers, ok for good ones, neutral otherwise.
 - changes: files changed, with lines added and removed when the log shows them (null otherwise) and kind.
@@ -116,6 +124,17 @@ _EVENTS = re.compile(r"""\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.I)
 _BAD_URLS = re.compile(r"""(\s(?:href|src|xlink:href|action|formaction|srcset)\s*=\s*)"""
                        r"""(?:"\s*(?:javascript|data|vbscript):[^"]*"|'\s*(?:javascript|data|vbscript):[^']*'|"""
                        r"""(?:javascript|data|vbscript):[^\s>]*)""", re.I)
+
+# A plan visual the agent published (Artifact tool): the digest links to it, since claude.ai pages cannot be framed.
+VISUAL = digest_view.VISUAL
+
+
+def visual_url(events: list[dict]) -> str:
+    """The last artifact link in the agent's own words, read whole: not the Slack thread or tool output (someone
+    else's links), and not material(), which trims long results and keeps only the end of the log."""
+    found = [u for e in events if e.get("kind") in ("text", "result") for u in VISUAL.findall(str(e.get("body") or ""))]
+    return found[-1] if found else ""
+
 
 _building: set[str] = set()
 _failed: dict[str, float] = {}
@@ -193,14 +212,16 @@ def needs_build(target: dict, have: Optional[dict], now: float) -> bool:
 
 def make(title: str, material: str, needs_you: str = "", timeout: int = 420) -> Optional[dict]:
     # The log is untrusted text: no tools, no MCP servers, no user settings or hooks, an empty cwd.
+    if not claude_available()[0]:
+        return None
     needs = f"\nThe card for this task says it needs {owner_name()} for: {needs_you}" if needs_you else ""
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
-           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA),
-           "--", PROMPT.format(title=title, needs=needs, material=material[-cards.MATERIAL_CHARS:], **owner_fields())]
+           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(SCHEMA)]
+    prompt = PROMPT.format(title=title, needs=needs, material=material[-cards.MATERIAL_CHARS:], **owner_fields())
     cwd = Path(tempfile.gettempdir()) / "neo-digest"
     try:
         cwd.mkdir(exist_ok=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=str(cwd))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=prompt, cwd=str(cwd))  # stdin, not argv: `ps` shows argv
         raw = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -213,12 +234,14 @@ def make(title: str, material: str, needs_you: str = "", timeout: int = 420) -> 
 
 def build(target: dict) -> Optional[dict]:
     """Make and store the digest for one target; None when there is nothing to read or the call failed."""
-    text = cards.material(cards.load_events(target))
+    events = cards.load_events(target)
+    text = cards.material(events)
     if not text.strip():
         return None
     out = make(target["title"], text, (cards.get(target["key"]) or {}).get("needs_you", ""))
     if out is None:
         return None
+    out["visual_url"] = visual_url(events)
     digest = {"kind": out["kind"], "data": out, "source_mtime": target["mtime"],
               "made_at": time.time(), "model": MODEL, "version": VERSION}
     put(target["key"], digest)

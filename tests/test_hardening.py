@@ -235,6 +235,16 @@ class FleetAsksTest(unittest.TestCase):
             self.assertEqual(first[0], "Done?")
             self.assertEqual(first[2], 1)
 
+    def test_last_text_is_only_the_latest_turns_reply(self):
+        from cos import fleet
+        user = lambda t: json.dumps({"type": "user", "message": {"content": t}}) + "\n"  # noqa: E731
+        said = lambda t: json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}) + "\n"  # noqa: E731
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            path.write_text(user("go") + said("Status: needs-you — pick A or B") + user("A"))
+            # interrupted before it said anything: the old ask is not this turn's reply
+            self.assertEqual(fleet._last_text_for("claude", path, path.stat().st_mtime)[0], "")
+
     def test_valid_target(self):
         from cos import fleet
         self.assertTrue(fleet.valid_target("default", "w12:p3"))

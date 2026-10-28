@@ -94,6 +94,12 @@ class CardsTest(unittest.TestCase):
         with patch("subprocess.run", return_value=Proc(json.dumps({"type": "result", "structured_output": GOOD}))):
             self.assertEqual(cards.make_card("t", "m")["result"], "worked")
 
+    def test_make_card_skips_when_claude_quota_is_exhausted(self):
+        from cos import cards
+        with patch.object(cards, "claude_available", return_value=(False, 2_000), create=True), \
+             patch("subprocess.run", side_effect=AssertionError("card should be skipped")):
+            self.assertIsNone(cards.make_card("t", "material"))
+
     def test_links_may_be_omitted(self):
         # A required "links" with nothing to put in it made the model write `"links": ,` (invalid
         # JSON): 66 of 68 StructuredOutput parse failures. Optional, and filled in when left out.

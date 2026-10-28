@@ -3,9 +3,11 @@
 Plain Markdown, so you can read, edit, delete and version it like any notes. In NEO_MEMORY_DIR
 (default ~/.neo/memory):
 
-  me.md             your standing rules, preferences and decisions, in your words
-  lessons.md        mistakes: what went wrong, and what to do instead
-  repos/<repo>.md   rules and lessons that only apply in one repository
+  me.md             the owner's standing rules, preferences and decisions, in their words
+  team.md           rules for everyone's runs (only the owner adds them: "remember for team: ...")
+  people/<id>.md    each other person's own rules, by Slack user id (see people.py)
+  lessons.md        mistakes: what went wrong, and what to do instead (shared by everyone)
+  repos/<repo>.md   rules and lessons that only apply in one repository (shared by everyone)
 
 Each entry is one bullet, with where it came from in a comment that Markdown viewers hide:
 
@@ -13,8 +15,9 @@ Each entry is one bullet, with where it came from in a comment that Markdown vie
 
 Written: after a session you drove finishes (the card call proposes at most a few items, see
 cards.py), and when you say "remember ..." in Slack. Routine work that went fine leaves nothing.
-Read: brief(cwd) is added to the standing instructions of every agent neo starts, Claude or Codex,
-so a fact learned in one engine is known to the other. Memory is notes, not orders: the brief says
+Read: brief(cwd, user) is added to the standing instructions of every agent neo starts, Claude or
+Codex, so a fact learned in one engine is known to the other. A run gets the team rules, the rules of
+the person who asked for it (me.md for the owner), and the shared repo notes and lessons. Memory is notes, not orders: the brief says
 your current request wins.
 
 Not to be confused with memory.py, which searches the CLIs' own transcripts.
@@ -35,12 +38,12 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Optional
 
-ME, LESSONS = "me.md", "lessons.md"
+ME, LESSONS, TEAM, PEOPLE = "me.md", "lessons.md", "team.md", "people"
 KINDS = ("rule", "lesson")
 MAX_ENTRY = 300  # characters in one entry
 MAX_PER_CAPTURE = 3  # entries one finished session may add
 BRIEF_BUDGET = 6000  # characters of memory in an agent's brief
-HEADINGS = {ME: "# What you told me", LESSONS: "# Lessons from mistakes"}
+HEADINGS = {ME: "# What you told me", LESSONS: "# Lessons from mistakes", TEAM: "# Team rules"}
 _ENTRY_RE = re.compile(r"^- (?P<text>.+?)(?:\s*<!--\s*(?P<meta>.*?)\s*-->)?\s*$")
 _REPO_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _COMMENT_RE = re.compile(r"<!-*|-*->")
@@ -74,6 +77,20 @@ def _repo_file(repo: str) -> Optional[Path]:
     return memory_dir() / "repos" / f"{name}.md" if name else None
 
 
+def rules_file(user: Optional[str] = None, team: bool = False) -> Path:
+    """Where rules go: team.md for the team, me.md for the owner (user None or the owner's id),
+    people/<id>.md for anyone else."""
+    from . import people
+
+    if team:
+        return memory_dir() / TEAM
+    if people.is_owner(user):
+        return memory_dir() / ME
+    if not people.valid_user(user):
+        raise ValueError(f"not a Slack user id: {user!r}")
+    return memory_dir() / PEOPLE / f"{user}.md"
+
+
 def _clean(text: str) -> str:
     text = " ".join(str(text or "").split())  # one line
     while True:  # nested markers ("<<!--!--") must not survive one pass
@@ -103,15 +120,17 @@ def entries(path: Path) -> list[dict]:
     return out
 
 
-def add(text: str, kind: str, repo: Optional[str] = None, source: str = "") -> Optional[str]:
+def add(text: str, kind: str, repo: Optional[str] = None, source: str = "",
+        user: Optional[str] = None, team: bool = False) -> Optional[str]:
     """Append one entry. Returns the file it went to, relative to the memory folder ("me.md",
-    "repos/api.md"); None when it is empty, of an unknown kind, or already there."""
+    "repos/api.md", "people/U123.md"); None when it is empty, of an unknown kind, or already there.
+    user / team: whose rule it is (see rules_file); lessons and repo notes are shared either way."""
     text = _clean(text)
     if not text or kind not in KINDS:
         return None
     path = _repo_file(repo) if repo else None
     if path is None:
-        path = memory_dir() / (ME if kind == "rule" else LESSONS)
+        path = rules_file(user, team) if kind == "rule" else memory_dir() / LESSONS
     meta = " ".join(x for x in (date.today().isoformat(), kind, _clean(source)[:80]) if x)
     with _locked():
         if any(_norm(e["text"]) == _norm(text) or (kind == "lesson" and adds_little(text, e["text"])) for e in entries(path)):
@@ -123,6 +142,8 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "") -> O
             current = None
         if current is None:
             heading = HEADINGS.get(path.name) if path.parent == memory_dir() else None
+            if path.parent.name == PEOPLE:
+                heading = f"# What <@{path.stem}> told me"
             lead = (heading or f"# {path.stem}") + "\n\n"
         else:
             lead = "" if not current or current.endswith(b"\n") else "\n"
@@ -206,11 +227,17 @@ def from_owner(text: str, owner_text: str) -> bool:
     return len(words & _words(owner_text)) >= max(1, RULE_OVERLAP * len(words))
 
 
-def capture(card: dict, cwd: Optional[str], source: str, owner_text: str = "") -> int:
+def capture(card: dict, cwd: Optional[str], source: str, owner_text: str = "", user: Optional[str] = None,
+            role: Optional[str] = None) -> int:
     """Store what a finished session's card proposes to remember. Returns how many were added.
-    owner_text: everything the owner wrote in the session; a rule must come from it."""
+    owner_text: everything the person who drove the session wrote; a rule must come from it.
+    user: that person's Slack id (None for the owner); their rules go to their own file.
+    role: the role the run had (people.ROLES); their current role when not recorded."""
+    from . import people
+
     added = 0
     repo = None
+    restricted = (role or people.role(user)) != "full"
     for item in card.get("remember") or []:
         if added >= MAX_PER_CAPTURE:
             break
@@ -218,23 +245,31 @@ def capture(card: dict, cwd: Optional[str], source: str, owner_text: str = "") -
             continue
         if item["kind"] == "rule" and not from_owner(item.get("text", ""), owner_text):
             continue
+        if restricted and item["kind"] == "lesson":
+            continue  # shared lessons reach every run, the owner's too: only full-role sessions add them
+        if restricted:
+            item = {**item, "scope": "own"}  # their repo rules stay theirs
         if item.get("scope") == "repo" and repo is None:
             repo = repo_of(cwd) or ""
-        if add(item.get("text", ""), item["kind"], repo=(repo or None) if item.get("scope") == "repo" else None, source=source):
+        if add(item.get("text", ""), item["kind"], repo=(repo or None) if item.get("scope") == "repo" else None,
+               source=source, user=user):
             added += 1
     return added
 
 
-_REMEMBER_RE = re.compile(r"^\s*remember(?:\s+in\s+(?P<repo>[\w.-]+)\s*:|\s*:|\s+that\b)\s*(?P<text>\S.*)$", re.I | re.S)
+_REMEMBER_RE = re.compile(r"^\s*remember(?:\s+in\s+(?P<repo>[\w.-]+)\s*:|\s+for\s+(?:the\s+)?(?P<team>team)\s*:|\s*:|\s+that\b)\s*(?P<text>\S.*)$",
+                          re.I | re.S)
+TEAM_REPO = "@team"  # parse_remember's "repo" for "remember for team: X"
 
 
 def parse_remember(text: str) -> Optional[tuple[str, Optional[str]]]:
-    """"remember: X", "remember that X", "remember in <repo>: X" -> (X, repo). None otherwise, so a
-    task that merely starts with the word ("remember the bug? check it") still runs as a task."""
+    """"remember: X", "remember that X", "remember in <repo>: X" -> (X, repo); "remember for team: X"
+    -> (X, TEAM_REPO). None otherwise, so a task that merely starts with the word ("remember the bug?
+    check it") still runs as a task."""
     m = _REMEMBER_RE.match(text or "")
     if not m or m.group("text").rstrip().endswith("?"):
         return None
-    return m.group("text").strip(), m.group("repo")
+    return m.group("text").strip(), TEAM_REPO if m.group("team") else m.group("repo")
 
 
 def _section(title: str, path: Path, budget: int) -> str:
@@ -249,29 +284,51 @@ def _section(title: str, path: Path, budget: int) -> str:
     return head + "\n".join(lines) if lines else ""
 
 
-def brief(cwd: Optional[str], budget: int = BRIEF_BUDGET) -> str:
-    """The memory for an agent working in cwd: your rules, then notes for its repo, then lessons,
-    newest first within each, cut to the budget. Empty when there is nothing to tell."""
+def brief(cwd: Optional[str], budget: int = BRIEF_BUDGET, user: Optional[str] = None) -> str:
+    """The memory for an agent working in cwd for `user` (None: the owner): team rules, that person's
+    rules, then notes for its repo, then lessons, newest first within each, cut to the budget. Nobody
+    gets another person's rules. Empty when there is nothing to tell."""
+    from . import people
+
     repo = repo_of(cwd)
-    parts = [("What the owner told you (standing rules)", memory_dir() / ME, budget // 2)]
+    try:
+        own = rules_file(user)
+    except ValueError:
+        own = None  # not a real Slack id: team rules and shared notes only
+    who = "the owner" if people.is_owner(user) else f"<@{user}>"
+    parts = [("Team rules (everyone's runs)", memory_dir() / TEAM, budget // 6)]
+    if own:
+        parts.append((f"What {who} told you (their standing rules)", own, budget // 2))
     if repo and _repo_file(repo):
         parts.append((f"Notes for the {repo} repository", _repo_file(repo), budget // 4))
     parts.append(("Lessons from earlier mistakes", memory_dir() / LESSONS, budget // 4))
-    sections, left = [], budget
+    sections, left, carry = [], budget, 0
     for i, (title, path, share) in enumerate(parts):
-        cap = left if i == len(parts) - 1 else min(left, share)  # unused share rolls forward
+        cap = left if i == len(parts) - 1 else min(left, share + carry)  # unused share rolls forward
         text = _section(title, path, cap)
+        carry = cap - len(text)
         if text:
             sections.append(text)
             left -= len(text)
     if not sections:
         return ""
-    return ("## neo's memory\nNotes neo kept from earlier sessions: the owner's rules and lessons from past mistakes. "
+    return ("## neo's memory\nNotes neo kept from earlier sessions: team rules, the asker's own rules, and lessons from past mistakes. "
             "Use them, but if one conflicts with the current request, the current request wins.\n\n" + "\n\n".join(sections))
 
 
-def all_files() -> list[dict]:
-    """Every memory file, for the dashboard: {name, path, entries}."""
+def all_files(user: Optional[str] = None, everyone: bool = True) -> list[dict]:
+    """Memory files, for the dashboard and `@neo memory`: {name, path, entries}. everyone=True: all of
+    them (the owner's view); otherwise the team's, `user`'s own and the shared ones."""
     root = memory_dir()
-    paths = [root / ME, root / LESSONS] + sorted((root / "repos").glob("*.md"))
+    if everyone:
+        own = [root / ME, root / TEAM] + sorted((root / PEOPLE).glob("*.md"))
+    else:
+        own = [root / TEAM] + ([rules_file(user)] if user is None or _valid(user) else [])
+    paths = own + [root / LESSONS] + sorted((root / "repos").glob("*.md"))
     return [{"name": str(p.relative_to(root)), "path": str(p), "entries": entries(p)} for p in paths if p.exists()]
+
+
+def _valid(user: str) -> bool:
+    from . import people
+
+    return people.valid_user(user)

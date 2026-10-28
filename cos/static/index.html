@@ -308,6 +308,10 @@
   .row-wrap .read:hover { background: var(--raise); }
   .row-wrap .row-link { padding-right: 84px; }
   .row-wrap .row-link .when { margin-right: -70px; }
+  .row-wrap .row-acts { position: absolute; right: 12px; bottom: 9px; display: flex; gap: 6px; }
+  .row-wrap .row-acts .read { position: static; }
+  .row-wrap.two .row-link { padding-right: 150px; }
+  .row-wrap.two .row-link .when { margin-right: -136px; }
   .lamp.sm.stuck { box-shadow: none; }
   .today.reading .body { font-size: 16px; line-height: 1.6; max-height: none; }
   .today.reading .body::after { display: none; }
@@ -334,6 +338,13 @@
   .ask .acts .btn { height: 28px; padding: 0 10px; font-size: 13px; }
   .memory-list { margin: 4px 0 8px; padding-left: 18px; font-size: 13.5px; line-height: 1.45; }
   .memory-list li { margin: 3px 0; }
+  .proposal { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+  .proposal .kind { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  .proposal .why { font-size: 13px; color: var(--muted); margin: 4px 0 0; }
+  .proposal .act { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .proposal details { font-size: 13px; margin-top: 6px; }
+  .proposal details li { margin: 2px 0; }
+  .proposal .kept { font-weight: 600; }
   .ask details.info > summary { margin-top: 6px; color: var(--faint); font-size: 12.5px; cursor: pointer; list-style: none; }
   .ask details.info > summary:hover { color: var(--text); }
   .ask details.info > summary::-webkit-details-marker { display: none; }
@@ -727,6 +738,43 @@ async function loadMemory() {
   try { memoryData = await api("/api/memory"); memoryErr = null; } catch (err) { memoryErr = err.message; /* keep the last one */ }
   return memoryData;
 }
+// The latest nightly autonomy review (cos/autonomy.py): what you had to step in on, and the
+// proposals it drafted. Apply here does the same as `@neo apply N` in the review's Slack thread.
+const PROPOSAL_KIND = { rule: "Rule", lesson: "Lesson", owner_action: "Needs you", merge: "Tidy memory" };
+async function applyProposals(review, which, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/memory/apply", { method: "POST", body: JSON.stringify({ review: review.id, which }) });
+    const done = r.results.filter((x) => !/^(already|no such|only you)/.test(x.message)).length;
+    toast(r.results.length === 1 ? r.results[0].message : `Applied ${done} of ${r.results.length}`);
+    if (memoryData) memoryData.review = r.review;
+    memoryAt = 0; refresh(); // the memory list below changed too
+  } catch (err) { toast(err.message); if (btn) btn.disabled = false; }
+}
+function reviewSection(rv) {
+  if (!rv) return null;
+  const open = rv.proposals.filter((p) => !p.applied && p.kind !== "owner_action");
+  const counts = Object.entries(rv.buckets).map(([k, v]) => `${v} ${k}`).join(" · ");
+  const extra = [rv.failed ? `${rv.failed} run${rv.failed === 1 ? "" : "s"} failed` : "", rv.blocks ? `${rv.blocks} permission block${rv.blocks === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ");
+  const card = (p) => h("div", { class: "proposal" },
+    h("div", { class: "kind" }, `${p.n}. ${PROPOSAL_KIND[p.kind] || p.kind}${p.repo ? ` · ${p.repo}` : ""}`),
+    h("div", {}, p.kind === "merge" ? `Drop ${p.text.replace(/^drop /, "")}` : p.text),
+    p.why ? h("p", { class: "why" }, p.why) : null,
+    p.kind === "merge" ? h("details", {}, h("summary", {}, "What it deletes"),
+      p.merges.map((m) => h("div", {}, h("div", { class: "kept" }, `${m.file}: keeps “${m.text}”`),
+        h("ul", { class: "memory-list" }, m.drop.map((d) => h("li", {}, d)))))) : null,
+    h("div", { class: "act" },
+      p.applied ? "Applied"
+        : p.kind === "owner_action" ? "Only you can do this one"
+        : h("button", { class: "btn go", onclick: (e) => applyProposals(rv, [p.n], e.currentTarget) }, "Apply")));
+  return [
+    h("h2", { class: "section" }, `Autonomy review, ${rv.date}`),
+    h("p", { class: "sub" }, `You stepped in ${rv.stepped} time${rv.stepped === 1 ? "" : "s"} across ${rv.runs} run${rv.runs === 1 ? "" : "s"}.` + (counts ? ` ${counts}.` : "") + (extra ? ` ${extra}.` : "") + (rv.posted ? " Also in Slack." : "")),
+    rv.proposals.length ? rv.proposals.map(card) : h("p", { class: "empty" }, "No proposals in this review."),
+    open.length > 1 ? h("p", { class: "note" },
+      h("button", { class: "btn", onclick: (e) => applyProposals(rv, open.map((p) => p.n), e.currentTarget) }, `Apply all ${open.length}`)) : null,
+  ];
+}
 // What neo learned from mistakes and from what you told it (cos/learn.py). Read-only here:
 // the files are plain Markdown on the Mac, edit or delete lines there.
 function renderMemory(o) {
@@ -736,6 +784,7 @@ function renderMemory(o) {
   const page = h("div", { class: "wrap" },
     h("header", { class: "hero" }, h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host), h("h1", {}, "Memory"),
       m ? h("p", { class: "sub" }, count ? `${count} things neo remembers, newest first.` : "Nothing yet.") : null),
+    m ? reviewSection(m.review) : null,
     !m ? h("p", { class: "empty" }, memoryErr ? `Couldn't load memory: ${memoryErr}` : "Loading…")
       : count ? m.files.filter((f) => f.entries.length).map((f) => [
         h("h2", { class: "section" }, label[f.name] || `In ${f.name.replace(/^repos\//, "").replace(/\.md$/, "")}`),
@@ -1059,6 +1108,8 @@ function decideCard(d, o) {
       const c = askCard(a);
       const info = d.card ? moreInfo(d.key, cardBits(d.card)) : null;
       if (info) c.insertBefore(info, c.querySelector(".acts, .reply"));
+      const acts = c.querySelector(".acts");
+      if (acts) acts.append(...sessionButtons(d)); else c.append(h("div", { class: "acts" }, ...sessionButtons(d)));
       return c;
     }
   }
@@ -1073,7 +1124,7 @@ function decideCard(d, o) {
   if (info) c.append(info);
   c.append(h("div", { class: "acts" }, d.do_it ? doItButton(d) : null,
     ...(d.kind === "loop" ? loopLinks(d, !d.do_it) : [h("a", { class: `btn ${d.do_it ? "quiet" : "primary"}`, ...linkAttrs(d.href) }, "Open")]), doneButton(d),
-    d.kind === "loop" ? loopButton(d, "mute", "Mute") : null));
+    d.kind === "loop" ? loopButton(d, "mute", "Mute") : null, ...sessionButtons(d)));
   return c;
 }
 function alsoLine(also) {
@@ -1100,20 +1151,20 @@ function unfinishedCard(u) {
     h("div", { class: "what" }, u.line || "Stopped without a summary. Open it to see where it got to."),
     moreInfo(u.key, [u.risk ? h("div", { class: "risk" }, h("b", {}, "Not done or not verified: "), u.risk) : null,
       u.next ? h("div", { class: "ev" }, h("b", {}, "If you do nothing: "), u.next) : null]),
-    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(u.href) }, "Open"), doneButton(u)));
+    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(u.href) }, "Open"), doneButton(u), ...sessionButtons(u)));
 }
 function waitingCard(m) {
   const close = h("button", { class: "btn quiet", onclick: async () => {
     close.disabled = true;
-    try { await api("/api/home/close", { method: "POST", body: JSON.stringify({ key: m.key }) }); toast("Closed"); refresh(); }
+    try { await api("/api/home/close", { method: "POST", body: JSON.stringify({ key: m.key }) }); toast("Dismissed"); refresh(); }
     catch (err) { toast(err.message); close.disabled = false; }
-  } }, "Close");
+  } }, "Dismiss");
   return h("div", { class: "ask" },
     h("div", { class: "who" }, h("span", { class: "lamp waiting" }), h("a", linkAttrs(m.href), m.title), h("span", {}, ago(m.at)), h("span", { class: "where" }, whereOf(m))),
     h("div", { class: "what" }, m.line),
     moreInfo(m.key, [m.recommend ? h("div", { class: "rec" }, h("b", {}, "Recommend: "), m.recommend) : null,
       m.also && m.also.length ? alsoLine(m.also) : null]),
-    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(m.href) }, "Open"), close));
+    h("div", { class: "acts" }, h("a", { class: "btn primary", ...linkAttrs(m.href) }, "Open"), close, ...sessionButtons(m)));
 }
 function regressedCard(r) {
   return h("div", { class: "ask regressed" },
@@ -1137,14 +1188,36 @@ function homeRow(m, lamp) {
     m.kind === "loop" ? h("span", { class: "s" }, stageBar(m.stage_index, m.loop && m.loop.regressed)) : null,
     line ? h("span", { class: "said" }, line + extra) : null);
 }
-// A home row with a Close button: loops (alerts, PRs) close every firing they carry; an idle
-// session closes its herdr workspace. Working agents have no button, stop them from their page.
+// Rename an agent or run as it shows on home. An agent's empty name goes back to its own terminal title.
+function renameItem(m) {
+  const name = prompt(m.kind === "agent" ? "Rename (empty = its own title)" : "Rename", m.title || "");
+  if (name === null || name.trim() === (m.title || "").trim()) return Promise.resolve();
+  if (m.kind === "agent") return actOn(m, "rename", { text: name });
+  if (!name.trim()) { toast("A task needs a name"); return Promise.resolve(); }
+  return api(`/api/runs/${enc(m.run_id)}/rename`, { method: "POST", body: JSON.stringify({ title: name }) });
+}
+function closeSession(m) {
+  const working = m.attention === "working" && !m.idle;
+  return confirm(`Close this session?${working ? " It is still working." : ""} The agent stops and its herdr pane is closed.`) ? actOn(m, "close") : Promise.resolve();
+}
+// Rename and Close as card buttons, for agents and runs on the Decide / Stopped / Waiting cards.
+function sessionButtons(d) {
+  if (d.kind !== "agent" && d.kind !== "run") return [];
+  const btn = (label, fn) => h("button", { class: "btn quiet", onclick: async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try { await fn(); refresh(); } catch (err) { toast(err.message); b.disabled = false; }
+  } }, label);
+  return [btn("Rename", () => renameItem(d)), d.kind === "agent" ? btn("Close session", () => closeSession(d)) : null].filter(Boolean);
+}
+// A home row with its buttons: loops (alerts, PRs) Close every firing they carry; an agent gets Rename
+// and Close (closes its herdr workspace, asking first); a run gets Rename.
 function homeItem(m, lamp) {
   const row = homeRow(m, lamp);
   if (m.kind === "loop") return h("div", { class: "row-wrap", "data-ids": (m.loop_ids || [m.loop.id]).join(",") }, row, markRead("Close", () =>
     Promise.all((m.loop_ids || [m.loop.id]).map((id) => api(`/api/loops/${enc(id)}/close`, { method: "POST", body: "{}" })))));
-  if (m.kind === "agent" && m.idle) return h("div", { class: "row-wrap" }, row, markRead("Close", () =>
-    confirm("Close this session? The agent stops and its herdr pane is closed.") ? actOn(m, "close") : Promise.resolve()));
+  if (m.kind === "agent") return h("div", { class: "row-wrap two" }, row,
+    h("span", { class: "row-acts" }, markRead("Rename", () => renameItem(m)), markRead("Close", () => closeSession(m))));
+  if (m.kind === "run") return h("div", { class: "row-wrap" }, row, markRead("Rename", () => renameItem(m)));
   return row;
 }
 function askBox() {

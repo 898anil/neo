@@ -12,7 +12,7 @@ import time
 from typing import Callable, Optional
 from urllib.parse import quote
 
-from . import fleet
+from . import conclusion, fleet
 from .loops import STAGE_LABELS, STAGES
 
 DECIDE_ATTENTION = {"approve", "reply", "stuck", "failed"}
@@ -20,6 +20,9 @@ DECIDE_ATTENTION = {"approve", "reply", "stuck", "failed"}
 # (continue it, redirect it, or close it) even when it asked nothing.
 UNFINISHED_RESULTS = {"partial", "failed", "unclear"}
 MERGED = STAGES.index("merged")
+# What the agent's own closing `Status:` line (cos/conclusion.py) says it needs. done / answered fall through
+# to the card; they only stop an idle agent from counting as "stopped without a conclusion".
+STATUS_NEEDS = {"needs-you": "you", "blocked": "you", "waiting": "others", "failed": "unfinished"}
 RESULT_WORDS = {"worked": "Worked", "partial": "Partly done", "failed": "Failed", "unclear": "Unclear", "answered": "Answered"}
 
 
@@ -158,6 +161,14 @@ def mention_row(m: dict, now: float) -> dict:
             "mention": {k: m.get(k, "") for k in ("id", "draft_reply", "neo_task", "evidence", "status", "sent_text")}}
 
 
+def status_of(it: dict) -> Optional[dict]:
+    """The latest stop's Status line: parsed from an agent's last reply, or recorded on a run's meta when its turn
+    ended (runner.py). Old runs and agents not started with the brief have none."""
+    if it["kind"] == "agent":
+        return conclusion.status_of(it.get("last_text") or "")
+    return it.get("conclusion") or None
+
+
 def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tuple[str, bool, dict]:
     """(needs, opened, card in effect) for one agent or run: what it needs from the owner right now.
 
@@ -183,7 +194,10 @@ def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tu
     # again) the old ask was answered; it must not come back as "opened, not answered" while the next card is
     # still being written, or forever if that card never lands.
     card_current = card.get("source_mtime", 0) >= (it["at"] or 0) - CARD_SLACK_SECONDS
-    open_ask = bool(card.get("needs_you")) and not_closed and (card_current or not opened)
+    status = status_of(it)
+    # An unread ask from an older stop stays, unless the latest stop's own Status line says how it ended (the
+    # owner may have answered in the terminal, which never marks the card seen).
+    open_ask = bool(card.get("needs_you")) and not_closed and (card_current or (not opened and not status))
     if it["attention"] in DECIDE_ATTENTION:
         return "you", False, card
     if open_ask and kind == "decide":
@@ -192,12 +206,18 @@ def needs_of(it: dict, card: Optional[dict], seen: Callable[[str], float]) -> tu
         return "others", False, card
     if it["attention"] == "working":
         return "working", False, card
+    by_status = STATUS_NEEDS.get((status or {}).get("state"))
+    if by_status and it["at"] and seen(waiting_key(it["key"])) < it["at"]:
+        # The agent said how its latest stop ended, so the row doesn't wait for the card writer (late, or wrong)
+        # or the NO_CONCLUSION_SECONDS fallback. This includes Slack runs: a Slack answer that ends needs-you or
+        # failed still needs the owner. Done closes it until the next stop.
+        return by_status, seen(it["key"]) >= it["at"], card if card_current else {}
     if (card.get("result") in UNFINISHED_RESULTS and not_closed and card_current
             and not (it["kind"] == "run" and it.get("source") == "slack")):
         # Stopped without finishing and asked nothing: someone has to continue, redirect or close it. A Slack
         # run already delivered its answer in the thread, so it is not left hanging here.
         return "unfinished", opened, card
-    if (it["kind"] == "agent" and it.get("prompts") and it["at"] and not card_current
+    if (it["kind"] == "agent" and it.get("prompts") and it["at"] and not card_current and not status
             and it.get("now", 0) - it["at"] >= NO_CONCLUSION_SECONDS and seen(waiting_key(it["key"])) < it["at"]):
         # Idle with nothing that says how its last stop ended: someone has to continue or close it. Done closes
         # it until the agent runs again. The stale card is not this stop's outcome, so it is dropped.
@@ -217,9 +237,11 @@ def annotate(overview: dict, cards_by_key: dict, seen: Callable[[str], float]) -
         return {**row, "needs": needs, "opened": opened, "result": card.get("result")}
     return {**overview,
             "agents": [tag(a, {"key": fleet._seen_key(a), "kind": "agent", "at": a.get("last_active") or 0,
-                               "attention": a.get("attention"), "prompts": a.get("prompts"), "now": now})
+                               "attention": a.get("attention"), "prompts": a.get("prompts"), "now": now,
+                               "last_text": a.get("last_text") or ""})
                        for a in overview.get("agents", [])],
             "tasks": [tag(t, {"key": f"run:{t['id']}", "kind": "run", "at": _run_time(t), "source": t.get("source"),
+                              "conclusion": t.get("conclusion"),
                               "attention": t.get("attention") or ("working" if t.get("status") == "running" else None)})
                       for t in overview.get("tasks", [])]}
 
@@ -241,7 +263,8 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
         items.append({"key": f"run:{t['id']}", "kind": "run", "title": t.get("title") or t["id"],
                       "href": f"#/run/{t['id']}", "at": _run_time(t), "status": t.get("status"),
                       "attention": t.get("attention") or ("working" if t.get("status") == "running" else None),
-                      "reason": t.get("reason", ""), "run_id": t["id"], "source": t.get("source")})
+                      "reason": t.get("reason", ""), "run_id": t["id"], "source": t.get("source"),
+                      "conclusion": t.get("conclusion")})
     for it in items:
         it["card"] = cards_by_key.get(it["key"])
         it["needs"], it["opened"], it["live_card"] = needs_of(it, it["card"], seen)
@@ -251,16 +274,20 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
     for it in items:
         card = it.pop("live_card")
         needs = it["needs"]
+        # The agent's own one-line ask from its Status line; an approval prompt or a stuck agent says it better.
+        said = "" if it["attention"] in ("approve", "stuck") else (status_of(it) or {}).get("line", "")
         if needs == "you":
-            decide.append({**it, "question": card.get("needs_you") or it["reason"], "recommend": card.get("recommend", ""),
+            decide.append({**it, "question": card.get("needs_you") or said or it["reason"], "recommend": card.get("recommend", ""),
                            "do_it": card.get("do_it", ""), "topic": card.get("topic", ""), "result": card.get("result"),
                            "age": now - it["at"] if it["at"] else 0, "urgent": it["attention"] in DECIDE_ATTENTION})
         elif needs == "others":
-            others.append({**it, "line": card["needs_you"], "recommend": card.get("recommend", ""), "topic": card.get("topic", "")})
+            others.append({**it, "line": card.get("needs_you") or said or it["reason"], "recommend": card.get("recommend", ""), "topic": card.get("topic", "")})
         elif needs == "working":
             in_flight.append({**it, "line": _first_line(it.get("last_text")) or "Working"})
         elif needs == "unfinished":
-            unfinished.append({**it, "result": card.get("result"), "line": card.get("did") or _first_line(it.get("last_text")),
+            # A Status line that said failed put it here; the card's own result could still say "worked".
+            unfinished.append({**it, "result": "failed" if (status_of(it) or {}).get("state") == "failed" else card.get("result"),
+                               "line": card.get("did") or said or _first_line(it.get("last_text")),
                                "risk": card.get("risk", ""), "next": card.get("next", ""),
                                "age": now - it["at"] if it["at"] else 0})
         else:

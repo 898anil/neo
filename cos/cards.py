@@ -22,7 +22,7 @@ from typing import Optional
 
 from . import fleet
 from .config import owner_fields, split_thread_context
-from .runner import Run, cli_path
+from .runner import Run, claude_available, cli_path
 from .store import JsonStore
 
 log = logging.getLogger(__name__)
@@ -142,14 +142,16 @@ def recent_topics() -> list[str]:
 
 def make_card(title: str, material: str, timeout: int = 180) -> Optional[dict]:
     # The log is untrusted text: no tools, no MCP servers, no user settings or hooks, an empty cwd.
+    if not claude_available()[0]:
+        return None
     cmd = [cli_path("claude"), "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
-           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(CARD_SCHEMA),
-           "--", PROMPT.format(title=title, topics=", ".join(recent_topics()) or "none yet",
-                             material=material[-MATERIAL_CHARS:], **owner_fields())]
+           "--strict-mcp-config", "--setting-sources", "", "--json-schema", json.dumps(CARD_SCHEMA)]
+    prompt = PROMPT.format(title=title, topics=", ".join(recent_topics()) or "none yet",
+                           material=material[-MATERIAL_CHARS:], **owner_fields())
     cwd = Path(tempfile.gettempdir()) / "neo-card"
     try:
         cwd.mkdir(exist_ok=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=str(cwd))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=prompt, cwd=str(cwd))  # stdin, not argv: `ps` shows argv
         raw = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -271,18 +273,19 @@ NOT_OWNER_KINDS = {"mentions", "mention-send", "loops", "watch", "brief", "alert
 NOT_OWNER_PREFIXES = ("pr-",)  # PR reviews and CI fixes read other people's code review and CI logs
 
 
-def owner_driven(target: dict) -> tuple[bool, Optional[str]]:
-    """(may this session write memory, the folder it worked in). Live agents are the owner's own
-    sessions; a run counts when the owner started it from Slack or the dashboard."""
+def owner_driven(target: dict) -> tuple[bool, Optional[str], Optional[str]]:
+    """(may this session write memory, the folder it worked in, the Slack id of who asked or None
+    for the owner). Live agents are the owner's own sessions; a run counts when a person started it
+    from Slack or the owner from the dashboard. Its rules go to that person's own memory."""
     if target["kind"] == "agent":
-        return True, target.get("cwd") or None
+        return True, target.get("cwd") or None, None
     try:
         meta = Run(target["run_id"]).meta()
     except (OSError, ValueError):
-        return False, None
+        return False, None, None
     kind = meta.get("kind") or ""
     ok = meta.get("source") in ("slack", "dashboard") and kind not in NOT_OWNER_KINDS and not kind.startswith(NOT_OWNER_PREFIXES)
-    return ok, meta.get("cwd")
+    return ok, meta.get("cwd"), meta.get("slack_user") or None
 
 
 def _learn_from(target: dict, card: dict, events: list[dict]) -> None:
@@ -290,8 +293,9 @@ def _learn_from(target: dict, card: dict, events: list[dict]) -> None:
         return
     from . import learn
     try:
-        ok, cwd = owner_driven(target)
+        ok, cwd, user = owner_driven(target)
         if ok:
-            learn.capture(card, cwd=cwd, source=target["key"], owner_text=owner_words(events))
+            role = None if target["kind"] == "agent" else Run(target["run_id"]).meta().get("role")
+            learn.capture(card, cwd=cwd, source=target["key"], owner_text=owner_words(events), user=user, role=role)
     except Exception:  # noqa: BLE001 - a memory write must never cost the card
         log.exception("memory capture failed for %s", target["key"])

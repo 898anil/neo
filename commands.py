@@ -7,6 +7,10 @@ Grammar (after the @neo mention is stripped):
     default [claude|codex]                        show or set the agent used when you name none
     watches                                       what your watches found
     pause [30m|2h|1d] | resume                    stop / restart the messages neo posts on its own
+    settings | set my <field> [value]              your own settings (cos/people.py)
+    set role <@user> <full|prs-only|read-only>    owner only
+    watch add <name> every <minutes>: <what>      your own watch, findings to your DM
+    watch remove <id>
     help
 """
 
@@ -37,7 +41,12 @@ HELP = (
     "`@neo watches` what your watches (Sentry, production errors, ...) found and haven't been handled\n"
     "`@neo pause` / `@neo pause 2h` stop the messages I post on my own (notifications, briefs, digests, "
     "watch findings, auto RCA) until `@neo resume`; replies to you still come through\n"
-    "`@neo remember <rule>` / `@neo remember in <repo>: <rule>` add to neo's memory; `@neo memory` show it\n"
+    "`@neo remember <rule>` your own rule (only your runs get it) / `@neo remember in <repo>: <rule>` a note "
+    "for everyone working in that repo / `@neo remember for team: <rule>` (owner) everyone's runs; `@neo memory` show yours\n"
+    "`@neo settings` your settings; `@neo set my style bullets, short` / `set my repos backie, deskie` / "
+    "`set my channels eng` / `set my engine codex` / `set my model <id>` change one (no value clears it)\n"
+    "`@neo watch add <name> every 60: <what to check>` your own watch, findings to your DM; "
+    "`@neo watch remove <id>`\n"
     "`@neo apply 1 3` / `@neo apply all` in the nightly autonomy review thread: save the proposals you pick\n"
     "In a thread: reply `@neo <message>` to continue, `@neo stop` to interrupt, "
     "`@neo status`, and for live runs `@neo approve` / `@neo deny` / `@neo keys ...` / `@neo close`.\n"
@@ -55,7 +64,9 @@ class Request:
     live: bool = False
     cwd: Optional[str] = None
     keys: list[str] = field(default_factory=list)
-    repo: Optional[str] = None  # for "remember in <repo>: ..."
+    repo: Optional[str] = None  # for "remember in <repo>: ..." (learn.TEAM_REPO for "remember for team: ...")
+    field: Optional[str] = None  # for "set <field> <value>" and "watch add/remove"
+    target: Optional[str] = None  # for "set role <@user> <role>": that user's id
 
 
 def parse(text: str) -> Request:
@@ -73,6 +84,14 @@ def parse(text: str) -> Request:
         return Request("watches")
     if head == "memory" and len(words) == 1:
         return Request("memory")
+    if head == "settings" and len(words) == 1:
+        return Request("settings")
+    setting = _parse_set(text)
+    if setting:
+        return setting
+    watch = _parse_watch(text)
+    if watch:
+        return watch
     if head == "resume" and len(words) == 1:
         return Request("resume")
     if head == "pause" and len(words) == 1:
@@ -105,6 +124,38 @@ def parse(text: str) -> Request:
     for token in words[: len(words) - len(rest)]:
         prompt = prompt[len(token):].lstrip()
     return Request("run", prompt=prompt, engine=engine, live=bool(live), cwd=cwd)
+
+
+_SET_RE = re.compile(r"^\s*set\s+my\s+(?P<field>name|style|repos|channels|engine|model)\b(?P<value>.*)$", re.I | re.S)
+_ROLE_RE = re.compile(r"^\s*set\s+role\s+<@(?P<user>[UW][A-Z0-9]+)(?:\|[^>]*)?>\s+(?P<role>\S+)\s*$", re.I)
+_WATCH_ADD_RE = re.compile(r"^\s*watch\s+add\s+(?P<name>.+?)\s+every\s+(?P<every>\d+)\s*(?:m|min|mins|minutes)?\s*:\s*(?P<what>\S.*)$",
+                           re.I | re.S)
+_WATCH_REMOVE_RE = re.compile(r"^\s*watch\s+(?:remove|delete)\s+(?P<id>[a-z0-9-]+)\s*$", re.I)
+
+
+def _parse_set(text: str) -> Optional[Request]:
+    """`set my style <text>` (empty clears it) and `set role <@U..> <role>`. "my" keeps a task like
+    "set style rules for the repo" or "set up the staging DB" a task."""
+    m = _ROLE_RE.match(text)
+    if m:
+        return Request("set", field="role", target=m.group("user"), prompt=m.group("role").lower())
+    m = _SET_RE.match(text)
+    if not m or (m.group("value") and not m.group("value")[0].isspace()):
+        return None
+    if m.group("field").lower() in ("engine", "model") and len(m.group("value").split()) > 1:
+        return None  # "set my model to opus and rerun" is a task
+    return Request("set", field=m.group("field").lower(), prompt=m.group("value").strip())
+
+
+def _parse_watch(text: str) -> Optional[Request]:
+    m = _WATCH_ADD_RE.match(text)
+    if m:
+        return Request("watch", field="add", target=m.group("name").strip(), prompt=m.group("what").strip(),
+                       keys=[m.group("every")])
+    m = _WATCH_REMOVE_RE.match(text)
+    if m:
+        return Request("watch", field="remove", target=m.group("id").lower())
+    return None
 
 
 # ------------------------------------------------------------------ progress

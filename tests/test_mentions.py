@@ -88,6 +88,11 @@ class MentionsTest(unittest.TestCase):
         self.assertFalse(any("send" in t or "canvas" in t for t in allowed))
         self.assertIn("mcp__claude_ai_Slack__slack_send_message", denied)
 
+    def test_scheduled_check_skips_run_creation_while_claude_is_rate_limited(self):
+        with patch.object(self.m, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(self.m.Run, "create", side_effect=AssertionError("run should be skipped")):
+            self.assertIsNone(self.m.start("schedule"))
+
     def test_send_counts_only_when_exact_text_reached_the_right_thread(self):
         item = {"channel_id": "C1", "thread_ts": "1.1"}
         self.assertEqual(self.m.sent_ok(FakeRun([call("Looking  now."), OK]), item, "Looking now."), (True, "sent"))

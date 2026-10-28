@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 from . import pause
-from .runner import ENGINES, MODES, TERMINAL, Run, list_runs, valid_run_id
+from .runner import ENGINES, MODES, TERMINAL, Run, claude_available, list_runs, valid_run_id
 
 COLORS = {
     "prompt": "\033[1;36m",
@@ -47,6 +50,12 @@ def render(event: dict, show_debug: bool = False, color: bool = True) -> str | N
 
 
 def cmd_run(args) -> int:
+    scheduled = getattr(args, "scheduled", False) or os.environ.get("NEO_SCHEDULED") == "1"
+    if args.engine == "claude" and scheduled:
+        available, reset_at = claude_available()
+        if not available:
+            print(f"skipped: Claude quota is exhausted until {reset_at}", file=sys.stderr)
+            return 0
     run = Run.create(args.engine, args.prompt, args.cwd, args.mode, source="cli")
     print(f"run {run.id}  ({args.engine}, {args.mode})  dashboard: /#{run.id}", file=sys.stderr)
     color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -129,6 +138,49 @@ def cmd_paused(args) -> int:
     return 0 if pause.is_paused() else 1
 
 
+def cmd_post(args) -> int:
+    """Post as neo (bot token), so scheduled jobs don't post as Anil through the connector.
+
+    Exit 0 posted or held, 2 bad input, 3 file or network error, 4 Slack refused it.
+    """
+    from slack_sdk.errors import SlackApiError
+
+    from .post import post
+
+    try:
+        text = args.text if args.text is not None else Path(args.text_file).read_text(encoding="utf-8")
+        result = post(args.channel, text, thread_ts=args.thread, job=args.job)
+    except OSError as exc:
+        print(f"error: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 3
+    except SlackApiError as exc:
+        print(f"error: slack: {exc.response.get('error')}", file=sys.stderr)
+        return 4
+    print(json.dumps(result))
+    return 0
+
+
+def cmd_zeroshot(args) -> int:
+    """Hand a change to a zeroshot review loop (cos/zeroshot.py). Prints JSON; exit 3 when git or zeroshot fails."""
+    from . import zeroshot
+
+    try:
+        if args.zs_command == "start":
+            task = args.task if args.task is not None else Path(args.task_file).read_text(encoding="utf-8")
+            result = zeroshot.start(args.repo, task, args.title, base=args.base, slug=args.slug)
+        elif args.zs_command == "status":
+            result = zeroshot.status(args.ref)
+        elif args.zs_command == "clean":
+            result = zeroshot.clean(args.ref, force=args.force)
+        else:
+            result = zeroshot.wait(args.ref, timeout=args.timeout)
+    except (OSError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError, sqlite3.Error) as exc:
+        print(f"error: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="cos", description="Run Claude Code or Codex with a visible timeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -140,6 +192,7 @@ def main(argv=None) -> int:
                    help="readonly: no edits or unapproved commands; edit: file edits allowed; full: no guardrails")
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--debug", action="store_true", help="also show hooks, rate limits and other low-level events")
+    p.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("continue", help="send a follow-up prompt to an existing run's session")
@@ -173,6 +226,35 @@ def main(argv=None) -> int:
     p = sub.add_parser("paused", help="exit 0 while notifications are paused (for scheduled jobs)")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_paused)
+
+    p = sub.add_parser("post", help="post a Slack message as neo (bot), held while paused")
+    p.add_argument("--channel", required=True)
+    p.add_argument("--thread", help="thread_ts to reply in")
+    p.add_argument("--job", help="job name; while paused the message goes to ~/.neo/<job>/held.json")
+    text = p.add_mutually_exclusive_group(required=True)
+    text.add_argument("--text")
+    text.add_argument("--text-file", help="read the message from a file (avoids shell quoting)")
+    p.set_defaults(func=cmd_post)
+
+    p = sub.add_parser("zeroshot", help="run a change through a zeroshot worker + independent review loop")
+    zs = p.add_subparsers(dest="zs_command", required=True)
+    q = zs.add_parser("start", help="new worktree at origin/<base> and a detached run in it")
+    q.add_argument("--repo", required=True, help="path to the git checkout")
+    q.add_argument("--title", required=True)
+    q.add_argument("--base", default="main")
+    q.add_argument("--slug", help="job name (default: from the title)")
+    task = q.add_mutually_exclusive_group(required=True)
+    task.add_argument("--task")
+    task.add_argument("--task-file", help="read the task from a file (avoids shell quoting)")
+    q = zs.add_parser("status", help="phase, verdicts and changed files of a job (slug or run id)")
+    q.add_argument("ref")
+    q = zs.add_parser("wait", help="block until the job finishes or --timeout seconds pass")
+    q.add_argument("ref")
+    q.add_argument("--timeout", type=int, default=540)
+    q = zs.add_parser("clean", help="remove a finished job's worktree, local branch and record")
+    q.add_argument("ref")
+    q.add_argument("--force", action="store_true", help="also drop uncommitted changes and unpushed commits")
+    p.set_defaults(func=cmd_zeroshot)
 
     args = parser.parse_args(argv)
     try:

@@ -43,8 +43,12 @@ looked, what is in flight, and the alert-to-fix loop.
 | reply `@neo <message>` | Continue the same session. |
 | `@neo stop` / `status` / `close` | Interrupt, check, or end the run. |
 | `@neo approve` / `deny` / `keys 2 enter` | Answer a live agent waiting for approval. |
-| `@neo remember <rule>` / `@neo remember in <repo>: <rule>` | Add to neo's memory; every agent started after that knows it. |
-| `@neo memory` | Show what neo remembers. |
+| `@neo remember <rule>` | Your own rule: every agent started for you after that knows it. |
+| `@neo remember in <repo>: <rule>` / `@neo remember for team: <rule>` | A note for everyone working in that repo / a rule for everyone's runs (team: owner only). |
+| `@neo memory` | Show what neo remembers for you (the owner sees everything). |
+| `@neo settings` / `@neo set my style bullets, short` | Your own settings: `style`, `repos`, `channels`, `engine`, `model`, `name`. No value clears one. |
+| `@neo set role @person prs-only` | Owner only: `full`, `prs-only` or `read-only` (see *People* below). |
+| `@neo watch add <name> every 60: <what to check>` / `watch remove <id>` | Your own read-only watch; findings go to your DM (3 each). |
 | `@neo help` | This list. |
 
 **Push notifications.** The bot DMs you when *any* agent on the machine -- including ones
@@ -88,6 +92,18 @@ a Claude RCA in its thread (repeats within 30 minutes are skipped; `NEO_AUTO_RCA
 The brief's time is `NEO_BRIEF_AT` (default 08:30, weekdays; `off` to disable); its instructions are in
 `prompts/brief.md`, and every agent's standing instructions in `prompts/slack-agent.md`.
 
+**Voice notes.** Record a Slack voice clip in a DM to neo, in a thread neo is working in, or with
+`@neo` typed beside it. neo transcribes it on this machine, posts what it heard, runs it like a typed
+mention, and replies with text plus a spoken clip. Speech-to-text is mlx-whisper (`NEO_STT_MODEL`,
+default `mlx-community/whisper-large-v3-turbo`) in its own venv; text-to-speech is macOS `say`
+(`NEO_TTS_VOICE`, default Samantha; download a Premium voice in System Settings → Accessibility →
+Spoken Content for a better one). The app needs the `files:read` and `files:write` scopes. One-time setup:
+
+```bash
+uv venv -p python3.12 ~/.neo/voice/venv
+uv pip install -p ~/.neo/voice/venv/bin/python mlx-whisper imageio-ffmpeg
+```
+
 ## Memory
 
 Every Claude or Codex session starts blank, so you end up re-explaining the same things: which
@@ -129,6 +145,43 @@ remembers*) or with `@neo memory`. A failed memory write never affects the task.
 
 Not to be confused with search: History also searches every Claude and Codex transcript on the
 machine and lets you continue any of them.
+
+## People
+
+Everyone on `ALLOWED_USER_IDS` can use neo; one of them is the owner (`NEO_OWNER_USER`, else
+`NEO_NOTIFY_USER`). Each person has their own memory and settings, so one person's rules never reach
+another's runs:
+
+```
+~/.neo/memory/team.md            rules for everyone's runs (`remember for team: ...`, owner only)
+~/.neo/memory/me.md              the owner's own rules
+~/.neo/memory/people/<id>.md     each other person's own rules
+~/.neo/memory/lessons.md, repos/ shared by everyone (coding lessons and repo notes)
+~/.neo/people/<id>.json          each person's settings (0600)
+```
+
+A run started for someone gets a *Who is asking* section (their name, answer style, usual repos and
+channels, limits), then the team rules, their own rules, and the shared notes and lessons. Rules
+a finished session proposes go to the file of the person who asked for it. A thread's session is
+only continued by the person who started it; anyone else who mentions neo there gets a session of
+their own beside it, with the thread so far as context (so threads started before this change begin
+a fresh session for anyone but the owner). Only the owner answers their own agents and live sessions
+(and a live session's starter theirs).
+
+Roles, set by the owner (`@neo set role @person <role>`; no role means `full`, the owner is always
+`full`). Everyone still runs with the owner's logins until each person has their own sandbox, so
+these are guard rails, not isolation:
+
+- `full`: as before.
+- `prs-only`: may get code changed and PRs opened. The brief forbids merging, approving, PMR,
+  deploying, prod and infra changes, and sending mail or Slack as the owner; runs also get a
+  `--disallowedTools` list for those commands and for the owner's mail, calendar, Drive and Slack.
+  Restricted roles always run Claude (Codex has no way to deny tools). No live agents, no
+  approving, pausing, or stopping someone else's run, and their sessions add no shared lessons or
+  repo notes (their rules stay in their own file).
+- `read-only`: runs without the owner's Claude settings (whose allow list lets edits, pushes and
+  merges through) and may use only the read-only tools the watches use. Watches people add for
+  themselves run the same way.
 
 **The dashboard** (phone-first, one page):
 
@@ -188,6 +241,10 @@ Dash  ─┼─▶ app.py (Socket Mode) ─▶ cos/ ──┤
 - `cos/fleet.py` -- everything on the machine: all herdr agents, their transcripts, runs.
 - `cos/watches.py` -- watches and findings; `cos/settings.py` -- choices made from the dashboard.
 - `cos/server.py` + `cos/static/index.html` -- the dashboard. `python -m cos` is also a CLI.
+- `cos/zeroshot.py` -- `python -m cos zeroshot start|status|wait`: a code change written by one agent
+  and accepted by independent reviewers ([zeroshot](https://zeroshot.sh)) before neo opens the PR.
+  Needs `npm install -g --prefix ~/.local @the-open-engine-company/zeroshot`; per-repo review rules
+  go in `private/zeroshot/<repo folder>.md`.
 
 Live runs use their own herdr session (`neo`); your own agents stay in your default session
 and are shown and controllable, never restarted. Attach: `herdr session attach neo`.

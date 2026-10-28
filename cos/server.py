@@ -465,8 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             events = fleet.recent_turns(fleet.transcript_events(engine, path), turns=8)
             return self._json({**info, "events": events})
         if parts == ["api", "memory"]:
-            from . import learn
-            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files()})
+            from . import autonomy, learn
+            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files(), "review": autonomy.view()})
         if parts == ["api", "usage"]:
             from .runner import usage_summary
 
@@ -546,6 +546,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
             start_turn(run, None)
             return self._json(run.meta(), HTTPStatus.CREATED)
+        if parts == ["api", "memory", "apply"]:
+            from . import autonomy
+            which, shown = (body or {}).get("which"), (body or {}).get("review")
+            if not (which == "all" or (isinstance(which, list) and which
+                                        and all(isinstance(n, int) and not isinstance(n, bool) and 0 < n < 100 for n in which))):
+                return self._error(HTTPStatus.BAD_REQUEST, "which must be \"all\" or a list of proposal numbers")
+            if not isinstance(shown, str) or not shown:
+                return self._error(HTTPStatus.BAD_REQUEST, "the id of the review shown is required; reload the page")
+            try:
+                return self._json({"results": autonomy.apply_from_dashboard(which, shown), "review": autonomy.view()})
+            except ValueError as exc:
+                return self._error(HTTPStatus.CONFLICT, str(exc))
         if parts == ["api", "home", "seen"]:
             home.mark_seen()
             return self._json({"ok": True})
@@ -733,6 +745,15 @@ class Handler(BaseHTTPRequestHandler):
             meta = fresh_meta(run)
             if parts[3] == "seen":
                 fleet.mark_run_seen(run.id)
+                return self._json({"ok": True})
+            if parts[3] == "rename":
+                try:
+                    title = fleet.clean_title((body or {}).get("title", ""))
+                except ValueError as exc:
+                    return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+                if not title:
+                    return self._error(HTTPStatus.BAD_REQUEST, "title is required")
+                run.update_meta(title=title)
                 return self._json({"ok": True})
             if meta.get("runtime", "headless") != "headless":
                 return self._error(HTTPStatus.CONFLICT, "live runs are controlled from Slack or `herdr session attach`")

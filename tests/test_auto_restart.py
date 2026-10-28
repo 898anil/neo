@@ -182,6 +182,7 @@ FAKE_FLAKY_CLAUDE = textwrap.dedent(
     n = int(open(count_file).read()) if os.path.exists(count_file) else 0
     open(count_file, "w").write(str(n + 1))
     open(os.path.join(state, "args-%d" % n), "w").write(json.dumps(sys.argv[1:]))
+    open(os.path.join(state, "stdin-%d" % n), "w").write(sys.stdin.read())
     mode = open(os.path.join(state, "mode")).read().strip() if os.path.exists(os.path.join(state, "mode")) else "drop"
     print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1"}}))
     if n == 0 or mode == "always":
@@ -221,7 +222,8 @@ class HeadlessAutoRestartTest(unittest.TestCase):
         self.assertEqual(meta["status"], "done")
         retry_args = json.loads((self.base / "args-1").read_text())
         self.assertIn("--resume", retry_args)
-        self.assertEqual(retry_args[-1], "continue")
+        self.assertEqual((self.base / "stdin-1").read_text(), "continue", "the prompt arrives on stdin")
+        self.assertNotIn("continue", retry_args, "and never on the command line")
         self.assertIn("--json-schema", retry_args, "a retried first turn keeps its output schema")
         self.assertTrue(any(e["title"] == "Auto-restart" for e in events))
         self.assertEqual((self.base / "calls").read_text(), "2")

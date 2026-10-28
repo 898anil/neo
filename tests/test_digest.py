@@ -24,6 +24,10 @@ SAMPLE = {
     "plan": [{"step": "Add embedding port", "status": "done", "note": ""}, {"step": "Run tests", "status": "todo", "note": ""}],
     "chain": {"title": "Card path", "nodes": [{"label": "New card", "detail": "", "tone": "neutral", "via": "embed"},
                                               {"label": "Skip repeat", "detail": "cosine >= 0.93", "tone": "new", "via": ""}]},
+    "options": [{"name": "Embedding gate", "picked": True, "pros": "catches reworded repeats", "cons": "one model call per card"},
+                {"name": "Exact text match", "picked": False, "pros": "free and simple", "cons": "misses rewording"}],
+    "choice_why": "Most repeats are reworded, so exact match misses them",
+    "choice_flip": "Embedding cost above a cent per card",
     "numbers": [{"value": "9/215", "label": "true repeats", "tone": "ok"}],
     "changes": [{"path": "a/b/service.py", "added": 12, "removed": 3, "kind": "edited"}],
     "checks": [{"label": "ruff", "status": "pass", "url": ""}], "timeline": [], "next": "Run the unit tests",
@@ -74,6 +78,35 @@ class ViewTest(unittest.TestCase):
         self.assertNotIn("Needs you</b>", html)  # needs_you is empty
         self.assertNotIn('class="tl"', html)  # no dated events
         self.assertLess(html.index('class="fig"'), html.index('class="out"'))  # the picture comes first
+
+    def test_options_show_the_pick_first_with_why_and_what_would_change_it(self):
+        html = self.v.render({**SAMPLE, "options": list(reversed(SAMPLE["options"]))})
+        for part in ("Why this choice", "Picked", "catches reworded repeats", "misses rewording",
+                     "Most repeats are reworded", "Would change if</b><span>Embedding cost"):
+            self.assertIn(part, html, part)
+        self.assertLess(html.index("Embedding gate"), html.index("Exact text match"))
+        self.assertLess(html.index('class="out"'), html.index("Why this choice"))
+
+    def test_one_option_or_none_draws_no_choice_section(self):
+        unpicked = [{**o, "picked": False} for o in SAMPLE["options"]]
+        for opts in ([], SAMPLE["options"][:1], "bad", [{"name": ""}, {"name": "-"}], unpicked):
+            self.assertNotIn("Why this choice", self.v.render({**SAMPLE, "options": opts}), opts)
+
+    def test_only_the_first_pick_is_tagged_and_option_text_is_escaped(self):
+        opts = [{"name": "<img src=x onerror=1>", "picked": False, "pros": "<b>p</b>", "cons": ""},
+                {"name": "A", "picked": True, "pros": "", "cons": ""}, {"name": "B", "picked": True, "pros": "", "cons": ""}]
+        html = self.v.render({**SAMPLE, "options": opts})
+        self.assertEqual(html.count(">Picked<"), 1)
+        self.assertLess(html.index("<span>A</span>"), html.index("<span>B</span>"))
+        self.assertNotIn("<img", html)
+        self.assertIn("&lt;img src=x onerror=1&gt;", html)
+
+    def test_plan_visual_links_only_to_claude_artifacts(self):
+        good = "https://claude.ai/code/artifact/0b5fb84a-1234"
+        self.assertIn(f'href="{good}"', self.v.render({**SAMPLE, "visual_url": good}))
+        for bad in ("https://evil.example/artifact/x", "javascript:alert(1)", "", None,
+                    "https://claude.ai/redirect?x=/artifact/abcdefgh", good + '"onclick="x', good + "z" * 80):
+            self.assertNotIn('class="vis"', self.v.render({**SAMPLE, "visual_url": bad}), bad)
 
     def test_without_a_chain_the_plan_is_the_picture(self):
         html = self.v.render({**SAMPLE, "chain": {"title": "", "nodes": []}})
@@ -159,6 +192,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual((got["kind"], got["data"]["intent"]), ("rca", SAMPLE["intent"]))
         self.assertEqual(self.d.get("run:r1")["source_mtime"], NOW - 100)
         self.assertEqual(got["data"]["outcome"], {"result": "partial", "headline": "h"})
+        self.assertEqual(got["data"]["visual_url"], "")
         cmd = run.call_args[0][0]
         self.assertIn(self.d.MODEL, cmd)
         self.assertEqual(cmd[cmd.index("--tools") + 1], "")
@@ -181,6 +215,11 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(got["outcome"], {"result": "", "headline": ""})
         self.assertNotIn("outcome_result", got)
 
+    def test_make_skips_when_claude_quota_is_exhausted(self):
+        with patch.object(self.d, "claude_available", return_value=(False, 2_000), create=True), \
+             patch.object(self.d.subprocess, "run", side_effect=AssertionError("digest should be skipped")):
+            self.assertIsNone(self.d.make("t", "log"))
+
     def test_status_draws_structured_digests_and_still_serves_old_html_cleaned(self):
         self.d.put("run:r1", {"kind": "fix", "data": SAMPLE, "source_mtime": NOW - 100, "made_at": NOW, "version": self.d.VERSION})
         with patch.object(self.d, "target_for", return_value=target()):
@@ -190,6 +229,18 @@ class DigestTest(unittest.TestCase):
         self.d.put("run:r2", {"kind": "rca", "html": "<p>old</p><script>x()</script>", "source_mtime": NOW - 100,
                               "made_at": NOW, "version": "old"})
         self.assertEqual(self.d._public(self.d.get("run:r2"))["html"], "<p>old</p>")
+
+    def test_build_links_the_last_plan_visual_in_the_log(self):
+        flat = {k: v for k, v in SAMPLE.items() if k != "outcome"}
+        out = {"structured_output": {**flat, "outcome_result": "partial", "outcome_headline": "h"}}
+        log = [{"kind": "text", "body": "v1 https://claude.ai/artifact/aaaaaaaa-1111 then v2 https://claude.ai/code/artifact/bbbbbbbb-2222."},
+               {"kind": "tool_result", "body": "fetched https://claude.ai/artifact/cccccccc-3333"},
+               {"kind": "prompt", "body": "someone shared https://claude.ai/artifact/dddddddd-4444"}]
+        with patch.object(self.d.cards, "load_events", return_value=log), \
+             patch.object(self.d.subprocess, "run", return_value=Proc(json.dumps(out))):
+            got = self.d.build(target())
+        self.assertEqual(got["data"]["visual_url"], "https://claude.ai/code/artifact/bbbbbbbb-2222")
+        self.assertIn("Open visual", self.d._public(got)["html"])
 
     def test_failed_call_stores_nothing(self):
         with patch.object(self.d.cards, "load_events", return_value=[{"kind": "text", "body": "x"}]), \
