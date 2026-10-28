@@ -495,12 +495,22 @@ class Run:
                 if proc.poll() is None:  # leaving early (an exception): do not orphan the engine
                     self._kill(proc.pid)
                     proc.wait()
+            # Best-effort latency breakdown (model vs tools vs per-tool) for this run, so "why was
+            # that slow" is answerable from meta without re-parsing events. Never fatal.
+            timing = None
+            try:
+                from cos import timing as _timing
+
+                timing = _timing.summarize(self.dir)
+            except Exception:  # noqa: BLE001 - timing is observability, never blocks a turn
+                timing = None
             final = self.update_meta(
                 status=status,
                 pid=None,
                 cost_usd=round(cost, 4),
                 raw_offset=offset,
                 last_turn_seconds=round(time.time() - started, 1),
+                timing=timing,
                 # The agent's own Status line for this turn (cos/conclusion.py); home sorts the run by it.
                 conclusion=conclusion.status_of(last_text) if status == "done" else None,
             )
