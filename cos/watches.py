@@ -322,9 +322,11 @@ def start(watch_id: str, source: str = "schedule") -> Optional[dict]:
         if source == "schedule" and not claude_available()[0]:
             return None
         from . import accounts
-        if accounts.isolated(watch.get("owner")):
-            # Watches run in neo's own account, which a person's own runs must never reach (cos/accounts.py).
-            raise ValueError("someone else's watch doesn't run while each person has their own account")
+        cwd, extra = workdir(), {}
+        if accounts.isolated(watch.get("owner")):  # someone's own watch runs in their own account (cos/accounts.py)
+            from .people import name
+            account = accounts.ensure(watch["owner"], name(watch["owner"]))
+            cwd, extra = accounts.cwd_for(account, None), {"account": account, "slack_user": watch["owner"]}
         every_turn, first_turn = cli_args()
         if watch.get("owner"):
             from .people import is_owner
@@ -332,9 +334,9 @@ def start(watch_id: str, source: str = "schedule") -> Optional[dict]:
                 # Someone else's watch: without the owner's settings, whose allow list would let a
                 # "readonly" run edit, push and merge, only the read-only tools above can run.
                 every_turn = ["--setting-sources", "", *every_turn]
-        run = Run.create("claude", prompt(watch), workdir(), "readonly", source=source,
+        run = Run.create("claude", prompt(watch), cwd, "readonly", source=source,
                          extra={"kind": "watch", "watch_id": watch_id, "title": f"Watch: {watch['name']}",
-                                "cli_args": every_turn, "first_turn_args": first_turn})
+                                "cli_args": every_turn, "first_turn_args": first_turn, **extra})
         _update(watch_id, last_started_at=datetime.now().isoformat(timespec="seconds"), last_run_id=run.id)
 
     def work():

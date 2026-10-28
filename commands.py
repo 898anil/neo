@@ -45,6 +45,10 @@ HELP = (
     "for everyone working in that repo / `@neo remember for team: <rule>` (owner) everyone's runs; `@neo memory` show yours\n"
     "`@neo settings` your settings; `@neo set my style bullets, short` / `set my repos backie, deskie` / "
     "`set my channels eng` / `set my engine codex` / `set my model <id>` change one (no value clears it)\n"
+    "`@neo login claude` / `@neo login codex` sign your own workspace in to your own account (I DM you the link); "
+    "`@neo logins` which ones you're signed in to; `@neo logout claude`\n"
+    "`@neo set my brief 08:30` / `set my digest 19:00` your own morning brief and evening digest by DM "
+    "(your Slack time zone; `off` stops one). The brief needs your own Claude login\n"
     "`@neo watch add <name> every 60: <what to check>` your own watch, findings to your DM; "
     "`@neo watch remove <id>`\n"
     "`@neo apply 1 3` / `@neo apply all` in the nightly autonomy review thread: save the proposals you pick\n"
@@ -86,6 +90,10 @@ def parse(text: str) -> Request:
         return Request("memory")
     if head == "settings" and len(words) == 1:
         return Request("settings")
+    if head in ("login", "logout") and len(words) <= 2 and (len(words) == 1 or words[1].lower() in ENGINES):
+        return Request(head, engine=words[1].lower() if len(words) == 2 else "claude")
+    if head == "logins" and len(words) == 1:
+        return Request("logins")
     setting = _parse_set(text)
     if setting:
         return setting
@@ -126,7 +134,7 @@ def parse(text: str) -> Request:
     return Request("run", prompt=prompt, engine=engine, live=bool(live), cwd=cwd)
 
 
-_SET_RE = re.compile(r"^\s*set\s+my\s+(?P<field>name|style|repos|channels|engine|model)\b(?P<value>.*)$", re.I | re.S)
+_SET_RE = re.compile(r"^\s*set\s+my\s+(?P<field>name|style|repos|channels|engine|model|brief|digest)\b(?P<value>.*)$", re.I | re.S)
 _ROLE_RE = re.compile(r"^\s*set\s+role\s+<@(?P<user>[UW][A-Z0-9]+)(?:\|[^>]*)?>\s+(?P<role>\S+)\s*$", re.I)
 _WATCH_ADD_RE = re.compile(r"^\s*watch\s+add\s+(?P<name>.+?)\s+every\s+(?P<every>\d+)\s*(?:m|min|mins|minutes)?\s*:\s*(?P<what>\S.*)$",
                            re.I | re.S)
@@ -142,7 +150,7 @@ def _parse_set(text: str) -> Optional[Request]:
     m = _SET_RE.match(text)
     if not m or (m.group("value") and not m.group("value")[0].isspace()):
         return None
-    if m.group("field").lower() in ("engine", "model") and len(m.group("value").split()) > 1:
+    if m.group("field").lower() in ("engine", "model", "brief", "digest") and len(m.group("value").split()) > 1:
         return None  # "set my model to opus and rerun" is a task
     return Request("set", field=m.group("field").lower(), prompt=m.group("value").strip())
 

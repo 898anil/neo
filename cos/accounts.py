@@ -3,8 +3,9 @@
 On a Linux server with NEO_ACCOUNTS=1, everyone except the owner gets an account `neo-<name>` the first
 time they use neo (deploy/linux/neo-account, through sudo). Their runs start in it through
 deploy/linux/neo-run, so they have their own home, their own clones in ~/code, their own Claude, Codex
-and GitHub logins, and can't read neo's files or anyone else's. The owner's runs and neo's scheduled
-jobs stay in the service account, where the owner's cloud logins are.
+and GitHub logins, and can't read neo's files or anyone else's. The owner gets one too (owner_account): the owner's runs
+and neo's scheduled jobs run there, with the owner's cloud logins. The service account keeps the Slack
+tokens, the dashboard and live (herdr) agents, and runs the tool-less model calls (cards, digests).
 
 Logins: a person who has logged in to a tool in their account uses that login; for anything else neo
 lends the owner's, if the owner set NEO_SHARED_CLAUDE_TOKEN / NEO_SHARED_GH_TOKEN / NEO_SHARED_OPENAI_KEY,
@@ -109,6 +110,11 @@ def ensure(user: str, name: str, create=None) -> str:
     raise RuntimeError(f"no free account name for {name!r}")
 
 
+def everyone() -> dict:
+    """Slack id -> account, for everyone who has one."""
+    return {user: account for user, account in _registry().items() if isinstance(account, str)}
+
+
 def _create(account: str, user: str) -> None:
     done = subprocess.run(["sudo", "-n", NEO_ACCOUNT, "ensure", account, user],
                           capture_output=True, text=True, timeout=60)
@@ -126,15 +132,33 @@ def home(account: str) -> str:
         return f"/home/{account}"
 
 
+def owner_account() -> str:
+    """The owner's own account: their runs and neo's scheduled jobs run there, so the service account
+    keeps only the Slack tokens and the owner's cloud logins live where only the owner's work reaches."""
+    from . import people
+    from .config import owner_name
+
+    user = people.owner_id()
+    if not people.valid_user(user):
+        raise RuntimeError("set NEO_OWNER_USER (or NEO_NOTIFY_USER) to the owner's Slack id")
+    return ensure(user, owner_name())
+
+
 def cwd_for(account: str, requested: Optional[str]) -> str:
     """Where a run starts: ~/code unless they asked for a folder (~/x, a name under ~/code, or an
-    absolute path; neo-run refuses anything outside their home)."""
+    absolute path; neo-run refuses anything outside their home). A folder under neo's own workdir
+    (a scheduled job's, or one named before accounts) is the same place under the account's ~/code."""
+    from .config import workdir
+
     root = home(account)
     if not requested:
         return f"{root}/code"
     if requested == "~" or requested.startswith("~/"):
         return root + requested[1:]
     if requested.startswith("/"):
+        base = workdir().rstrip("/")
+        if requested == base or requested.startswith(base + "/"):
+            return f"{root}/code{requested[len(base):]}"
         return requested
     return f"{root}/code/{requested}"
 
@@ -159,11 +183,13 @@ def shared_logins(role: str = "full") -> dict:
 
 def spec(meta: dict, argv: list[str], env: dict, files: dict) -> dict:
     """neo-run's launch spec for one turn. env: what the service account's engine would get; only
-    the run's own variables pass (never the bot's Slack tokens), plus names in NEO_ACCOUNT_ENV."""
+    the run's own variables pass (never the bot's Slack tokens), plus names in NEO_ACCOUNT_ENV.
+    meta "lend" False: nothing of the owner's is lent (a personal brief must read the person's own
+    mail and calendar, or nothing)."""
     extra = [k.strip() for k in os.environ.get("NEO_ACCOUNT_ENV", "").split(",") if k.strip()]
     return {"argv": argv, "cwd": meta["cwd"], "files": files,
             "env": {k: env[k] for k in (*ENV_FOR_RUNS, *extra) if env.get(k)},
-            "shared": shared_logins(meta.get("role") or "full"),
+            "shared": shared_logins(meta.get("role") or "full") if meta.get("lend", True) else {},
             "git_name": meta.get("git_name") or "", "git_email": meta.get("git_email") or ""}
 
 

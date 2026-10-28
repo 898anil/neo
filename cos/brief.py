@@ -1,6 +1,10 @@
 """The morning brief: one Claude run that reads your calendar, mail, Slack, GitHub, Sentry and
 agents, and writes what needs you today. It is an ordinary run (kind "brief"), so it shows up in
-History with every step it took."""
+History with every step it took.
+
+start() is the owner's; start_for() is another person's own, in their own account with their own
+Claude login and nothing of the owner's lent (it reads their mail and calendar, never the owner's).
+Their briefs carry slack_user; the owner's don't."""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ import threading
 from datetime import datetime
 from typing import Callable, Optional
 
-from . import fleet
+from . import accounts, fleet
 from .config import owner_fields, read_prompt, workdir
 from .runner import Run, claude_available, list_runs
 
@@ -50,7 +54,7 @@ def _findings_summary() -> str:
 
 def running() -> Optional[dict]:
     for meta in list_runs(40):
-        if meta.get("kind") == "brief" and meta["status"] in ("queued", "running"):
+        if meta.get("kind") == "brief" and not meta.get("slack_user") and meta["status"] in ("queued", "running"):
             return meta
     return None
 
@@ -81,6 +85,48 @@ def start(source: str = "dashboard", on_done: Optional[Callable[[dict], None]] =
     return run.meta()
 
 
+def _their_runs(user: str, hours: int = 24) -> str:
+    """What this person's own agents did lately, for their brief (they have no fleet of live agents)."""
+    since = datetime.now().timestamp() - hours * 3600
+    rows = []
+    for meta in list_runs(300):
+        if meta.get("slack_user") != user or meta.get("kind") == "brief":
+            continue
+        try:
+            if datetime.fromisoformat(meta["created_at"]).timestamp() < since:
+                continue
+        except (KeyError, ValueError):
+            continue
+        what = meta.get("title") or " ".join((meta.get("prompt") or "").split()[-25:])
+        rows.append(f"- {what[:160]} ({meta['status']}) {meta.get('slack_url') or ''}".rstrip())
+    if not rows:
+        return "Your neo agents: nothing in the last day."
+    return "Your neo agents in the last day:\n" + "\n".join(rows[:12])
+
+
+def start_for(user: str, account: str, name: str, now: datetime,
+              on_done: Optional[Callable[[dict], None]] = None) -> dict:
+    """This person's own brief, in their account, for their day (now: their local time)."""
+    template = read_prompt("brief.md") or "Write my morning brief for {date}.\n\n{agents}"
+    who = {"owner": name, "Owner": name[:1].upper() + name[1:], "owner_intro": name}
+    prompt = template.format(date=now.strftime("%-d %B %Y"), weekday=now.strftime("%A"), agents=_their_runs(user), **who)
+    run = Run.create("claude", prompt, accounts.cwd_for(account, None), "full", source="schedule",
+                     extra={"kind": "brief", "title": f"Morning brief for {name}", "account": account,
+                            "slack_user": user, "lend": False})
+
+    def work():
+        try:
+            meta = run.execute()
+        except Exception as exc:  # noqa: BLE001 - recorded in the run
+            run.append_event({"kind": "error", "title": "Brief failed", "body": repr(exc), "data": {}}, 1)
+            meta = run.update_meta(status="failed", pid=None)
+        if on_done:
+            on_done({**meta, "text": _final_text(run.id) if meta.get("status") == "done" else ""})
+
+    threading.Thread(target=work, daemon=True, name=f"brief-{run.id}").start()
+    return run.meta()
+
+
 def _final_text(run_id: str) -> str:
     text = ""
     with (Run(run_id).dir / "events.jsonl").open() as fh:
@@ -99,7 +145,7 @@ def latest() -> Optional[dict]:
     one stays visible meanwhile)."""
     writing, done = None, None
     for meta in list_runs(200):
-        if meta.get("kind") != "brief":
+        if meta.get("kind") != "brief" or meta.get("slack_user"):
             continue
         if meta["status"] in ("queued", "running") and not writing:
             writing = meta

@@ -25,6 +25,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -42,11 +43,12 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import accounts, autonomy, learn, people, voice  # noqa: E402
+from cos import accounts, autonomy, learn, logins, people, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
 from cos.runner import ENGINES, MODES, Run, claude_available, cos_home, list_runs, pid_alive  # noqa: E402
+from cos.store import JsonStore  # noqa: E402
 
 # Only these Slack user ids may trigger the bot. This is the security gate:
 # a triggered session runs an agent on this machine with tool access, so never
@@ -414,10 +416,13 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
         engine = who["engine"]
     same_engine = entry and entry.get("runtime") == "headless" and entry.get("engine") == engine
     account = None
-    if accounts.isolated(user):  # their own Linux account (cos/accounts.py), created on first use
+    if accounts.enabled():  # their own Linux account (cos/accounts.py), created on first use; the owner's too
         info = await slack_user(client, user)
         try:
-            account = await asyncio.to_thread(accounts.ensure, user, mine.get("name") or accounts.display_name(info) or user)
+            if accounts.isolated(user):
+                account = await asyncio.to_thread(accounts.ensure, user, mine.get("name") or accounts.display_name(info) or user)
+            else:
+                account = await asyncio.to_thread(accounts.owner_account)
         except Exception as exc:  # noqa: BLE001
             log.exception("could not set up an account for %s", user)
             await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
@@ -959,7 +964,8 @@ async def brief_scheduler(client) -> None:
             due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if now.weekday() in BRIEF_DAYS and now >= due:
                 today = now.strftime("%Y-%m-%d")
-                already = any(m.get("kind") == "brief" and m.get("source") == "schedule" and m["created_at"][:10] >= today
+                already = any(m.get("kind") == "brief" and m.get("source") == "schedule" and not m.get("slack_user")
+                              and m["created_at"][:10] >= today
                               for m in list_runs(60))
                 if not already and not pause.is_paused():  # held back while paused; written if the pause ends today
                     log.info("writing the morning brief")
@@ -967,6 +973,84 @@ async def brief_scheduler(client) -> None:
         except Exception:  # noqa: BLE001 - try again next minute
             log.exception("brief scheduler failed")
         await asyncio.sleep(60)
+
+
+PERSONAL = JsonStore("personal.json")  # Slack id -> {"brief_day", "digest_day"}: what each person got today
+
+
+def personal_digest(user: str, since: float) -> str:
+    """A person's own evening digest: what their neo runs did today. "" when they ran nothing."""
+    rows = []
+    for meta in list_runs(400):
+        if meta.get("slack_user") != user or meta.get("kind") == "brief":
+            continue
+        try:
+            if datetime.fromisoformat(meta["created_at"]).timestamp() < since:
+                continue
+        except (KeyError, ValueError):
+            continue
+        what = " ".join((meta.get("title") or meta.get("prompt") or "").split())
+        what = what.rpartition(OWNER_MESSAGE_MARK)[2].strip() or what
+        link = f" <{meta['slack_url']}|thread>" if meta.get("slack_url") else ""
+        mark = {"done": ":white_check_mark:", "failed": ":x:", "stopped": ":black_square_for_stop:"}.get(meta["status"], ":hourglass:")
+        rows.append(f"{mark} {clip(what, 140)}{link}")
+    if not rows:
+        return ""
+    return f"*Your day with neo* ({len(rows)} {'task' if len(rows) == 1 else 'tasks'})\n" + "\n".join(rows[:20])
+
+
+async def personal_scheduler(client) -> None:
+    """Each person's own morning brief and evening digest by DM, at the times they set (people.daily),
+    in their Slack time zone. The brief runs in their account on their own Claude login only; someone
+    without one gets none (the owner's lent login would read nothing of theirs). Not the owner: the owner
+    has brief_scheduler and chief.py."""
+    while True:
+        try:
+            for user, account in (await asyncio.to_thread(accounts.everyone)).items():
+                if not accounts.isolated(user) or people.role(user) == "blocked":
+                    continue
+                info = await slack_user(client, user)
+                if not info or info.get("deleted"):
+                    continue
+                try:
+                    now = datetime.now(ZoneInfo(info.get("tz") or "UTC"))
+                except (KeyError, ValueError):
+                    now = datetime.now(ZoneInfo("UTC"))
+                today = now.strftime("%Y-%m-%d")
+                done = PERSONAL.read().get(user) or {}
+
+                def due(field: str) -> bool:
+                    when = people.daily(user, field)
+                    return bool(when) and done.get(f"{field}_day") != today and (now.hour, now.minute) >= when
+
+                def mark(field: str) -> None:
+                    PERSONAL.update(lambda d: d.setdefault(user, {}).update({f"{field}_day": today}))
+
+                if now.weekday() < 5 and due("brief"):
+                    mark("brief")  # one try a day, even when it can't run
+                    if await asyncio.to_thread(logins.signed_in, account, "claude"):
+                        await asyncio.to_thread(morning.start_for, user, account, people.load(user).get("name")
+                                                or accounts.display_name(info) or "you", now.replace(tzinfo=None),
+                                                _post_personal_brief(client, user, asyncio.get_running_loop()))
+                if due("digest"):
+                    mark("digest")
+                    start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+                    text = await asyncio.to_thread(personal_digest, user, start)
+                    if text:
+                        await post_markdown(client, user, None, text)
+        except Exception:  # noqa: BLE001 - try again next minute
+            log.exception("personal scheduler failed")
+        await asyncio.sleep(60)
+
+
+def _post_personal_brief(client, user: str, loop):
+    def posted(meta: dict) -> None:
+        text = meta.get("text") or ""
+        if not text:
+            log.info("brief for %s did not finish (%s)", user, meta.get("status"))
+            return
+        asyncio.run_coroutine_threadsafe(post_markdown(client, user, None, f"**Your morning brief**\n\n{text}"), loop)
+    return posted
 
 
 def finding_link(fid: str) -> str:
@@ -1108,9 +1192,6 @@ async def handle_watch(client, channel: str, thread_ts: str, user: Optional[str]
         await asyncio.to_thread(watches.delete, req.target)
         await say(f":wastebasket: Removed the *{watch['name']}* watch.")
         return
-    if accounts.isolated(user):  # watches run in neo's own account, not yours (cos/accounts.py)
-        await say(f":lock: Only {owner_name()} can add watches for now: they run in neo's own account, not your workspace.")
-        return
     try:
         watch = await asyncio.to_thread(watches.save, {"name": req.target, "instructions": req.prompt,
                                                        "every": req.keys[0], "hours": "work", "owner": user})
@@ -1119,6 +1200,103 @@ async def handle_watch(client, channel: str, thread_ts: str, user: Optional[str]
         return
     await say(f":eyes: Watch `{watch['id']}` checks every {watch['every']} min on work days and DMs you what it finds "
               f"(read-only checks). `@neo watch remove {watch['id']}` to stop it.")
+
+
+LOGINS: dict[str, logins.Login] = {}  # DM message ts -> a Claude sign-in waiting for the code they reply with
+
+
+async def _account_of(client, user: str) -> str:
+    """This person's own account (the owner's for the owner), created on first use."""
+    if not accounts.isolated(user):
+        return await asyncio.to_thread(accounts.owner_account)
+    info = await slack_user(client, user)
+    return await asyncio.to_thread(accounts.ensure, user, people.load(user).get("name") or accounts.display_name(info) or user)
+
+
+async def handle_login(client, channel: str, thread_ts: str, user: Optional[str], req) -> None:
+    """`login claude|codex`, `logout claude|codex`, `logins`: the person's own sign-ins in their own account."""
+    async def say(text: str) -> None:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(text))
+
+    if not accounts.enabled():
+        await say("Signing in from Slack needs each person's own account on this machine (NEO_ACCOUNTS=1), which is off.")
+        return
+    if not people.valid_user(user):
+        await say(":x: I can't tell who you are.")
+        return
+    account = await _account_of(client, user)
+    if req.command == "logins":
+        rows = []
+        for tool in logins.TOOLS:
+            own = await asyncio.to_thread(logins.signed_in, account, tool)
+            lent = accounts.shared_logins(people.role(user)).get("claude_token" if tool == "claude" else "openai_key")
+            state = ("your own login" if own else f"{owner_name()}'s, lent (`@neo login {tool}` to use yours)" if lent
+                     else f"not signed in (`@neo login {tool}`)") if own is not None else "couldn't tell"
+            rows.append(f"• {tool}: {state}")
+        await say("*Your sign-ins*\n" + "\n".join(rows))
+        return
+    tool = req.engine or "claude"
+    if req.command == "logout":
+        code, out = await asyncio.to_thread(logins.run, account, tool, "logout")
+        await say(f":wave: Signed your workspace out of {tool}." if code == 0 else f":x: Couldn't sign out of {tool}: `{out.strip()[-200:]}`")
+        return
+    for ts, waiting in list(LOGINS.items()):
+        if waiting.user == user:
+            waiting.stop()
+            LOGINS.pop(ts, None)
+    login = await asyncio.to_thread(logins.begin, user, account, tool)
+    try:
+        url, code = await asyncio.to_thread(login.link)
+    except RuntimeError as exc:
+        await say(f":x: The {tool} sign-in didn't start: `{exc}`")
+        return
+    if tool == "claude":
+        text = (f"*Sign in to Claude for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* Claude account.\n"
+                "2. Copy the code the page shows you and reply with it *in this thread*.\nThe link works for 15 minutes.")
+    else:
+        text = (f"*Sign in to Codex for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* ChatGPT account.\n"
+                f"2. Enter this code: `{code}`\nI'll say here when it's done. It works for 15 minutes.")
+    dm = await client.chat_postMessage(channel=user, text=text, unfurl_links=False)
+    if not channel.startswith("D"):
+        await say(":envelope_with_arrow: I sent you a DM to sign in.")
+    if tool == "claude":
+        LOGINS[dm["ts"]] = login
+        asyncio.create_task(_expire_login(dm["ts"]))
+    else:
+        asyncio.create_task(_finish_device_login(client, dm["channel"], dm["ts"], login))
+
+
+async def _expire_login(ts: str) -> None:
+    await asyncio.sleep(logins.WAIT_SECONDS)
+    login = LOGINS.pop(ts, None)
+    if login:
+        login.stop()
+
+
+async def _finish_device_login(client, channel: str, ts: str, login: logins.Login) -> None:
+    done = await asyncio.to_thread(login.wait)
+    text = (":white_check_mark: Signed in to Codex. Your Codex runs use your own account from now on." if done
+            else ":x: The Codex sign-in didn't finish. Start again with `@neo login codex`.")
+    await client.chat_postMessage(channel=channel, thread_ts=ts, text=text)
+
+
+async def answer_login(client, channel: str, thread_ts: str, user: str, text: str) -> None:
+    """A reply in a Claude sign-in DM is the code from the browser."""
+    login = LOGINS.get(thread_ts)
+    if not login or login.user != user:
+        return
+    ok, why = await asyncio.to_thread(login.answer, text.strip().strip("`").strip())
+    if ok:
+        LOGINS.pop(thread_ts, None)
+        when = people.daily(user, "brief")
+        brief = (f" I'll DM you a morning brief at {when[0]:02d}:{when[1]:02d} on work days, from your own mail, "
+                 "calendar and Slack (`@neo set my brief off` to stop)." if when and accounts.isolated(user) else "")
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text=f":white_check_mark: Signed in to Claude. Your runs use your own account from now on.{brief}")
+    else:
+        if login.proc.poll() is not None:
+            LOGINS.pop(thread_ts, None)
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: {why}")
 
 
 async def route_apply(req, thread_ts: str):
@@ -1228,8 +1406,6 @@ async def watch_scheduler(client) -> None:
     while True:
         try:
             for watch in await asyncio.to_thread(watches.due):
-                if accounts.isolated(watch.get("owner")):
-                    continue  # someone else's: watches.start refuses it while each person has their own account
                 log.info("watch %s is due", watch["id"])
                 await asyncio.to_thread(watches.start, watch["id"], "schedule")
         except Exception:  # noqa: BLE001 - try again next minute
@@ -1283,6 +1459,9 @@ async def handle_dm(event: dict, client) -> None:
         return
     channel, text = event["channel"], _clean_prompt(event.get("text", ""))
     thread_ts = event.get("thread_ts")
+    if thread_ts and thread_ts in LOGINS:
+        await answer_login(client, channel, thread_ts, user, event.get("text", ""))
+        return
     target = await sessions.get_thread(f"dm:{thread_ts}") if thread_ts else None
     if not target and thread_ts and await sessions.get_thread(thread_ts):
         await handle_mention(event, client)  # a typed follow-up in a DM thread a voice note started
@@ -1515,9 +1694,10 @@ async def handle_mention(event: dict, client) -> None:
             log.exception("%s failed for thread=%s", req.command, thread_ts)
             await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: `{req.command}` failed: `{type(exc).__name__}: {exc}`")
         return
-    if req.command in ("settings", "set", "watch"):
+    if req.command in ("settings", "set", "watch", "login", "logout", "logins"):
+        handler = {"watch": handle_watch, "login": handle_login, "logout": handle_login, "logins": handle_login}
         try:
-            await (handle_watch if req.command == "watch" else handle_settings)(client, channel, thread_ts, user, req)
+            await handler.get(req.command, handle_settings)(client, channel, thread_ts, user, req)
         except Exception as exc:  # noqa: BLE001 - always answer in the thread
             log.exception("%s failed for thread=%s", req.command, thread_ts)
             await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: `{req.command}` failed: `{type(exc).__name__}: {exc}`")
@@ -1550,7 +1730,7 @@ async def handle_mention(event: dict, client) -> None:
     if not req.prompt:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=commands.HELP)
         return
-    if req.cwd and not accounts.isolated(user) and not os.path.isdir(req.cwd):  # in their own account, neo-run checks it
+    if req.cwd and not accounts.enabled() and not os.path.isdir(req.cwd):  # in an account, neo-run checks it
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: Not a folder on this machine: `{req.cwd}`")
         return
     running = await asyncio.to_thread(_active_run, thread_ts, None, None)
@@ -1742,6 +1922,7 @@ async def main() -> None:
     alerts = asyncio.create_task(auto_rca(app.client))  # noqa: F841
     watchers = asyncio.create_task(watch_scheduler(app.client))  # noqa: F841
     held = asyncio.create_task(held_scheduler(app.client))  # noqa: F841
+    personal = asyncio.create_task(personal_scheduler(app.client)) if accounts.enabled() else None  # noqa: F841
     chief_jobs = chief.start(app.client, NOTIFY_CHANNEL, NOTIFY_USER, DASHBOARD_URL)  # noqa: F841
     RESUMED.extend(await finish_adopted_slack_runs(app.client))  # hold the tasks so they are not collected
     await resume_live_runs(app.client)

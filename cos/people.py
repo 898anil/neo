@@ -10,6 +10,8 @@ ALLOWED_USER_IDS use it too. Every person gets a small JSON file in NEO_PEOPLE_D
   channels   Slack channels they work in
   engine     claude or codex, when they don't name one
   model      model id for that engine (CLAUDE_MODEL / CODEX_MODEL otherwise)
+  brief      HH:MM for their own morning brief by DM on work days (their Slack time zone), or "off"
+  digest     HH:MM for their own evening digest by DM, or "off" (DAILY has the defaults)
   role       full | prs-only | read-only | blocked; only the owner sets it, and the owner is always full
 
 Roles until each person has their own sandbox (everyone still runs with the owner's logins):
@@ -33,7 +35,9 @@ from typing import Optional
 
 ROLES = ("full", "prs-only", "read-only", "blocked")
 ENGINES = ("claude", "codex")
-FIELDS = ("name", "style", "repos", "channels", "engine", "model", "role")
+FIELDS = ("name", "style", "repos", "channels", "engine", "model", "brief", "digest", "role")
+DAILY = {"brief": "09:00", "digest": "19:00"}  # when a person's own brief and digest come unless they set it
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 MAX_TEXT = 300
 MAX_ITEMS = 10
 _USER_RE = re.compile(r"^[UW][A-Z0-9]{2,20}$")
@@ -168,6 +172,11 @@ def _check(field: str, value):
         if value and value not in ENGINES:
             raise ValueError(f"engine must be one of {', '.join(ENGINES)}")
         return value
+    if field in DAILY:
+        value = str(value or "").strip().lower()
+        if value and value != "off" and not _TIME_RE.match(value):
+            raise ValueError(f"{field} takes a time like 08:30 (24-hour), or off")
+        return f"{int(value.split(':')[0]):02d}:{value.split(':')[1]}" if value and value != "off" else value
     if field == "model":
         value = str(value or "").strip()
         if value and not _NAME_RE.match(value):
@@ -246,12 +255,13 @@ def describe(user: str) -> str:
     """Their settings as a Slack message."""
     data = load(user)
     rows = [f"*Settings for {name(user)}* (role: {role(user)}{', set by the owner' if not is_owner(user) else ''})"]
-    for field in ("name", "style", "repos", "channels", "engine", "model"):
-        value = data.get(field)
+    for field in ("name", "style", "repos", "channels", "engine", "model", "brief", "digest"):
+        value = data.get(field) or (f"{DAILY[field]} (default)" if field in DAILY else None)
         shown = ", ".join(value) if isinstance(value, list) else value
         rows.append(f"• {field}: {slack_safe(shown) if shown else '_not set_'}")
     rows.append("Change one: `@neo set my style bullets, short` · `@neo set my repos backie, deskie` · "
                 "`@neo set my channels eng-backend` · `@neo set my engine codex` · `@neo set my model <id>` · "
+                "`@neo set my brief 08:30` / `set my digest off` · "
                 "`@neo set my style` with nothing after it clears it.")
     return "\n".join(rows)
 
@@ -262,3 +272,12 @@ def everyone() -> list[str]:
         return sorted(p.stem for p in people_dir().glob("*.json") if valid_user(p.stem))
     except OSError:
         return []
+
+
+def daily(user: str, field: str) -> Optional[tuple[int, int]]:
+    """(hour, minute) of this person's own brief or digest, or None when they turned it off."""
+    value = load(user).get(field) or DAILY[field]
+    if value == "off":
+        return None
+    hour, minute = value.split(":")
+    return int(hour), int(minute)
