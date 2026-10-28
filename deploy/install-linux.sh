@@ -87,6 +87,23 @@ else
   echo "  tailscale not found: dashboard stays on http://127.0.0.1:$PORT"
 fi
 
+say "Live agents"
+# Live agents run interactive Claude in herdr as $SVC_USER; its one-time bypass-permissions warning would
+# block every first start (agent_not_ready), so accept it in that account's own settings.
+sudo -u "$SVC_USER" -H python3 - <<'EOF'
+import json, os
+path = os.path.expanduser("~/.claude/settings.json")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    data = json.load(open(path))
+except (OSError, ValueError):
+    data = {}
+if not data.get("skipDangerousModePermissionPrompt"):
+    data["skipDangerousModePermissionPrompt"] = True
+    open(path, "w").write(json.dumps(data, indent=2) + "\n")
+print("  claude: bypass-permissions warning accepted for live agents")
+EOF
+
 say "Per-person accounts (cos/accounts.py; used when .env has NEO_ACCOUNTS=1)"
 # People's accounts are kept out of neo's files by permissions alone: its home, .env and runs are private.
 chmod 700 "$SVC_HOME"
