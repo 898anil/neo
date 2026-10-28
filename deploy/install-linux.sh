@@ -51,7 +51,12 @@ PY="$ROOT/.venv/bin/python"
 echo "  $PY"
 
 say "Tests"
-as_svc "$PY" -m unittest discover -s tests 2>&1 | tail -1
+# Judged by unittest's summary, not its exit status: piped, the run can exit 1 after "OK" (still unexplained).
+TEST_LOG="$(mktemp)"
+as_svc "$PY" -m unittest discover -s tests > "$TEST_LOG" 2>&1 || true
+SUMMARY="$(grep -E '^(OK|FAILED)' "$TEST_LOG" | tail -1)"
+echo "  ${SUMMARY:-no summary}"
+case "$SUMMARY" in OK*) rm -f "$TEST_LOG" ;; *) echo "  tests did not pass; full output: $TEST_LOG"; exit 1 ;; esac
 
 PORT="$(env_get NEO_DASHBOARD_PORT)"; PORT="${PORT:-8788}"
 env_set_default NEO_DASHBOARD_PORT "$PORT"
