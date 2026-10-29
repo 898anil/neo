@@ -170,11 +170,11 @@ class HardeningTest(Base):
         self.assertIsNone(broker.screen("Use git blame -L 42,42 path/to/file"))
 
     def test_parallel_asks_cant_pass_the_limits(self):
-        self.assertIsNone(broker._reserve(AJAY, "r1"))
-        self.assertIsNone(broker._reserve(AJAY, "r2"))
-        self.assertIn("waiting", broker._reserve(AJAY, "r3"))
-        broker._release("r1")
-        self.assertIsNone(broker._reserve(AJAY, "r3"))
+        for n in range(broker.IN_FLIGHT_PER_ASKER):
+            self.assertIsNone(broker._reserve(AJAY, f"r{n}"))
+        self.assertIn("waiting", broker._reserve(AJAY, "rx"))
+        broker._release("r0")
+        self.assertIsNone(broker._reserve(AJAY, "rx"))
 
     def test_what_the_owner_approves_is_what_is_sent(self):
         long = "x " * 2000
