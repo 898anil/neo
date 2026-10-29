@@ -36,10 +36,17 @@ import sys
 from pathlib import Path
 
 ENGINES = ("claude", "codex")
-GH_ALLOWED = (  # gh only signs the account in or out, exactly as neo asks (cos/logins.py); never prints a token
-    ("auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"),
-    ("auth", "status", "--hostname", "github.com"),
-    ("auth", "logout", "--hostname", "github.com"))
+SIGN_INS = {  # other tools only sign the account in or out, exactly as neo asks (cos/logins.py ARGV)
+    "gh": (("auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"),
+           ("auth", "status", "--hostname", "github.com"),
+           ("auth", "logout", "--hostname", "github.com")),
+    "gcloud": (("auth", "login", "--no-launch-browser", "--update-adc"),
+               ("auth", "revoke", "--all", "--quiet"),
+               ("auth", "list", "--filter=status:ACTIVE", "--format=value(account)")),
+    "doppler": (("login", "--yes", "--no-check-version"),
+                ("logout", "--yes", "--no-check-version"),
+                ("me", "--no-check-version")),
+}
 PATH = "/usr/local/bin:/usr/bin:/bin"
 REFUSED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "BASH_ENV", "ENV", "IFS")
 KILL_AFTER = 10  # seconds between SIGTERM and SIGKILL
@@ -78,7 +85,7 @@ def resolve_cwd(home: Path, cwd: str) -> Path:
 
 
 def engine_path(name: str, args: list = ()) -> str:
-    if name == "gh" and tuple(args) in GH_ALLOWED:
+    if tuple(args) in SIGN_INS.get(name, ()):
         pass
     elif name not in ENGINES:
         fail(f"not an engine: {name}")
@@ -105,6 +112,19 @@ def own_logins(home: Path) -> dict:
         "gh": (home / ".config" / "gh" / "hosts.yml").is_file(),
         "codex": (home / ".codex" / "auth.json").is_file(),
     }
+
+
+TOKEN_NAME = re.compile(r"^[A-Z][A-Z0-9_]{2,40}$")
+
+
+def token_env(tokens) -> dict:
+    """The person's own tool tokens (SENTRY_AUTH_TOKEN, ...), as the tools expect them; odd names are refused."""
+    out = {}
+    for name, value in (tokens or {}).items():
+        name, value = str(name), str(value)
+        if TOKEN_NAME.match(name) and name not in REFUSED_ENV and not name.startswith(REFUSED_PREFIXES) and value:
+            out[name] = value
+    return out
 
 
 def login_env(home: Path, shared: dict) -> tuple[dict, dict]:
@@ -189,6 +209,7 @@ def main() -> int:
            "LANG": "C.UTF-8", "TMPDIR": str(tmp), **clean_env(spec.get("env"))}
     logins, used = login_env(home, spec.get("shared"))
     env.update(logins)
+    env.update(token_env(spec.get("tokens")))
     env.update(git_identity_env(home, str(spec.get("git_name") or ""), str(spec.get("git_email") or "")))
     run_id = str((spec.get("env") or {}).get("NEO_RUN_ID") or os.getpid())
     folder, paths = write_files(home, run_id, spec.get("files"))

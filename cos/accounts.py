@@ -196,7 +196,15 @@ def spec(meta: dict, argv: list[str], env: dict, files: dict) -> dict:
     return {"argv": argv, "cwd": meta["cwd"], "files": files,
             "env": {k: env[k] for k in (*ENV_FOR_RUNS, *extra) if env.get(k)},
             "shared": shared,
+            # the person's own tool tokens (cos/tokens.py), never to a run answering someone else
+            "tokens": _own_tokens(meta) if lend != "claude" else {},
             "git_name": meta.get("git_name") or "", "git_email": meta.get("git_email") or ""}
+
+
+def _own_tokens(meta: dict) -> dict:
+    from . import people, tokens
+
+    return tokens.env_for(meta.get("slack_user") or people.owner_id())
 
 
 def command(account: str, spec_fd: int) -> list[str]:

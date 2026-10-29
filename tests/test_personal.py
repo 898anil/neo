@@ -120,9 +120,9 @@ class LoginTest(Base):
             self.assertEqual(login.link(timeout=10), ("https://auth.openai.com/codex/device", "MKSA-RJI4C"))
             self.assertTrue(login.wait(timeout=10))
 
-    def test_only_claude_and_codex(self):
+    def test_only_tools_neo_knows(self):
         with self.assertRaises(ValueError):
-            logins.begin(AJAY, "neo-ajay", "gcloud")
+            logins.begin(AJAY, "neo-ajay", "jira")
 
     def test_signed_in_reads_each_clis_status(self):
         with self.fake():
@@ -338,3 +338,81 @@ class SharedNotesTest(Base):
             {"id": "abc123", "text": "deploys need the exit node", "target": "lessons.md", "by": AJAY}])
         self.assertIn("home_note_approve_abc123", str(view))
         self.assertIn("exit node", str(view))
+
+
+class ToolsTest(Base):
+    """gcloud and Doppler sign in from Slack; Sentry, Neon and Linear connect with a token typed into a form."""
+
+    def test_neo_run_allows_exactly_the_sign_ins_neo_sends(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_accounts import load_script
+        mod = load_script("neo-run")
+        for (tool, action), argv in logins.ARGV.items():
+            if tool in ("claude", "codex"):
+                continue
+            self.assertIn(tuple(argv[1:]), mod.SIGN_INS[tool], (tool, action))
+        for tool, args in (("gcloud", ["auth", "print-access-token"]), ("doppler", ["secrets", "download"]),
+                           ("gcloud", ["auth", "login", "--no-launch-browser", "--cred-file=/x"])):
+            with self.assertRaises(SystemExit, msg=args):
+                mod.engine_path(tool, args)
+
+    def test_doppler_and_gcloud_sign_ins(self):
+        text = ("Complete authorization at https://dashboard.doppler.com/workplace/auth/cli\nYour auth code is:\n"
+                "yonkers_feet_indianapolis_pudding_hollywood\nWaiting...")
+        self.assertEqual(logins.DEVICE_CODE["doppler"].search(text).group(1), "yonkers_feet_indianapolis_pudding_hollywood")
+        self.assertIn("gcloud", logins.PASTE)
+        with patch.object(logins, "run", return_value=(0, "ajay@acme.com\n")):
+            self.assertTrue(logins.signed_in("neo-ajay", "gcloud"))
+        with patch.object(logins, "run", return_value=(0, "")):
+            self.assertFalse(logins.signed_in("neo-ajay", "gcloud"))
+        with patch.object(logins, "run", return_value=(1, "Doppler Error: you must provide a token")):
+            self.assertFalse(logins.signed_in("neo-ajay", "doppler"))
+
+    def test_a_token_reaches_only_its_persons_own_runs(self):
+        from cos import tokens
+        tokens.save(AJAY, "sentry", "sntrys_abcdefghijklmnop")
+        with self.assertRaises(ValueError):
+            tokens.save(AJAY, "sentry", "has spaces in it")
+        with self.assertRaises(ValueError):
+            tokens.save(AJAY, "gitlab", "abcdefghijkl")
+        self.assertEqual(oct(tokens.STORE.path().stat().st_mode & 0o777), "0o600")
+        mine = accounts.spec({"cwd": "/x", "slack_user": AJAY}, ["claude"], {}, {})
+        self.assertEqual(mine["tokens"], {"SENTRY_AUTH_TOKEN": "sntrys_abcdefghijklmnop"})
+        self.assertEqual(accounts.spec({"cwd": "/x", "slack_user": OWNER}, ["claude"], {}, {})["tokens"], {})
+        answering = accounts.spec({"cwd": "/x", "slack_user": AJAY, "lend": "claude"}, ["claude"], {}, {})
+        self.assertEqual(answering["tokens"], {})  # a CoS answering someone else never gets them
+        self.assertTrue(tokens.remove(AJAY, "sentry"))
+        self.assertEqual(tokens.env_for(AJAY), {})
+
+    def test_neo_run_takes_only_tool_like_names(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_accounts import load_script
+        mod = load_script("neo-run")
+        self.assertEqual(mod.token_env({"SENTRY_AUTH_TOKEN": "t", "LD_PRELOAD": "/x.so", "PATH": "/evil", "lower": "x"}),
+                         {"SENTRY_AUTH_TOKEN": "t"})
+
+    def test_the_form_saves_a_good_token_and_explains_a_bad_one(self):
+        import app
+        from unittest.mock import AsyncMock
+        from cos import tokens
+
+        def body(value):
+            return {"user": {"id": AJAY}, "view": {"private_metadata": "neon",
+                                                   "state": {"values": {"token": {"value": {"value": value}}}}}}
+
+        async def go():
+            ack, client = AsyncMock(), AsyncMock()
+            with patch.object(app, "may_use", AsyncMock(return_value=True)), patch.object(app, "publish_home", AsyncMock()):
+                await app.on_token_form(ack, body("bad token"), client)
+                self.assertEqual(ack.await_args.kwargs.get("response_action"), "errors")
+                await app.on_token_form(ack, body("napi_abcdefghijklmnop"), client)
+        asyncio.run(go())
+        self.assertEqual(tokens.env_for(AJAY), {"NEON_API_KEY": "napi_abcdefghijklmnop"})
+
+    def test_commands_and_plain_words_know_the_tools(self):
+        import commands
+        from cos import intent
+        self.assertEqual(commands.parse("login gcloud").engine, "gcloud")
+        self.assertEqual(commands.parse("login sentry").engine, "sentry")
+        self.assertTrue(intent.likely("connect my google cloud"))
+        self.assertTrue(intent.likely("connect my sentry"))

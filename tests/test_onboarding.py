@@ -38,7 +38,7 @@ class IntentTest(Base):
 
     def test_answers_neo_cant_act_on_are_tasks(self):
         self.assertIsNone(intent.check({"intent": "none"}))
-        self.assertIsNone(intent.check({"intent": "connect", "tool": "gcloud"}))
+        self.assertIsNone(intent.check({"intent": "connect", "tool": "jira"}))
         self.assertIsNone(intent.check({"intent": "brief_time", "time": ""}))
         self.assertIsNone(intent.check({"intent": "watch_add", "name": "ci", "what": ""}))
         self.assertIsNone(intent.check("connect"))

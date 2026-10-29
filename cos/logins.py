@@ -7,6 +7,9 @@ login it saves is theirs (~/.claude, ~/.codex in their home) and their runs use 
   codex   `codex login --device-auth` prints a link and a one-time code; it finishes by itself once
           they enter the code in the browser.
   gh      `gh auth login --web` does the same for GitHub (and sets git up to use it over https).
+  gcloud  `gcloud auth login --no-launch-browser` works like claude: a link, then the code pasted back
+          (kubectl for GKE uses it through gke-gcloud-auth-plugin).
+  doppler `doppler login` works like codex: a link and an auth code to enter there.
 A sign-in that nobody finishes is stopped after WAIT_SECONDS.
 """
 
@@ -22,7 +25,8 @@ from typing import Optional
 
 from . import accounts
 
-TOOLS = ("claude", "codex", "gh")
+TOOLS = ("claude", "codex", "gh", "gcloud", "doppler")
+PASTE = ("claude", "gcloud")  # the browser shows a code they reply with; the others finish by themselves
 WAIT_SECONDS = 15 * 60
 ARGV = {
     ("claude", "login"): ["claude", "auth", "login"],
@@ -34,9 +38,19 @@ ARGV = {
     ("gh", "login"): ["gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"],
     ("gh", "logout"): ["gh", "auth", "logout", "--hostname", "github.com"],
     ("gh", "status"): ["gh", "auth", "status", "--hostname", "github.com"],
+    ("gcloud", "login"): ["gcloud", "auth", "login", "--no-launch-browser", "--update-adc"],
+    ("gcloud", "logout"): ["gcloud", "auth", "revoke", "--all", "--quiet"],
+    ("gcloud", "status"): ["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"],
+    ("doppler", "login"): ["doppler", "login", "--yes", "--no-check-version"],
+    ("doppler", "logout"): ["doppler", "logout", "--yes", "--no-check-version"],
+    ("doppler", "status"): ["doppler", "me", "--no-check-version"],
+}
+DEVICE_CODE = {  # the one-time code a device sign-in shows, per tool
+    "codex": re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b"),
+    "gh": re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b"),
+    "doppler": re.compile(r"auth code is:\s*([a-z]+(?:_[a-z]+){2,})"),
 }
 _URL = re.compile(r"https://[^\s<>\"']+")
-_DEVICE_CODE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4,6}\b")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
@@ -98,16 +112,17 @@ class Login:
 
     def link(self, timeout: float = 60) -> tuple[str, Optional[str]]:
         """(sign-in link, codex's one-time code or None). Raises RuntimeError when the CLI shows none."""
-        if self.tool != "claude":
-            found = self._wait_for(lambda text: _URL.search(text) and _DEVICE_CODE.search(text), timeout)
+        device = DEVICE_CODE.get(self.tool)
+        if device:
+            found = self._wait_for(lambda text: _URL.search(text) and device.search(text), timeout)
         else:
             found = self._wait_for(lambda text: _URL.search(text), timeout)
         text = self.output()
         if not found:
             self.stop()
             raise RuntimeError(_tail(text) or "the sign-in didn't start")
-        code = _DEVICE_CODE.search(text)
-        return _URL.search(text).group(0), (code.group(0) if self.tool != "claude" and code else None)
+        code = device.search(text) if device else None
+        return _URL.search(text).group(0), (code.group(1) if code else None)
 
     def answer(self, code: str, timeout: float = 90) -> tuple[bool, str]:
         """Pass the browser's code to `claude auth login`. (signed in, what to tell them)."""
@@ -176,6 +191,10 @@ def signed_in(account: str, tool: str) -> Optional[bool]:
         code, out = run(account, tool, "status")
     except (OSError, subprocess.SubprocessError):
         return None
+    if tool == "gcloud":
+        return "@" in out if code == 0 else None
+    if tool == "doppler":
+        return code == 0 and "error" not in out.lower()
     if tool == "claude":
         match = re.search(r"\{.*\}", out, re.S)
         try:

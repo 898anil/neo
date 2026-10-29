@@ -8,7 +8,8 @@ from typing import Optional
 
 CONNECT, BRIEF, DIGEST, WATCH_REMOVE = "home_connect", "home_brief", "home_digest", "home_watch_remove"
 NOTE_APPROVE, NOTE_REJECT = "home_note_approve", "home_note_reject"
-TOOL_NAMES = {"claude": "Claude", "codex": "Codex", "gh": "GitHub"}
+TOOL_NAMES = {"claude": "Claude", "codex": "Codex", "gh": "GitHub", "gcloud": "Google Cloud", "doppler": "Doppler"}
+TOKEN, TOKEN_OFF = "home_token", "home_token_off"
 BRIEF_TIMES = [f"{h:02d}:{m:02d}" for h in range(6, 12) for m in (0, 30)]
 DIGEST_TIMES = [f"{h:02d}:{m:02d}" for h in range(16, 22) for m in (0, 30)]
 STATUS_MARK = {"done": ":white_check_mark:", "failed": ":x:", "stopped": ":black_square_for_stop:"}
@@ -32,7 +33,7 @@ def _time_select(action: str, times: list[str], current: Optional[str]) -> dict:
 def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], runs: list[dict],
          watches: list[dict], lender: Optional[str] = None, dashboard_url: Optional[str] = None,
          pending: Optional[list[dict]] = None, policy: str = "", exchanges: Optional[list[dict]] = None,
-         cos: str = "", work: Optional[dict] = None) -> dict:
+         cos: str = "", work: Optional[dict] = None, token_tools: Optional[dict] = None) -> dict:
     """logins: tool -> "own" | "lent" | "none" | "unknown". brief/digest: "HH:MM" or None (off).
     runs: today's {title, status, url}. watches: {id, name, every, enabled}. lender: whose logins are lent."""
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"Hi {name}"[:150]}},
@@ -51,6 +52,14 @@ def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], r
         if state != "unknown":
             row["accessory"] = {"type": "button", "action_id": f"{CONNECT}_{tool}", "value": tool,
                                 "text": {"type": "plain_text", "text": "Reconnect" if state == "own" else "Connect"}}
+        blocks.append(row)
+    from .tokens import TOOLS as TOKEN_TOOLS
+    for tool, on in (token_tools or {}).items():
+        label = TOKEN_TOOLS[tool][0]
+        row = _text(f"*{label}*  {':white_check_mark: connected' if on else ':white_circle: not connected'}")
+        row["accessory"] = ({"type": "button", "action_id": f"{TOKEN_OFF}_{tool}", "value": tool, "text": {"type": "plain_text", "text": "Remove"}}
+                            if on else {"type": "button", "action_id": f"{TOKEN}_{tool}", "value": tool,
+                                        "text": {"type": "plain_text", "text": "Connect"}})
         blocks.append(row)
 
     blocks += [{"type": "divider"}, _text("*Morning brief*: your calendar, mail and Slack, by DM on work days. "

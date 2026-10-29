@@ -46,7 +46,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import accounts, autonomy, broker, home_tab, intent, learn, logins, onboarding, people, voice  # noqa: E402
+from cos import accounts, autonomy, broker, home_tab, intent, learn, logins, onboarding, people, tokens, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -1300,6 +1300,20 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
     if not people.valid_user(user):
         await say(":x: I can't tell who you are.")
         return
+    tool = req.engine or "claude"
+    if tool in tokens.TOOLS and req.command != "logins":  # a token, typed into a Slack form, never a message
+        label = tokens.TOOLS[tool][0]
+        if req.command == "logout":
+            gone = await asyncio.to_thread(tokens.remove, user, tool)
+            await say(f":wave: Removed your {label} token." if gone else f"You had no {label} token connected.")
+            asyncio.create_task(publish_home(client, user))
+            return
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f"Connect {label}", blocks=[
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"{label} connects with a personal token. The button opens a "
+                                                                   "private form; what you type there isn't posted anywhere."},
+             "accessory": {"type": "button", "action_id": f"{home_tab.TOKEN}_{tool}", "value": tool, "style": "primary",
+                           "text": {"type": "plain_text", "text": f"Connect {label}"}}}])
+        return
     account = await _account_of(client, user)
     if req.command == "logins":
         rows = []
@@ -1308,13 +1322,15 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
             lent = _lent(user)[tool]
             state = ("your own login" if own else f"{owner_name()}'s, lent (`@neo login {tool}` to use yours)" if lent
                      else f"not signed in (`@neo login {tool}`)") if own is not None else "couldn't tell"
-            rows.append(f"• {tool}: {state}")
+            rows.append(f"• {home_tab.TOOL_NAMES.get(tool, tool)}: {state}")
+        mine = tokens.connected(user)
+        rows += [f"• {label}: {'connected' if tool in mine else 'not connected'}" for tool, (label, _, _) in tokens.TOOLS.items()]
         await say("*Your sign-ins*\n" + "\n".join(rows))
         return
-    tool = req.engine or "claude"
     if req.command == "logout":
         code, out = await asyncio.to_thread(logins.run, account, tool, "logout")
-        await say(f":wave: Signed your workspace out of {tool}." if code == 0 else f":x: Couldn't sign out of {tool}: `{out.strip()[-200:]}`")
+        await say(f":wave: Signed your workspace out of {home_tab.TOOL_NAMES.get(tool, tool)}." if code == 0
+                  else f":x: Couldn't sign out of {tool}: `{out.strip()[-200:]}`")
         return
     if user in SIGNING_IN:
         await say(":hourglass: Your sign-in is already starting; check your DMs.")
@@ -1338,17 +1354,19 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
 
 async def _send_sign_in(client, channel: str, user: str, tool: str, login: logins.Login, url: str,
                         code: Optional[str], say) -> None:
-    if tool == "claude":
-        text = (f"*Sign in to Claude for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* Claude account.\n"
+    label = home_tab.TOOL_NAMES.get(tool, tool)
+    if tool in logins.PASTE:
+        whose = {"claude": "Claude", "gcloud": "Google"}.get(tool, label)
+        text = (f"*Sign in to {label} for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* {whose} account.\n"
                 "2. Copy the code the page shows you and reply with it *in this thread*.\nThe link works for 15 minutes.")
     else:
-        label, account = ("Codex", "ChatGPT") if tool == "codex" else ("GitHub", "GitHub")
+        label, account = {"codex": ("Codex", "ChatGPT"), "gh": ("GitHub", "GitHub"), "doppler": ("Doppler", "Doppler")}.get(tool, (label, label))
         text = (f"*Sign in to {label} for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* {account} account.\n"
                 f"2. Enter this code: `{code}`\nI'll say here when it's done. It works for 15 minutes.")
     dm = await client.chat_postMessage(channel=user, text=text, unfurl_links=False)
     if not channel.startswith(("D", "U")):
         await say(":envelope_with_arrow: I sent you a DM to sign in.")
-    if tool == "claude":
+    if tool in logins.PASTE:
         LOGINS[dm["ts"]] = login
         SIGN_IN_THREADS.update(lambda d: d.update({dm["ts"]: user}))  # kept after it ends (and across restarts)
         asyncio.create_task(_expire_login(dm["ts"]))
@@ -1474,7 +1492,8 @@ async def on_undo(ack, body, client) -> None:
 
 def _lent(user: str) -> dict:
     lent = accounts.shared_logins(people.role(user))
-    return {"claude": bool(lent["claude_token"]), "codex": bool(lent["openai_key"]), "gh": bool(lent["gh_token"])}
+    return {"claude": bool(lent["claude_token"]), "codex": bool(lent["openai_key"]), "gh": bool(lent["gh_token"]),
+            "gcloud": False, "doppler": False}
 
 
 async def login_states(client, user: str, fresh: bool = False) -> dict:
@@ -1517,7 +1536,8 @@ async def publish_home(client, user: Optional[str], check_logins: bool = False) 
                              runs, theirs, owner_name(), DASHBOARD_URL if _owner_user(user) else None,
                              await asyncio.to_thread(learn.pending) if _owner_user(user) else None,
                              broker.policy(user), _exchanges(user), cos_name(user, info),
-                             {"asked": broker.tasks_for(user), "doing": broker.tasks_for(user, asked=False)})
+                             {"asked": broker.tasks_for(user), "doing": broker.tasks_for(user, asked=False)},
+                             {tool: tool in tokens.connected(user) for tool in tokens.TOOLS})
         await client.views_publish(user_id=user, view=view)
     except Exception:  # noqa: BLE001 - the Home tab must never break anything else
         log.exception("could not publish the Home tab for %s", user)
@@ -1564,6 +1584,52 @@ async def on_home_connect(ack, body, client) -> None:
     user = body["user"]["id"]
     if await may_use(client, user):
         await handle_login(client, user, None, user, commands.Request("login", engine=body["actions"][0]["value"]))
+
+
+@app.action(re.compile(f"^{home_tab.TOKEN}_"))
+async def on_token_button(ack, body, client) -> None:
+    """Open the private form for a tool token (a modal: nothing typed there becomes a Slack message)."""
+    await ack()
+    user, tool = body["user"]["id"], body["actions"][0]["value"]
+    if tool not in tokens.TOOLS or not await may_use(client, user):
+        return
+    label, variable, where = tokens.TOOLS[tool]
+    await client.views_open(trigger_id=body["trigger_id"], view={
+        "type": "modal", "callback_id": "token_form", "private_metadata": tool,
+        "title": {"type": "plain_text", "text": f"Connect {label}"[:24]},
+        "submit": {"type": "plain_text", "text": "Connect"}, "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"Make a personal token at <{where}|{label}> and paste it here. "
+                                                                   "Only your own agents get it (as `" + variable + "`), and it "
+                                                                   "isn't posted anywhere in Slack."}},
+            {"type": "input", "block_id": "token", "label": {"type": "plain_text", "text": f"{label} token"},
+             "element": {"type": "plain_text_input", "action_id": "value", "placeholder": {"type": "plain_text", "text": "paste here"}}}]})
+
+
+@app.action(re.compile(f"^{home_tab.TOKEN_OFF}_"))
+async def on_token_off(ack, body, client) -> None:
+    await ack()
+    user, tool = body["user"]["id"], body["actions"][0]["value"]
+    await asyncio.to_thread(tokens.remove, user, tool)
+    await publish_home(client, user)
+
+
+@app.view("token_form")
+async def on_token_form(ack, body, client) -> None:
+    user, tool = body["user"]["id"], body["view"].get("private_metadata", "")
+    value = (((body["view"].get("state") or {}).get("values") or {}).get("token") or {}).get("value", {}).get("value") or ""
+    if not await may_use(client, user):
+        await ack()
+        return
+    try:
+        await asyncio.to_thread(tokens.save, user, tool, value)
+    except ValueError as exc:
+        await ack(response_action="errors", errors={"token": str(exc)})
+        return
+    await ack()
+    SPEAKER.set(user)
+    await client.chat_postMessage(channel=user, text=f":white_check_mark: {tokens.TOOLS[tool][0]} connected. Your agents can use it from now on.")
+    await publish_home(client, user)
 
 
 @app.action(re.compile(f"^({home_tab.BRIEF}|{home_tab.DIGEST})$"))
@@ -1685,8 +1751,10 @@ async def answer_login(client, channel: str, thread_ts: str, user: str, text: st
         when = people.daily(user, "brief")
         brief = (f" I'll DM you a morning brief at {when[0]:02d}:{when[1]:02d} on work days, from your own mail, "
                  "calendar and Slack (`@neo set my brief off` to stop)." if when and accounts.isolated(user) else "")
+        label = home_tab.TOOL_NAMES.get(login.tool, login.tool)
+        brief = brief if login.tool == "claude" else ""
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                      text=f":white_check_mark: Signed in to Claude. Your runs use your own account from now on.{brief}")
+                                      text=f":white_check_mark: Signed in to {label}. Your agents use your own account from now on.{brief}")
     else:
         if login.proc.poll() is not None:
             LOGINS.pop(thread_ts, None)
@@ -1951,7 +2019,7 @@ async def handle_dm(event: dict, client) -> None:
     if thread_ts and thread_ts in (await asyncio.to_thread(SIGN_IN_THREADS.read)):
         # a code for a sign-in that ended (expired, replaced, neo restarted): never a task prompt
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                      text="That sign-in has ended. Say \"connect my claude\" to start a new one.")
+                                      text="That sign-in has ended. Say \"connect my claude\" (or the tool) to start a new one.")
         return
     step = await asyncio.to_thread(onboarding.step_of, user)
     if step in onboarding.STEPS and (not thread_ts or thread_ts == await asyncio.to_thread(onboarding.step_ts, user)):

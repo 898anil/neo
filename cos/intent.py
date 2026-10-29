@@ -25,7 +25,7 @@ INTENTS = ("none", "connect", "disconnect", "connections", "brief_time", "digest
 _LIKELY = re.compile("|".join((  # phrasings about neo itself; bare tool names ("check the github actions") are tasks
     r"\bmy (?:morning |evening )?(?:brief|digest|cos|chief of staff|settings|style|repos?|channels?|engine|model|"
     r"watch(?:es)?|memory|name|sign-?ins?|logins?|accounts?|policy|time ?zone)\b",
-    r"\b(?:connect|disconnect|link|unlink|sign (?:me )?(?:in|out)|log ?(?:me )?(?:in|out))\b.{0,30}\b(?:claude|codex|github|gh)\b",
+    r"\b(?:connect|disconnect|link|unlink|sign (?:me )?(?:in|out)|log ?(?:me )?(?:in|out))\b.{0,30}\b(?:claude|codex|github|gh|gcloud|gcp|google cloud|kubectl|gke|doppler|sentry|neon|linear)\b",
     r"\b(?:stop|start|pause|resume|keep) watching\b", r"\bwatch (?:for|out for)\b.{0,80}\bevery\b",
     r"\b(?:send|move|turn (?:on|off)|stop|cancel|change|skip)\b.{0,20}\b(?:brief|digest)\b",
     r"\bcall me\b", r"\b(?:call|name|rename) (?:my|the) (?:cos|chief of staff|assistant|bot|neo)\b", r"^\s*remember\b", r"\bwhat (?:do you|can you) (?:remember|do)\b", r"\bwhat are you watching\b",
@@ -37,7 +37,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "intent": {"type": "string", "enum": list(INTENTS)},
-        "tool": {"type": "string", "enum": ["claude", "codex", "gh", ""]},
+        "tool": {"type": "string", "enum": ["claude", "codex", "gh", "gcloud", "doppler", "sentry", "neon", "linear", ""]},
         "time": {"type": "string", "description": "HH:MM 24-hour, or off"},
         "field": {"type": "string", "enum": ["name", "style", "repos", "channels", "engine", "model", "cos_name", ""]},
         "value": {"type": "string"},
@@ -52,7 +52,8 @@ PROMPT = """You sort one Slack message sent to neo, a chief-of-staff bot that ru
 whether the person is asking to change or see something about neo itself for them, or giving neo a task.
 
 Intents:
-- connect / disconnect: sign their neo workspace in to or out of a tool (tool: claude, codex, or gh for GitHub)
+- connect / disconnect: sign their neo workspace in to or out of a tool (tool: claude, codex, gh for GitHub,
+  gcloud for Google Cloud / GCP / GKE / kubectl, doppler, sentry, neon, linear)
 - connections: which tools they are signed in to
 - brief_time / digest_time: when their morning brief / evening digest comes (time: HH:MM 24-hour, or "off")
 - watch_add: a standing check on a schedule (name: 1-3 words, every: minutes, at least 30; what: what to check)
@@ -105,7 +106,8 @@ def check(found) -> Optional[dict]:
     if not isinstance(found, dict) or found.get("intent") not in INTENTS or found["intent"] == "none":
         return None
     intent = found["intent"]
-    if intent in ("connect", "disconnect") and found.get("tool") not in ("claude", "codex", "gh"):
+    if intent in ("connect", "disconnect") and found.get("tool") not in ("claude", "codex", "gh", "gcloud", "doppler",
+                                                                          "sentry", "neon", "linear"):
         return None
     if intent in ("brief_time", "digest_time") and not str(found.get("time") or "").strip():
         return None
