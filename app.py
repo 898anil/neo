@@ -1781,7 +1781,12 @@ async def answer_login(client, channel: str, thread_ts: str, user: str, text: st
     login = LOGINS.get(thread_ts)
     if not login or login.user != user:
         return
-    ok, why = await asyncio.to_thread(login.answer, text.strip().strip("`").strip())
+    code = logins.code_from(text)
+    if not code:
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text="I didn't find a code in that. Reply with just the code the sign-in page shows.")
+        return
+    ok, why = await asyncio.to_thread(login.answer, code)
     if not ok:  # what the CLI said, never the code (it doesn't echo what it reads)
         log.info("%s sign-in for %s: code refused; CLI said: %s", login.tool, user, logins._tail(login.output()))
     if ok:

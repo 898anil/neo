@@ -416,3 +416,12 @@ class ToolsTest(Base):
         self.assertEqual(commands.parse("login sentry").engine, "sentry")
         self.assertTrue(intent.likely("connect my google cloud"))
         self.assertTrue(intent.likely("connect my sentry"))
+
+
+class SignInCodeTest(unittest.TestCase):
+    def test_the_code_comes_out_of_whatever_they_typed_around_it(self):
+        code = "AbCdEf123_-xyz#State_456-abc"
+        for reply in (code, f"<@U0C0W6X3ZNV> {code}", f"`{code}`", f"here it is: {code} thanks", f"<@U0C0W6X3ZNV>\n```{code}```"):
+            self.assertEqual(logins.code_from(reply), code, reply)
+        self.assertEqual(logins.code_from("4/0AfJohXk_long-google_code"), "4/0AfJohXk_long-google_code")
+        self.assertEqual(logins.code_from("<@U0C0W6X3ZNV> hi"), "")

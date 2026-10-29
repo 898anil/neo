@@ -165,6 +165,17 @@ class Login:
                 pass
 
 
+def code_from(text: str) -> str:
+    """The sign-in code in someone's reply: without the @neo mention, Slack markup, backticks or other words.
+    Claude's looks like "<code>#<state>"; Google's is one long token."""
+    text = re.sub(r"<[^>]*>", " ", text or "")  # <@U123>, <https://...|...>
+    words = [w.strip("`*_~'\".,;:()[]") for w in text.split()]
+    words = [w for w in words if re.fullmatch(r"[A-Za-z0-9_\-#/.+=]{8,}", w)]
+    if not words:
+        return ""
+    return next((w for w in words if "#" in w), max(words, key=len))
+
+
 def begin(user: str, account: str, tool: str) -> Login:
     if tool not in TOOLS:
         raise ValueError(f"I can sign you in to {' or '.join(TOOLS)}")
