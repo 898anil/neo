@@ -264,6 +264,7 @@ class CosNameTest(Base):
         people.save(AJAY, AJAY, cos_name="Friday")
         self.assertEqual(app.cos_name(AJAY, info), "Friday")
         self.assertEqual(app.cos_name("UNOBODY1"), "neo")
+        self.assertEqual(app.cos_name("UYOSH01", {"profile": {"display_name": "yosh"}}), "Yosh's neo")
 
     def test_posts_speak_as_the_neo_they_are_for_and_otherwise_as_neo(self):
         import app

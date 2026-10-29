@@ -111,9 +111,10 @@ def cos_name(user: str, info: Optional[dict] = None) -> str:
     if mine.get("cos_name"):
         return mine["cos_name"]
     profile = (info or {}).get("profile") or {}
-    full = mine.get("name") or (owner_name() if people.is_owner(user) else "") or profile.get("display_name") \
-        or profile.get("real_name") or (info or {}).get("real_name") or ""
+    full = mine.get("name") or (owner_name() if people.is_owner(user) else "") or profile.get("real_name") \
+        or (info or {}).get("real_name") or profile.get("display_name") or ""
     first = full.split()[0] if full.split() else ""
+    first = first[:1].upper() + first[1:]  # display names are often lowercase ("ajay")
     return f"{first}'s neo" if first and first.lower() != "the" else "neo"
 
 
