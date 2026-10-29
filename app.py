@@ -485,7 +485,7 @@ async def run_headless(client, channel: str, thread_ts: str, entry: Optional[dic
     cwd = accounts.cwd_for(account, req.cwd) if account else (req.cwd or WORKDIR)
     system = await asyncio.to_thread(agent_brief, cwd, user)  # reads memory and runs git: not on the event loop
     # what this CoS is for and may not do, and to resolve things itself before asking another (cos/broker.py)
-    system = "\n\n".join(filter(None, (system, broker.charter(user), accounts.brief(account) if account else "")))
+    system = "\n\n".join(filter(None, (system, broker.charter(user), broker.guide(), accounts.brief(account) if account else "")))
     slack = {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
              "system_prompt": system, "conclude": bool(system), "slack_user": user, "role": role}
     if account:

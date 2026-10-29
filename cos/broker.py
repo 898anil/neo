@@ -244,6 +244,36 @@ def charter(user: Optional[str], may_ask: bool = True) -> str:
     return "\n".join(lines)
 
 
+def guide() -> str:
+    """How neo works for people, so an agent answers questions about neo itself correctly."""
+    from . import people
+    from .config import owner_name
+
+    return "\n".join([
+        "## How neo works (answer questions about neo from this, not from guesses)",
+        "- Everyone talks to neo in Slack: a DM, or @neo in a channel. Each person's replies come from \"<their name>'s neo\". "
+        "neo runs on spark; each person gets their own account there automatically the first time they use it. "
+        "Nobody needs ssh, a terminal, or an admin to set anything up.",
+        "- The first time someone writes to neo, it DMs them a short guided setup: connect Claude, connect GitHub, "
+        "pick a morning-brief time. Every step can be skipped.",
+        "- Connecting tools: they say it in plain words to neo, e.g. \"connect my claude\" (their own Claude account; "
+        f"until then they use {owner_name()}'s shared one), \"connect my codex\", \"connect my github\", "
+        "\"connect my google cloud\" (gcloud and kubectl), \"connect my doppler\". neo DMs them the sign-in link; for "
+        "Claude and Google Cloud they reply in that DM thread with the code the page shows. Sentry, Neon and Linear connect "
+        "with a personal token through the Connect buttons on neo's Home tab (a private form). \"which tools am I "
+        "connected to\" lists them. Do not tell anyone to run `claude /login`, `setup-token` or similar themselves.",
+        "- Their morning brief and evening digest by DM: \"send my brief at 8\", \"turn off my digest\" (the brief needs "
+        "their own Claude). Watches: \"watch CI failures on backie every hour\". Memory: \"remember that ...\" "
+        f"(notes for a repo reach everyone only after {owner_name()} approves them). What their neo shares with other "
+        "people's neos: \"my neo can answer about deploys, never about costs\". Renaming: \"call my neo Friday\".",
+        "- neo's Home tab in Slack (click neo, then Home) shows their sign-ins, tools, brief and digest times, today's "
+        "tasks, watches, and work between neos.",
+        f"- People who have a neo now: {', '.join(r['name'] if not people.is_owner(r['user']) else owner_name() for r in directory()) or 'none'}. "
+        "Someone who hasn't messaged neo yet has no neo to ask.",
+        f"- Only {owner_name()} sets roles (full, prs-only, read-only, blocked) and team rules.",
+    ])
+
+
 # ------------------------------------------------------------------ asking
 
 
@@ -276,6 +306,19 @@ def asks_today(asker: str) -> int:
     since = time.time() - 86400
     return sum(1 for e in STATE.read().get("log") or []
                if e.get("asker") == asker and datetime.fromisoformat(e["at"]).timestamp() >= since)
+
+
+def _nobody(to: Optional[str]) -> str:
+    """Why there's no one to ask, with who can be asked."""
+    from . import people
+    from .config import owner_name
+
+    rows = directory()
+    names = ", ".join(f"{owner_name() if people.is_owner(r['user']) else r['name']} ({r['account'] or 'owner'})" for r in rows)
+    if to:
+        return (f"{to!r} has no neo yet: they need to message neo in Slack once first. People with a neo: {names or 'none'}. "
+                "Use one of those names or accounts with --to, or leave --to out and neo picks.")
+    return f"There's nobody else with a neo to ask yet. People with a neo: {names or 'none'}."
 
 
 def _reserve(asker: str, request_id: str) -> Optional[str]:
@@ -328,8 +371,7 @@ def ask(run_id: str, question: str, tried: str, to: Optional[str] = None, wait: 
     try:
         target = route(question, asker, to)
         if not target:
-            return {"status": "refused", "text": f"I don't know anyone called {to!r} (use their Slack name or account)."
-                    if to else "There's nobody else to ask."}
+            return {"status": "refused", "text": _nobody(to)}
         busy = STATE.update(lambda d: sum(1 for v in (d.get("inflight") or {}).values() if v.get("target") == target)
                             >= IN_FLIGHT_PER_TARGET or (d["inflight"][request_id].update(target=target) or False))
         if busy:
@@ -520,7 +562,7 @@ def delegate(run_id: str, request: str, tried: str, to: Optional[str] = None) ->
     try:
         target = route(request, asker, to)
         if not target:
-            return {"status": "refused", "text": f"I don't know anyone called {to!r}." if to else "There's nobody else to ask."}
+            return {"status": "refused", "text": _nobody(to)}
         target_name = people.name(target if not people.is_owner(target) else None)
         decided = decide(task_id, asker, target, request, tried)
     finally:

@@ -76,7 +76,7 @@ class RefusalTest(Base):
             self.assertEqual(self.ask("answer", "x")["status"], "refused")
 
     def test_unknown_names_and_blocked_people(self):
-        self.assertIn("don't know anyone", self.ask("answer", "x", to="zed")["text"])
+        self.assertIn("has no neo yet", self.ask("answer", "x", to="zed")["text"])
         people.save(YOSH, OWNER, role="blocked")
         self.assertIsNone(broker.route("q", AJAY, "yosh"))
 
@@ -340,3 +340,16 @@ class ProgressTest(Base):
         (work.dir / "events.jsonl").write_text(
             '{"kind": "tool_call", "title": "Read: pricing.py"}\n{"kind": "tool_call", "title": "Bash: python3 -m unittest"}\n')
         self.assertEqual(broker.progress({"run": work.id}), "2 steps so far; latest: Bash: python3 -m unittest")
+
+
+class GuideTest(Base):
+    def test_every_run_learns_how_neo_works(self):
+        text = broker.guide()
+        for phrase in ("connect my claude", "connect my google cloud", "Home tab", "send my brief at 8", "Nobody needs ssh"):
+            self.assertIn(phrase, text)
+        self.assertIn("Ajay", text)  # who has a neo
+
+    def test_an_unknown_name_says_who_can_be_asked(self):
+        out = self.ask("answer", "x", to="zed")
+        self.assertIn("'zed' has no neo yet", out["text"])
+        self.assertIn("neo-yosh", out["text"])
