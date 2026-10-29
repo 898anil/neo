@@ -341,7 +341,7 @@ class SharedNotesTest(Base):
 
 
 class ToolsTest(Base):
-    """gcloud and Doppler sign in from Slack; Sentry, Neon and Linear connect with a token typed into a form."""
+    """gcloud and Doppler sign in from Slack; Sentry connects with a token typed into a form."""
 
     def test_neo_run_allows_exactly_the_sign_ins_neo_sends(self):
         sys.path.insert(0, str(ROOT / "tests"))
@@ -397,7 +397,7 @@ class ToolsTest(Base):
         from cos import tokens
 
         def body(value):
-            return {"user": {"id": AJAY}, "view": {"private_metadata": "neon",
+            return {"user": {"id": AJAY}, "view": {"private_metadata": "sentry",
                                                    "state": {"values": {"token": {"value": {"value": value}}}}}}
 
         async def go():
@@ -407,7 +407,7 @@ class ToolsTest(Base):
                 self.assertEqual(ack.await_args.kwargs.get("response_action"), "errors")
                 await app.on_token_form(ack, body("napi_abcdefghijklmnop"), client)
         asyncio.run(go())
-        self.assertEqual(tokens.env_for(AJAY), {"NEON_API_KEY": "napi_abcdefghijklmnop"})
+        self.assertEqual(tokens.env_for(AJAY), {"SENTRY_AUTH_TOKEN": "napi_abcdefghijklmnop"})
 
     def test_commands_and_plain_words_know_the_tools(self):
         import commands

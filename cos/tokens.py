@@ -1,4 +1,4 @@
-"""Tools people connect with a personal token instead of a sign-in (Sentry, Neon, Linear).
+"""Tools people connect with a personal token instead of a sign-in (Sentry).
 
 A person pastes the token into a Slack form (a modal: what is typed there is never a message, so Slack
 keeps no copy in any conversation). neo keeps it in COS_HOME/tokens.json (0600, the service account's)
@@ -16,8 +16,6 @@ from .store import JsonStore
 
 TOOLS = {  # tool -> (name people know, environment variable, where they make a token)
     "sentry": ("Sentry", "SENTRY_AUTH_TOKEN", "https://sentry.io/settings/account/api/auth-tokens/"),
-    "neon": ("Neon", "NEON_API_KEY", "https://console.neon.tech/app/settings/api-keys"),
-    "linear": ("Linear", "LINEAR_API_KEY", "https://linear.app/settings/account/security"),
 }
 STORE = JsonStore("tokens.json")
 _TOKEN = re.compile(r"^[\x21-\x7e]{8,400}$")  # printable, no spaces

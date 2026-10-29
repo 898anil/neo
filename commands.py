@@ -91,7 +91,7 @@ def parse(text: str) -> Request:
     if head == "settings" and len(words) == 1:
         return Request("settings")
     tools = {"claude": "claude", "codex": "codex", "gh": "gh", "github": "gh", "gcloud": "gcloud", "gcp": "gcloud",
-             "doppler": "doppler", "sentry": "sentry", "neon": "neon", "linear": "linear"}
+             "doppler": "doppler", "sentry": "sentry"}
     if head in ("login", "logout") and len(words) <= 2 and (len(words) == 1 or words[1].lower() in tools):
         return Request(head, engine=tools[words[1].lower()] if len(words) == 2 else "claude")
     if head == "logins" and len(words) == 1:

@@ -272,8 +272,8 @@ def guide() -> str:
         "- Connecting tools: they say it in plain words to neo, e.g. \"connect my claude\" (their own Claude account; "
         f"until then they use {owner_name()}'s shared one), \"connect my codex\", \"connect my github\", "
         "\"connect my google cloud\" (gcloud and kubectl), \"connect my doppler\". neo DMs them the sign-in link; for "
-        "Claude and Google Cloud they reply in that DM thread with the code the page shows. Sentry, Neon and Linear connect "
-        "with a personal token through the Connect buttons on neo's Home tab (a private form). \"which tools am I "
+        "Claude and Google Cloud they reply in that DM thread with the code the page shows. Sentry connects "
+        "with a personal token through the Connect button on neo's Home tab (a private form). \"which tools am I "
         "connected to\" lists them. Do not tell anyone to run `claude /login`, `setup-token` or similar themselves.",
         "- Their morning brief and evening digest by DM: \"send my brief at 8\", \"turn off my digest\" (the brief needs "
         "their own Claude). Watches: \"watch CI failures on backie every hour\". Memory: \"remember that ...\" "
