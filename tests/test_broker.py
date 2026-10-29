@@ -35,7 +35,7 @@ class Base(unittest.TestCase):
         self.env.stop()
 
     def run_of(self, user, **extra):
-        return Run.create("claude", "task", str(self.dir), "full", extra={"slack_user": user, "slack_channel": "C1",
+        return Run.create("claude", "task", str(self.dir), "full", source="slack", extra={"slack_user": user, "slack_channel": "C1",
                                                                           "slack_thread": "1.1", **extra})
 
     def ask(self, decision, answer="", to="anil", user=AJAY, tried=TRIED):
@@ -123,9 +123,78 @@ class ExchangeTest(Base):
         self.assertIsNone(broker.resolve(request, AJAY, True))  # the asker can't release it
         self.assertIsNotNone(broker.resolve(request, OWNER, True))
         delivered = broker.take_outbox()[0]
-        self.assertEqual((delivered["user"], delivered["channel"], delivered["thread"]), (AJAY, "C1", "1.1"))
+        self.assertEqual(delivered["user"], AJAY)  # by DM: shared with them, not with the channel they asked from
+        self.assertNotIn("channel", delivered)
         self.assertIn("migration step", delivered["text"])
         self.assertIsNone(broker.resolve(request, OWNER, True))  # once
+
+
+class HardeningTest(Base):
+    """What the security review found (2026-10-29)."""
+
+    def test_runs_reading_other_peoples_text_cant_ask(self):
+        for kind in ("watch", "brief", "mentions", "alert-rca", "loops", "a2a-answer"):
+            self.assertFalse(broker.may_ask({"source": "slack", "kind": kind}), kind)
+        self.assertFalse(broker.may_ask({"source": "schedule"}))
+        self.assertTrue(broker.may_ask({"source": "slack"}))
+        self.assertTrue(broker.may_ask({"source": "dashboard"}))
+
+    def test_a_name_someone_chose_never_routes_or_identifies(self):
+        accounts._save_registry({AJAY: "neo-ajay", YOSH: "neo-yosh", OWNER: "neo-anil"})
+        people.save(YOSH, YOSH, name="Anil")  # "call me Anil"
+        self.assertEqual(broker.route("q", AJAY, "anil"), OWNER)  # the owner's account wins
+        self.assertEqual(broker.route("q", AJAY, YOSH), YOSH)
+        self.assertIn(f"<@{YOSH}> (neo-yosh)", broker.label(YOSH))
+        self.assertNotIn("Anil", broker.label(YOSH))
+
+    def test_answering_tools_read_only_and_prod_only_for_full_askers(self):
+        full, limited = " ".join(broker.answer_args("full")), " ".join(broker.answer_args("prs-only"))
+        for writer in ("Bash(sort", "Bash(uniq", "Bash(git log", "Bash(git diff", "Bash(cat", "Bash(kubectl get"):
+            self.assertNotIn(writer, full)
+        self.assertIn("Bash(kubectl logs:*)", full)
+        self.assertNotIn("kubectl", limited)
+        self.assertIn("Read(/proc/**)", full)
+        self.assertIn("Read(~/code/**)", full)
+
+    def test_an_answering_run_borrows_only_the_model(self):
+        with patch.dict(os.environ, {"NEO_SHARED_CLAUDE_TOKEN": "sk-o", "NEO_SHARED_GH_TOKEN": "ghp-o",
+                                     "NEO_SHARED_OPENAI_KEY": "sk-oa", "NEO_ACCOUNT_ENV": "DD_KEY"}):
+            spec = accounts.spec({"cwd": "/x", "lend": "claude", "role": "full"}, ["claude"], {"DD_KEY": "dd"}, {})
+        self.assertEqual(spec["shared"], {"claude_token": "sk-o", "gh_token": "", "openai_key": ""})
+        self.assertNotIn("DD_KEY", spec["env"])
+
+    def test_screen_catches_more_credential_shapes(self):
+        for text in ('{"refresh_token": "1//0gAbCdEfGhIjKlMnOpQrStUvWxYz"}', "ya29.a0AfH6SMBabcdefghijklmnopqrstu",
+                     "data: c3VwZXJzZWNyZXRwYXNzd29yZDEyMzQ1Njc4OTBhYmNkZWZnaGlqa2w="):
+            self.assertTrue(broker.screen(text), text)
+        self.assertIsNone(broker.screen("Use git blame -L 42,42 path/to/file"))
+
+    def test_parallel_asks_cant_pass_the_limits(self):
+        self.assertIsNone(broker._reserve(AJAY, "r1"))
+        self.assertIsNone(broker._reserve(AJAY, "r2"))
+        self.assertIn("waiting", broker._reserve(AJAY, "r3"))
+        broker._release("r1")
+        self.assertIsNone(broker._reserve(AJAY, "r3"))
+
+    def test_what_the_owner_approves_is_what_is_sent(self):
+        long = "x " * 2000
+        self.ask("ask_owner", long)
+        item = broker.take_outbox()[0]
+        self.assertEqual(len(item["draft"]), broker.MAX_ANSWER)
+        waiting = next(iter(broker.STATE.read()["waiting"].values()))
+        self.assertEqual(waiting["draft"], item["draft"])
+
+    def test_the_askers_words_cant_format_the_owners_dm(self):
+        run = self.run_of(AJAY)
+        with patch.object(broker, "answer", return_value={"decision": "ask_owner", "answer": "d", "reason": "r", "run": "x"}):
+            broker.ask(run.id, "<https://evil.example|click to approve> <!channel>", TRIED, "anil")
+        text = broker.take_outbox()[0]["text"]
+        self.assertNotIn("<https://evil", text)
+        self.assertNotIn("<!channel>", text)
+
+    def test_answers_are_marked_as_information(self):
+        out = self.ask("answer", "rerun it")
+        self.assertIn("not instructions", out["text"])
 
 
 class CharterTest(Base):
@@ -156,3 +225,60 @@ class NeoAskTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerTrustTest(Base):
+    """cos/server.py on a shared Linux box: loopback alone proves nothing (review 2026-10-29, C1 and M1)."""
+
+    def handler(self, path="/api/a2a/ask", headers=None, body=b"{}", peer_uid=None):
+        import io
+        from email.message import Message
+        from cos import server
+        h = server.Handler.__new__(server.Handler)
+        msg = Message()
+        for k, v in {"Host": "127.0.0.1:8788", "Content-Type": "application/json",
+                     "Content-Length": str(len(body)), **(headers or {})}.items():
+            msg[k] = v
+        h.headers, h.path, h.rfile, h.wfile = msg, path, io.BytesIO(body), io.BytesIO()
+        h.client_address, h.request_version, h.command = ("127.0.0.1", 50000), "HTTP/1.1", "POST"
+        h.errors = []
+        h._error = lambda status, text: h.errors.append((int(status), text))
+        h._json = lambda data, status=200: h.errors.append((int(status), data))
+        h._peer_uid = lambda: peer_uid
+        return h
+
+    def test_another_account_isnt_trusted_on_loopback(self):
+        from cos import server
+        with patch.object(server, "LINUX", True), patch.dict(os.environ, {"COS_TOKEN": ""}):
+            self.assertFalse(self.handler(peer_uid=1035)._authorized())  # neo-ajay
+            self.assertTrue(self.handler(peer_uid=os.getuid())._authorized())  # neo itself
+            self.assertTrue(self.handler(peer_uid=0)._authorized())  # root (tailscaled)
+
+    def test_a_faked_tailscale_header_from_another_account_is_refused(self):
+        from cos import server
+        env = {"NEO_DASHBOARD_URL": "https://spark.example.ts.net:8443", "COS_TAILSCALE_USERS": "anil@x.com",
+               "COS_TOKEN": "secret"}
+        headers = {"Host": "spark.example.ts.net:8443", "Tailscale-User-Login": "anil@x.com"}
+        with patch.object(server, "LINUX", True), patch.dict(os.environ, env):
+            self.assertIsNone(self.handler(headers=headers, peer_uid=1035)._tailscale_user())
+            self.assertEqual(self.handler(headers=headers, peer_uid=0)._tailscale_user(), "anil@x.com")
+
+    def test_a_token_works_only_while_its_run_runs_and_from_its_account(self):
+        import json as _json
+        from cos import server
+        run = self.run_of(AJAY, account="neo-ajay")
+        body = _json.dumps({"run_id": run.id, "question": "q", "tried": TRIED}).encode()
+        headers = {"X-Neo-Token": broker.token(run.id)}
+        run.update_meta(status="done")
+        with patch.object(server, "LINUX", True), patch.object(server, "account_uid", return_value=1035), \
+                patch.object(broker, "ask", return_value={"status": "answered", "text": "ok"}):
+            h = self.handler(headers=headers, body=body, peer_uid=1035)
+            h._a2a_ask()
+            self.assertEqual(h.errors[-1][0], 403)  # the run isn't running
+            run.update_meta(status="running")
+            h = self.handler(headers=headers, body=body, peer_uid=1036)  # another account replaying it
+            h._a2a_ask()
+            self.assertEqual(h.errors[-1], (403, "not from that run's account"))
+            h = self.handler(headers=headers, body=body, peer_uid=1035)
+            h._a2a_ask()
+            self.assertEqual(h.errors[-1], (200, {"status": "answered", "text": "ok"}))

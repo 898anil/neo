@@ -226,6 +226,12 @@ def save(data: dict) -> dict:
         return watch
 
 
+def restore(watch: dict) -> None:
+    """Put a removed watch back exactly as it was, id and owner included (Undo)."""
+    with _lock:
+        _write("watches.json", [w for w in load() if w["id"] != watch["id"]] + [watch])
+
+
 def delete(watch_id: str) -> None:
     with _lock:
         _write("watches.json", [w for w in load() if w["id"] != watch_id])

@@ -284,11 +284,15 @@ class NeoRunTest(unittest.TestCase):
             self.mod.engine_path("bash")
 
     def test_gh_only_signs_in_and_out(self):
-        for args in (["api", "user"], ["auth", "token"], ["repo", "clone", "x/y"], []):
+        for args in (["api", "user"], ["auth", "token"], ["repo", "clone", "x/y"], [], ["auth", "login", "--web"],
+                     ["auth", "status", "--show-token"], ["auth", "login", "--with-token"],
+                     ["auth", "status", "--hostname", "github.com", "--show-token"]):
             with self.assertRaises(SystemExit, msg=args):
                 self.mod.engine_path("gh", args)
+        from cos.logins import ARGV
         with patch.object(self.mod.shutil, "which", return_value="/usr/bin/gh"):
-            self.assertEqual(self.mod.engine_path("gh", ["auth", "login", "--web"]), "/usr/bin/gh")
+            for action in ("login", "status", "logout"):  # exactly what neo sends
+                self.assertEqual(self.mod.engine_path("gh", ARGV[("gh", action)][1:]), "/usr/bin/gh")
 
     def test_commits_carry_the_persons_name_unless_the_account_has_its_own(self):
         self.assertEqual(self.mod.git_identity_env(self.home, "Ajay", "ajay@x.com")["GIT_AUTHOR_NAME"], "Ajay")

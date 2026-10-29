@@ -60,6 +60,8 @@ case "$SUMMARY" in OK*) rm -f "$TEST_LOG" ;; *) echo "  tests did not pass; full
 
 PORT="$(env_get NEO_DASHBOARD_PORT)"; PORT="${PORT:-8788}"
 env_set_default NEO_DASHBOARD_PORT "$PORT"
+# The dashboard's password: other ways in (Tailscale login, neo's own uid) are checked too, but a token must exist.
+env_set_default COS_TOKEN "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 HTTPS_PORT="$(env_get NEO_TAILSCALE_HTTPS_PORT)"; HTTPS_PORT="${HTTPS_PORT:-8443}"
 if [ "$(env_get NEO_TAILSCALE_SERVE)" = "0" ]; then
   echo "  NEO_TAILSCALE_SERVE=0: dashboard on $(env_get NEO_DASHBOARD_URL) (host/token from .env)"

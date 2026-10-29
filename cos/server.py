@@ -52,6 +52,40 @@ from .config import agent_brief, default_engine, owner_fields, workdir
 from .herdr import HerdrError
 from .runner import ENGINES, TERMINAL, Run, list_runs, valid_run_id
 
+LINUX = os.path.exists("/proc/net/tcp")
+
+
+def peer_uid(sock):
+    """The uid owning the other end of a loopback TCP connection, from /proc/net/tcp{,6}; None if unknown."""
+    try:
+        peer_port, own_port = sock.getpeername()[1], sock.getsockname()[1]
+    except (OSError, IndexError):
+        return None
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = Path(path).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            cols = row.split()
+            try:
+                if (int(cols[1].rsplit(":", 1)[1], 16) == peer_port and int(cols[2].rsplit(":", 1)[1], 16) == own_port):
+                    return int(cols[7])
+            except (IndexError, ValueError):
+                continue
+    return None
+
+
+def account_uid(account):
+    """The uid a run's process has: its person's account, or neo's own."""
+    if not account:
+        return os.getuid()
+    import pwd
+    try:
+        return pwd.getpwnam(account).pw_uid
+    except KeyError:
+        return None
+
 STATIC = Path(__file__).resolve().parent / "static"
 MAX_BODY = 200_000
 POLL_SECONDS = 0.25
@@ -298,6 +332,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------------- helpers
 
+    def _peer_uid(self):
+        """Linux: the uid of the process on the other end of this loopback connection; None elsewhere."""
+        return peer_uid(self.connection)
+
+    def _peer_trusted(self) -> bool:
+        """On a shared Linux box every person's account can reach 127.0.0.1, so a loopback request is only
+        neo's own (or root's: tailscaled forwarding `tailscale serve`) when the kernel says so. A Mac
+        running neo has nobody else on it."""
+        if not LINUX:
+            return True
+        return self._peer_uid() in (0, os.getuid())
+
     def _tailnet_user(self) -> str | None:
         """Your own tailnet device connecting directly (http://<mini tailscale ip>:<port>)."""
         if (self.headers.get("Host") or "") not in own_hosts():
@@ -316,11 +362,12 @@ class Handler(BaseHTTPRequestHandler):
         # The header is only meaningful on requests `tailscale serve` forwarded for our own tailnet
         # name. Requiring that Host stops a DNS-rebound page (or a local process talking to
         # 127.0.0.1) from simply sending the header itself.
-        expected = urlparse(os.environ.get("NEO_DASHBOARD_URL", "")).netloc
-        if not (expected.endswith(".ts.net") and self.headers.get("Host") == expected):
+        url = urlparse(os.environ.get("NEO_DASHBOARD_URL", ""))
+        # compare the host name: with a port (spark's :8443) the whole netloc never ends in ".ts.net"
+        if not ((url.hostname or "").endswith(".ts.net") and self.headers.get("Host") in (url.netloc, url.hostname)):
             return None
-        if login and login in allowed and self.client_address[0] in ("127.0.0.1", "::1"):
-            return login
+        if login and login in allowed and self.client_address[0] in ("127.0.0.1", "::1") and self._peer_trusted():
+            return login  # tailscaled (root) forwarded it; another local account can't fake the header
         return None
 
     def _token_ok(self) -> bool:
@@ -345,8 +392,10 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         if self._tailscale_user() or self._tailnet_user() or self._token_ok():
             return True
-        # Plain localhost, unless a token is configured. The Host check blocks DNS rebinding.
-        return not os.environ.get("COS_TOKEN") and self._local_host() and "Tailscale-User-Login" not in self.headers
+        # Plain localhost, unless a token is configured. The Host check blocks DNS rebinding; on a shared
+        # Linux box the peer must also be neo itself, not another person's account.
+        return (not os.environ.get("COS_TOKEN") and self._local_host() and "Tailscale-User-Login" not in self.headers
+                and self._peer_trusted())
 
     def _trusted_host(self) -> bool:
         return True  # folded into _authorized
@@ -521,6 +570,11 @@ class Handler(BaseHTTPRequestHandler):
         run_id = str(body.get("run_id") or "")
         if not valid_run_id(run_id) or not broker.verify(run_id, str(self.headers.get("X-Neo-Token") or "")):
             return self._error(HTTPStatus.FORBIDDEN, "not a run of mine")
+        meta = Run(run_id).meta()
+        if meta.get("status") not in ("queued", "running"):
+            return self._error(HTTPStatus.FORBIDDEN, "that run has ended")  # a leaked token dies with its run
+        if LINUX and self._peer_uid() != account_uid(meta.get("account")):
+            return self._error(HTTPStatus.FORBIDDEN, "not from that run's account")
         return self._json(broker.ask(run_id, str(body.get("question") or ""), str(body.get("tried") or ""),
                                      str(body.get("to") or "") or None))
 

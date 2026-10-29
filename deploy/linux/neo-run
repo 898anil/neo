@@ -36,7 +36,10 @@ import sys
 from pathlib import Path
 
 ENGINES = ("claude", "codex")
-GH_ALLOWED = (("auth", "login"), ("auth", "status"), ("auth", "logout"))  # gh only signs the account in or out
+GH_ALLOWED = (  # gh only signs the account in or out, exactly as neo asks (cos/logins.py); never prints a token
+    ("auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"),
+    ("auth", "status", "--hostname", "github.com"),
+    ("auth", "logout", "--hostname", "github.com"))
 PATH = "/usr/local/bin:/usr/bin:/bin"
 REFUSED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "BASH_ENV", "ENV", "IFS")
 KILL_AFTER = 10  # seconds between SIGTERM and SIGKILL
@@ -75,7 +78,7 @@ def resolve_cwd(home: Path, cwd: str) -> Path:
 
 
 def engine_path(name: str, args: list = ()) -> str:
-    if name == "gh" and tuple(args[:2]) in GH_ALLOWED:
+    if name == "gh" and tuple(args) in GH_ALLOWED:
         pass
     elif name not in ENGINES:
         fail(f"not an engine: {name}")

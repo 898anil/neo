@@ -22,11 +22,15 @@ MODEL = os.environ.get("NEO_INTENT_MODEL", "claude-haiku-5-5")
 MAX_CHARS = 400  # a longer message is a task, not a request about neo
 INTENTS = ("none", "connect", "disconnect", "connections", "brief_time", "digest_time", "watch_add",
            "watch_remove", "watches", "setting", "remember", "memory", "sharing", "help")
-_LIKELY = re.compile(
-    r"\b(brief|digest|log ?in|log ?out|sign (?:me )?(?:in|out)|connect|disconnect|github|codex|claude|"
-    r"account|watch(?:es|ing)?|remind|remember|forget|memory|setting|settings|my style|my repos?|"
-    r"my channels?|my engine|my model|call me|time ?zone|help|what can you do|set me up|onboard|"
-    r"share|sharing|my cos|other cos|answer (?:questions|teammates|other))\b", re.I)
+_LIKELY = re.compile("|".join((  # phrasings about neo itself; bare tool names ("check the github actions") are tasks
+    r"\bmy (?:morning |evening )?(?:brief|digest|cos|chief of staff|settings|style|repos?|channels?|engine|model|"
+    r"watch(?:es)?|memory|name|sign-?ins?|logins?|accounts?|policy|time ?zone)\b",
+    r"\b(?:connect|disconnect|link|unlink|sign (?:me )?(?:in|out)|log ?(?:me )?(?:in|out))\b.{0,30}\b(?:claude|codex|github|gh)\b",
+    r"\b(?:stop|start|pause|resume|keep) watching\b", r"\bwatch (?:for|out for)\b.{0,80}\bevery\b",
+    r"\b(?:send|move|turn (?:on|off)|stop|cancel|change|skip)\b.{0,20}\b(?:brief|digest)\b",
+    r"\bcall me\b", r"^\s*remember\b", r"\bwhat (?:do you|can you) (?:remember|do)\b", r"\bwhat are you watching\b",
+    r"^\s*(?:help|set me up|onboard me|what can you do)\s*\??\s*$",
+    r"\b(?:other|another|their|people'?s) (?:cos|chief of staff|neo)\b", r"\bshare (?:with|about)\b")), re.I)
 
 SCHEMA = {
     "type": "object",
@@ -75,7 +79,7 @@ def likely(text: str) -> bool:
     return 0 < len(text.strip()) <= MAX_CHARS and bool(_LIKELY.search(text))
 
 
-def classify(text: str, timeout: int = 45) -> Optional[dict]:
+def classify(text: str, timeout: int = 15) -> Optional[dict]:
     """The intent of a message that likely() is about neo, or None (not sure, or the call failed: treat as a task)."""
     if not likely(text) or not claude_available()[0]:
         return None

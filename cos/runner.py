@@ -112,8 +112,8 @@ def engine_env(meta: dict) -> dict:
     for name in ("NEO_A2A_TOKEN", "NEO_A2A_URL"):
         env.pop(name, None)
     port = os.environ.get("NEO_DASHBOARD_PORT")
-    if port and meta.get("kind") != "a2a-answer":  # an answering CoS can't ask anyone in turn (cos/broker.py)
-        from .broker import token
+    from .broker import may_ask, token
+    if port and may_ask(meta):  # runs a person drives; never one answering someone else (cos/broker.py)
         env["NEO_A2A_TOKEN"], env["NEO_A2A_URL"] = token(meta["id"]), f"http://127.0.0.1:{port}"
     target = _slack_target(meta)
     if target:

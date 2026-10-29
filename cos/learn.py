@@ -139,7 +139,7 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "",
     if path is None:
         path = rules_file(user, team) if kind == "rule" else memory_dir() / LESSONS
     meta = " ".join(x for x in (date.today().isoformat(), kind, _clean(source)[:80]) if x)
-    shared = path.parent != memory_dir() / PEOPLE and path.name not in (ME, TEAM)
+    shared = path.parent != memory_dir() / PEOPLE and path not in (memory_dir() / ME, memory_dir() / TEAM)
     if shared and people.valid_user(user) and not people.is_owner(user):
         target = str(path.relative_to(memory_dir()))
         meta = f"{date.today().isoformat()} {kind} for:{target} by:{user} {_clean(source)[:80]}".strip()

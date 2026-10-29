@@ -1210,13 +1210,15 @@ async def handle_watch(client, channel: str, thread_ts: str, user: Optional[str]
                                                        "every": req.keys[0], "hours": "work", "owner": user})
     except ValueError as exc:
         await say(f":x: {exc}")
-        return
+        return None
     await say(f":eyes: Watch `{watch['id']}` checks every {watch['every']} min on work days and DMs you what it finds "
               f"(read-only checks). `@neo watch remove {watch['id']}` to stop it.")
+    return watch
 
 
 LOGINS: dict[str, logins.Login] = {}  # DM message ts -> a Claude sign-in waiting for the code they reply with
 SIGNING_IN: set[str] = set()  # people whose sign-in is starting: one at a time
+SIGN_IN_THREADS = JsonStore("sign_in_threads.json")  # DM ts -> Slack id of every Claude sign-in message
 
 
 async def _account_of(client, user: str) -> str:
@@ -1243,7 +1245,7 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
         rows = []
         for tool in logins.TOOLS:
             own = await asyncio.to_thread(logins.signed_in, account, tool)
-            lent = accounts.shared_logins(people.role(user)).get("claude_token" if tool == "claude" else "openai_key")
+            lent = _lent(user)[tool]
             state = ("your own login" if own else f"{owner_name()}'s, lent (`@neo login {tool}` to use yours)" if lent
                      else f"not signed in (`@neo login {tool}`)") if own is not None else "couldn't tell"
             rows.append(f"• {tool}: {state}")
@@ -1260,7 +1262,7 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
     SIGNING_IN.add(user)
     try:
         for ts, waiting in list(LOGINS.items()):
-            if waiting.user == user:
+            if waiting.user == user and waiting.tool == tool:
                 waiting.stop()
                 LOGINS.pop(ts, None)
         login = await asyncio.to_thread(logins.begin, user, account, tool)
@@ -1288,6 +1290,7 @@ async def _send_sign_in(client, channel: str, user: str, tool: str, login: login
         await say(":envelope_with_arrow: I sent you a DM to sign in.")
     if tool == "claude":
         LOGINS[dm["ts"]] = login
+        SIGN_IN_THREADS.update(lambda d: d.update({dm["ts"]: user}))  # kept after it ends (and across restarts)
         asyncio.create_task(_expire_login(dm["ts"]))
     else:
         asyncio.create_task(_finish_device_login(client, dm["channel"], dm["ts"], login))
@@ -1366,12 +1369,12 @@ async def handle_intent(client, channel: str, thread_ts: str, user: Optional[str
         await handle_memory(client, channel, thread_ts, user, req)
     elif req.command == "watches":
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(watches_digest(user)))
+    elif req.command == "watch" and req.field == "add":
+        made = await handle_watch(client, channel, thread_ts, user, req)
+        undo = {"op": "watch_delete", "id": made["id"]} if made else None  # only what this request created
     else:
         handler = {"watch": handle_watch, "login": handle_login, "logout": handle_login, "logins": handle_login}
         await handler.get(req.command, handle_settings)(client, channel, thread_ts, user, req)
-    if undo and undo["op"] == "watch_added":
-        made = [w for w in watches.owned_by(user) if w["name"] == undo["name"]]
-        undo = {"op": "watch_delete", "id": made[-1]["id"]} if made else None
     if undo:
         token = secrets.token_hex(8)
         UNDO.update(lambda d: d.update({token: {**undo, "user": user, "at": time.time()}}))
@@ -1385,6 +1388,8 @@ async def handle_intent(client, channel: str, thread_ts: str, user: Optional[str
 async def on_undo(ack, body, client) -> None:
     await ack()
     user, token = body["user"]["id"], body["actions"][0]["value"]
+    if not await may_use(client, user):
+        return
     entry = UNDO.update(lambda d: d.pop(token, None) if (d.get(token) or {}).get("user") == user else None)
     channel, ts = body["channel"]["id"], body["message"]["ts"]
     if not entry:
@@ -1395,7 +1400,7 @@ async def on_undo(ack, body, client) -> None:
     elif entry["op"] == "watch_delete":
         await asyncio.to_thread(watches.delete, entry["id"])
     elif entry["op"] == "watch_removed":
-        await asyncio.to_thread(watches.save, entry["watch"])
+        await asyncio.to_thread(watches.restore, entry["watch"])
     elif entry["op"] == "policy":
         await asyncio.to_thread(broker.set_policy, user, entry["prev"])
     await client.chat_update(channel=channel, ts=ts, text=":leftwards_arrow_with_hook: Undone.", blocks=[])
@@ -1507,6 +1512,8 @@ async def on_home_time(ack, body, client) -> None:
 async def on_home_watch_remove(ack, body, client) -> None:
     await ack()
     user, wid = body["user"]["id"], body["actions"][0]["value"]
+    if not await may_use(client, user):
+        return
     watch = await asyncio.to_thread(watches.get, wid)
     if watch and (watch.get("owner") == user or _owner_user(user)):
         await asyncio.to_thread(watches.delete, wid)
@@ -1532,7 +1539,8 @@ async def maybe_onboard(client, user: Optional[str]) -> None:
         return
     if await asyncio.to_thread(onboarding.step_of, user) is not None or not await may_use(client, user):
         return
-    await asyncio.to_thread(onboarding.set_step, user, onboarding.STEPS[0])
+    if not await asyncio.to_thread(onboarding.claim, user):
+        return  # another message from them got here first: one welcome
     info = await slack_user(client, user)
     name = people.load(user).get("name") or accounts.display_name(info) or "there"
     await client.chat_postMessage(channel=user, text=onboarding.welcome(name))
@@ -1542,7 +1550,9 @@ async def maybe_onboard(client, user: Optional[str]) -> None:
 async def post_onboarding_step(client, user: str, step: str) -> None:
     lent = _lent(user)
     text, blocks = onboarding.message(step, owner_name(), lent["claude"], lent["gh"])
-    await client.chat_postMessage(channel=user, text=text, blocks=blocks)
+    posted = await client.chat_postMessage(channel=user, text=text, blocks=blocks)
+    if step in onboarding.STEPS:  # typed replies answer it at the top level or in this message's thread
+        await asyncio.to_thread(onboarding.set_step, user, step, (posted or {}).get("ts"))
 
 
 async def onboarding_choice(client, user: str, channel: str, step: str, choice: str) -> None:
@@ -1563,6 +1573,8 @@ async def onboarding_choice(client, user: str, channel: str, step: str, choice: 
 async def on_onboarding(ack, body, client) -> None:
     await ack()
     user = body["user"]["id"]
+    if not await may_use(client, user):
+        return
     step, _, choice = body["actions"][0]["value"].partition(":")
     label = body["actions"][0]["text"]["text"]
     channel, ts = body["channel"]["id"], body["message"]["ts"]
@@ -1698,6 +1710,7 @@ async def broker_outbox(client) -> None:
                     if item.get("buttons"):
                         await client.chat_postMessage(channel=item["user"], text=clip(item["text"]), blocks=[
                             {"type": "section", "text": {"type": "mrkdwn", "text": clip(item["text"], 2900)}},
+                            {"type": "section", "text": {"type": "plain_text", "text": item.get("draft") or "(no draft)"}},
                             {"type": "actions", "elements": [
                                 {"type": "button", "action_id": "a2a_send", "value": item["request"], "style": "primary",
                                  "text": {"type": "plain_text", "text": "Send my draft"}},
@@ -1718,6 +1731,8 @@ async def broker_outbox(client) -> None:
 async def on_a2a_decision(ack, body, client) -> None:
     await ack()
     user, action = body["user"]["id"], body["actions"][0]
+    if not await may_use(client, user):
+        return
     send = action["action_id"] == "a2a_send"
     item = await asyncio.to_thread(broker.resolve, action["value"], user, send)
     note = ("Already decided." if not item else ":white_check_mark: Sent your CoS's draft." if send else ":no_entry: Declined.")
@@ -1815,11 +1830,17 @@ async def handle_dm(event: dict, client) -> None:
     if thread_ts and thread_ts in LOGINS:
         await answer_login(client, channel, thread_ts, user, event.get("text", ""))
         return
-    step = await asyncio.to_thread(onboarding.step_of, user)
-    choice = onboarding.reply(step, text) if step in onboarding.STEPS else None
-    if choice:
-        await onboarding_choice(client, user, channel, step, choice)
+    if thread_ts and thread_ts in (await asyncio.to_thread(SIGN_IN_THREADS.read)):
+        # a code for a sign-in that ended (expired, replaced, neo restarted): never a task prompt
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text="That sign-in has ended. Say \"connect my claude\" to start a new one.")
         return
+    step = await asyncio.to_thread(onboarding.step_of, user)
+    if step in onboarding.STEPS and (not thread_ts or thread_ts == await asyncio.to_thread(onboarding.step_ts, user)):
+        choice = onboarding.reply(step, text)  # only a top-level reply, or one in the step's thread, answers it
+        if choice:
+            await onboarding_choice(client, user, channel, step, choice)
+            return
     target = await sessions.get_thread(f"dm:{thread_ts}") if thread_ts else None
     if not target and thread_ts and await sessions.get_thread(thread_ts):
         await handle_mention(event, client)  # a typed follow-up in a DM thread a voice note started
@@ -2043,6 +2064,7 @@ async def handle_mention(event: dict, client) -> None:
 
     req = await route_apply(req, thread_ts)
     if req.command == "run" and not entry and intent.likely(raw):  # "send my brief at 8": about neo, not a task
+        await _react(client, channel, event["ts"], "eyes")  # seen, while the short check runs
         found = await asyncio.to_thread(intent.classify, raw)
         if found:
             try:
