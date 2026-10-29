@@ -338,6 +338,8 @@ class RepoDirUnreadableTest(unittest.TestCase):
     def setUp(self):
         from cos import work
         self.work = work
+        self.wait_for_scan()  # a scan an earlier test started would overwrite this test's map when it ends
+        self.addCleanup(self.wait_for_scan)
         work._repo_dirs.update(map={"acme/app": "/old/app"}, names={"app": "/old/app"}, at=0.0, scanning=False)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -346,8 +348,9 @@ class RepoDirUnreadableTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def wait_for_scan(self):
+        from cos import work
         deadline = time.time() + 5
-        while self.work._repo_dirs["scanning"] and time.time() < deadline:
+        while work._repo_dirs["scanning"] and time.time() < deadline:
             time.sleep(0.01)
 
     def test_unreadable_work_folder_keeps_last_map(self):
