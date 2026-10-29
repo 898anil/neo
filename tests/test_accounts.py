@@ -97,9 +97,17 @@ class LaunchSpecTest(Base):
                                      "NEO_SHARED_CLAUDE_TOKEN": "sk-lent", "NEO_SHARED_GH_TOKEN": "ghp-lent"}):
             self.assertEqual(accounts.shared_logins(), {"claude_token": "sk-lent", "gh_token": "ghp-lent", "openai_key": ""})
             self.assertEqual(accounts.shared_logins("prs-only")["gh_token"], "")  # it could merge with it
-            self.assertEqual(accounts.shared_logins("read-only")["claude_token"], "")  # only full gets any
+            self.assertEqual(accounts.shared_logins("read-only")["claude_token"], "sk-lent")  # everyone's neo can run
+            self.assertEqual(accounts.shared_logins("read-only")["gh_token"], "")  # GitHub: full only
+            self.assertEqual(accounts.shared_logins("blocked")["claude_token"], "")
         with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-bot", "GH_TOKEN": "ghp-bot"}):
             self.assertEqual(accounts.shared_logins(), {"claude_token": "", "gh_token": "", "openai_key": ""})
+
+    def test_a_prs_only_persons_neo_can_still_run_on_the_shared_claude(self):
+        # Regression (2026-10-29): prs-only Ajay got no Claude at all, so every run failed "Not logged in".
+        with patch.dict(os.environ, {"NEO_SHARED_CLAUDE_TOKEN": "sk-lent", "NEO_SHARED_GH_TOKEN": "ghp-lent"}):
+            shared = accounts.spec({"cwd": "/x", "role": "prs-only"}, ["claude"], {}, {})["shared"]
+        self.assertEqual((shared["claude_token"], shared["gh_token"]), ("sk-lent", ""))
 
     def test_sudo_keeps_the_spec_pipe_open(self):
         self.assertEqual(accounts.command("neo-ajay", 7),

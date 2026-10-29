@@ -9,7 +9,8 @@ tokens, the dashboard and live (herdr) agents, and runs the tool-less model call
 
 Logins: a person who has logged in to a tool in their account uses that login; for anything else neo
 lends the owner's, if the owner set NEO_SHARED_CLAUDE_TOKEN / NEO_SHARED_GH_TOKEN / NEO_SHARED_OPENAI_KEY,
-passed for that one turn on neo-run's pipe, to the full role only (shared_logins).
+passed for that one turn on neo-run's pipe: the model logins to everyone not blocked, GitHub to the full role
+only (shared_logins).
 
 Who may use neo at all (members_only): full members of this workspace. Guests and people from other
 workspaces (Slack Connect) are refused; that needs the users:read scope.
@@ -174,12 +175,14 @@ def brief(account: str) -> str:
 
 def shared_logins(role: str = "full") -> dict:
     """The owner's logins lent to people who have none of their own: only what the owner put in
-    NEO_SHARED_*, never the bot's own variables by accident. The agent can read what it is lent, so
-    only the full role gets any: prs-only and read-only people use their own logins or none."""
+    NEO_SHARED_*, never the bot's own variables by accident. The model logins (Claude, OpenAI) go to every
+    role but blocked, so everyone's neo can run until they connect their own. The agent can read what it is
+    lent, so GitHub goes to the full role only: with it, prs-only and read-only limits would be advice."""
     env = os.environ
-    if role != "full":
+    if role == "blocked":
         return {"claude_token": "", "gh_token": "", "openai_key": ""}
-    return {"claude_token": env.get("NEO_SHARED_CLAUDE_TOKEN") or "", "gh_token": env.get("NEO_SHARED_GH_TOKEN") or "",
+    return {"claude_token": env.get("NEO_SHARED_CLAUDE_TOKEN") or "",
+            "gh_token": (env.get("NEO_SHARED_GH_TOKEN") or "") if role == "full" else "",
             "openai_key": env.get("NEO_SHARED_OPENAI_KEY") or ""}
 
 
