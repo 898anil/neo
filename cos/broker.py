@@ -244,6 +244,19 @@ def charter(user: Optional[str], may_ask: bool = True) -> str:
     return "\n".join(lines)
 
 
+def _who(row: dict) -> str:
+    """A directory row as people name them: "Sachin (neo-sachin)", even before they set a name."""
+    from . import people
+    from .config import owner_name
+
+    if people.is_owner(row["user"]):
+        return f"{owner_name()} ({row['account'] or 'owner'})"
+    name = str(row["name"])
+    if name.startswith("<@") and row.get("account"):
+        name = row["account"].removeprefix("neo-").capitalize()
+    return f"{name} ({row['account']})" if row.get("account") else name
+
+
 def guide() -> str:
     """How neo works for people, so an agent answers questions about neo itself correctly."""
     from . import people
@@ -268,7 +281,7 @@ def guide() -> str:
         "people's neos: \"my neo can answer about deploys, never about costs\". Renaming: \"call my neo Friday\".",
         "- neo's Home tab in Slack (click neo, then Home) shows their sign-ins, tools, brief and digest times, today's "
         "tasks, watches, and work between neos.",
-        f"- People who have a neo now: {', '.join(r['name'] if not people.is_owner(r['user']) else owner_name() for r in directory()) or 'none'}. "
+        f"- People who have a neo now: {', '.join(_who(r) for r in directory()) or 'none'}. "
         "Someone who hasn't messaged neo yet has no neo to ask.",
         f"- Only {owner_name()} sets roles (full, prs-only, read-only, blocked) and team rules.",
     ])
@@ -313,8 +326,7 @@ def _nobody(to: Optional[str]) -> str:
     from . import people
     from .config import owner_name
 
-    rows = directory()
-    names = ", ".join(f"{owner_name() if people.is_owner(r['user']) else r['name']} ({r['account'] or 'owner'})" for r in rows)
+    names = ", ".join(_who(r) for r in directory())
     if to:
         return (f"{to!r} has no neo yet: they need to message neo in Slack once first. People with a neo: {names or 'none'}. "
                 "Use one of those names or accounts with --to, or leave --to out and neo picks.")
