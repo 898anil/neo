@@ -298,3 +298,35 @@ class CosNameTest(Base):
     def test_home_tab_says_its_name(self):
         view = home_tab.view("Ajay", {}, None, None, [], [], cos="Ajay's neo")
         self.assertIn("*Ajay's neo*", view["blocks"][1]["text"]["text"])
+
+
+class DmChannelTest(Base):
+    """A post to a person by user id, with a custom name, would land in Slackbot's DM: use their DM with neo."""
+
+    def test_named_posts_go_to_the_dm_channel_and_unknown_ones_post_as_neo(self):
+        import app
+        sent = []
+
+        async def fake_post(self, **kwargs):
+            sent.append(dict(kwargs))
+            return {"ok": True, "ts": "1.1", "channel": "DAJAY01"}
+
+        async def go():
+            client = app.AsyncWebClient(token="xoxb-test")
+            with patch.object(app, "_slack_post", fake_post), \
+                    patch.object(app, "slack_user", AsyncMock(return_value={"profile": {"real_name": "Ajay Arora"}})):
+                app._COS_ICONS.clear()
+                app.SPEAKER.set(AJAY)
+                await client.chat_postMessage(channel=AJAY, text="first")   # DM not known yet: plain neo
+                await client.chat_postMessage(channel=AJAY, text="second")  # learnt from the first reply
+                await client.chat_postMessage(channel="C1", text="in a channel")
+        asyncio.run(go())
+        self.assertEqual((sent[0]["channel"], sent[0].get("username")), (AJAY, None))
+        self.assertEqual((sent[1]["channel"], sent[1]["username"]), ("DAJAY01", "Ajay's neo"))
+        self.assertEqual(sent[2]["username"], "Ajay's neo")
+
+    def test_opening_home_or_a_dm_teaches_the_channel(self):
+        import app
+        app.remember_dm(AJAY, "DXYZ")
+        app.remember_dm(AJAY, "C123")  # not a DM: ignored
+        self.assertEqual(app.DM_CHANNELS.read()[AJAY], "DXYZ")

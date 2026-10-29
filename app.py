@@ -124,11 +124,9 @@ async def _identity(user: str) -> dict:
     if not hit or time.monotonic() > hit[0]:
         info = await slack_user(app.client, user)
         icon = ((info or {}).get("profile") or {}).get("image_72")
-        hit = (time.monotonic() + 3600, icon if str(icon or "").startswith("https://") else None, "")
+        hit = (time.monotonic() + 3600, icon if str(icon or "").startswith("https://") else None, cos_name(user, info))
         _COS_ICONS[user] = hit
-        name = cos_name(user, info)
-    else:
-        name = cos_name(user)
+    name = people.load(user).get("cos_name") or hit[2]  # a name they chose wins at once; else the cached default
     out = {"username": name[:80]}
     if hit[1]:
         out["icon_url"] = hit[1]
@@ -138,14 +136,40 @@ async def _identity(user: str) -> dict:
 _slack_post = AsyncWebClient.chat_postMessage
 
 
+DM_CHANNELS = JsonStore("dm_channels.json")  # Slack id -> the D... channel of their DM with neo
+
+
+def remember_dm(user: Optional[str], channel: Optional[str]) -> None:
+    if people.valid_user(user) and str(channel or "").startswith("D") and DM_CHANNELS.read().get(user) != channel:
+        DM_CHANNELS.update(lambda d: d.update({user: channel}))
+
+
 async def _post_as_cos(self, **kwargs):
+    """Every post: named as the CoS of whoever neo is working for. A message addressed to a person's user id
+    goes to their DM with neo: with a custom name, Slack would deliver a user-id post in Slackbot's DM, so it
+    uses the DM's own channel id, or posts as plain neo until that id is known."""
     who = SPEAKER.get()
-    if who and people.valid_user(who) and "username" not in kwargs and os.environ.get("NEO_COS_NAMES", "1") != "0":
+    named = who and people.valid_user(who) and "username" not in kwargs and os.environ.get("NEO_COS_NAMES", "1") != "0"
+    to_person = str(kwargs.get("channel") or "")[:1] in ("U", "W")
+    if to_person:
+        dm = DM_CHANNELS.read().get(kwargs["channel"])
+        if dm:
+            kwargs["channel"] = dm
+        else:
+            named = False
+    if named:
         try:
             kwargs.update(await _identity(who))
         except Exception:  # noqa: BLE001 - post as neo rather than not at all
             log.exception("could not name the CoS for %s", who)
-    return await _slack_post(self, **kwargs)
+    person = kwargs.get("channel") if to_person else None
+    resp = await _slack_post(self, **kwargs)
+    if to_person and not named:
+        try:
+            remember_dm(person, resp.get("channel"))
+        except Exception:  # noqa: BLE001
+            pass
+    return resp
 
 
 AsyncWebClient.chat_postMessage = _post_as_cos
@@ -1572,6 +1596,7 @@ async def on_home_opened(event: dict, client) -> None:
         return
     user = event.get("user")
     SPEAKER.set(user)
+    remember_dm(user, event.get("channel"))  # app_home_opened carries their DM channel with neo
     await publish_home(client, user)
     await publish_home(client, user, check_logins=True)  # the sign-in checks take a few seconds
     await maybe_onboard(client, user)
@@ -2005,6 +2030,7 @@ async def handle_dm(event: dict, client) -> None:
         return
     user = event.get("user")
     SPEAKER.set(user)
+    remember_dm(user, event.get("channel"))  # where their DM with neo is, for posts named as their neo
     if ALLOWED_USER_IDS and user not in ALLOWED_USER_IDS:
         return
     why = await refusal(client, user)
