@@ -332,3 +332,11 @@ class DelegatedWorkTest(Base):
         broker._set_task(out["task"], run=work.id)
         self.assertEqual(broker.recover(), [out["task"]])
         self.assertEqual(broker._task(out["task"])["status"], "done")
+
+
+class ProgressTest(Base):
+    def test_status_shows_steps_and_the_latest_one(self):
+        work = Run.create("claude", "x", str(self.dir), "full", source="a2a", extra={"kind": "a2a-work"})
+        (work.dir / "events.jsonl").write_text(
+            '{"kind": "tool_call", "title": "Read: pricing.py"}\n{"kind": "tool_call", "title": "Bash: python3 -m unittest"}\n')
+        self.assertEqual(broker.progress({"run": work.id}), "2 steps so far; latest: Bash: python3 -m unittest")

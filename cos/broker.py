@@ -689,16 +689,22 @@ def progress(row: dict) -> str:
     from .runner import Run as _Run
 
     try:
-        last = ""
+        last, steps = "", 0
         with (_Run(row["run"]).dir / "events.jsonl").open() as fh:
             for line in fh:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if event.get("kind") in ("text", "tool") and (event.get("body") or event.get("title")):
-                    last = event.get("body") or event.get("title")
-        return _short(last, 300)
+                kind = event.get("kind")
+                if kind == "tool_call":
+                    steps += 1
+                    last = event.get("title") or last  # e.g. "Bash: python3 -m unittest"
+                elif kind == "text" and event.get("body"):
+                    last = event["body"]
+        if not steps and not last:
+            return ""
+        return f"{steps} steps so far" + (f"; latest: {_short(last, 240)}" if last else "")
     except (OSError, KeyError):
         return ""
 
@@ -717,7 +723,7 @@ def tasks_text(user: str, task_id: Optional[str] = None) -> str:
         line = f"{t['id']} for <@{t['target']}>'s neo: {_short(t['request'], 120)} | {t.get('status')}"
         if t.get("status") == "working" and t.get("started"):
             mins = int((time.time() - datetime.fromisoformat(t["started"]).timestamp()) // 60)
-            line += f" for {mins} min" + (f"; latest: {progress(t)}" if progress(t) else "")
+            line += f" for {mins} min" + (f"; {progress(t)}" if progress(t) else "")
         elif t.get("status") in WORK_DONE and t.get("result"):
             line += f"; result: {_short(t['result'], 300)}"
         lines.append(line)
