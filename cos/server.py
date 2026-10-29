@@ -53,6 +53,10 @@ from .herdr import HerdrError
 from .runner import ENGINES, TERMINAL, Run, list_runs, valid_run_id
 
 LINUX = os.path.exists("/proc/net/tcp")
+EXPIRED_PAGE = (b"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                b"<title>neo</title><body style='font:16px system-ui;max-width:32rem;margin:15vh auto;padding:0 16px'>"
+                b"<h2>This sign-in link has expired</h2><p>Links work once, for 10 minutes. Get a new one from neo in Slack: "
+                b"open neo's <b>Home</b> tab and click <b>Open my dashboard</b>, or tell neo \"open my dashboard\".</p>")
 
 
 def peer_uid(sock):
@@ -357,6 +361,8 @@ class Handler(BaseHTTPRequestHandler):
         Only trusted when the request arrives over loopback, which is how `tailscale serve`
         forwards; the server itself never listens beyond 127.0.0.1 in this setup.
         """
+        if self.headers.get("Tailscale-Funnel-Request"):
+            return None  # public traffic through Funnel carries no tailnet identity: it signs in from Slack
         login = self.headers.get("Tailscale-User-Login")
         allowed = {u.strip() for u in os.environ.get("COS_TAILSCALE_USERS", "").split(",") if u.strip()}
         # The header is only meaningful on requests `tailscale serve` forwarded for our own tailnet
@@ -389,9 +395,32 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
         return host in ("127.0.0.1", "localhost", "::1")
 
+    def _session(self):
+        """The Slack id of a dashboard session opened from a Slack sign-in link (cos/dashlink.py)."""
+        from . import dashlink
+
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == dashlink.COOKIE:
+                return dashlink.session_user(value)
+        return None
+
+    def _person(self):
+        """A non-owner's session: they see only their own page (/api/me), nothing else."""
+        from .people import is_owner
+
+        if self._tailscale_user() or self._tailnet_user() or self._token_ok():
+            return None
+        user = self._session()
+        return user if user and not is_owner(user) else None
+
     def _authorized(self) -> bool:
         if self._tailscale_user() or self._tailnet_user() or self._token_ok():
             return True
+        from .people import is_owner
+        user = self._session()
+        if user and is_owner(user):  # a real session only: is_owner(None) means "the owner's own runs"
+            return True  # the owner signed in from Slack (e.g. through Funnel)
         # Plain localhost, unless a token is configured. The Host check blocks DNS rebinding; on a shared
         # Linux box the peer must also be neo itself, not another person's account.
         return (not os.environ.get("COS_TOKEN") and self._local_host() and "Tailscale-User-Login" not in self.headers
@@ -469,6 +498,11 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 1 and parts[0] in PUBLIC_FILES:
             # App icon and manifest: harmless, and fetched by the phone without cookies.
             return self._static(parts[0], PUBLIC_FILES[parts[0]])
+        if parts == ["login"]:
+            return self._login()
+        person = self._person()
+        if person:
+            return self._person_get(person, parts)
         if not self._authorized():
             if not parts:  # a person opened the page: show a sign-in form, not raw JSON
                 self.send_response(HTTPStatus.FORBIDDEN)
@@ -583,9 +617,56 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(broker.ask(run_id, str(body.get("question") or ""), str(body.get("tried") or ""),
                                      str(body.get("to") or "") or None))
 
+    def _login(self):
+        """A sign-in link from Slack: set the session and open the dashboard; an old or used link says so."""
+        from . import dashlink
+
+        user = dashlink.redeem((parse_qs(urlparse(self.path).query).get("t") or [""])[0])
+        if not user:
+            body = EXPIRED_PAGE
+            self.send_response(HTTPStatus.FORBIDDEN)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        secure = "; Secure" if dashlink.public_url().startswith("https://") else ""
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", f"{dashlink.COOKIE}={dashlink.session_value(user)}; Path=/; "
+                                       f"Max-Age={dashlink.SESSION_DAYS * 86400}; HttpOnly; SameSite=Lax{secure}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _person_get(self, user: str, parts: list):
+        from . import me
+
+        if not parts:
+            return self._static("me.html", "text/html; charset=utf-8")
+        if parts == ["api", "me"]:
+            return self._json(me.overview(user))
+        if len(parts) == 4 and parts[:3] == ["api", "me", "runs"]:
+            found = me.run_detail(user, parts[3])
+            return self._json(found) if found else self._error(HTTPStatus.NOT_FOUND, "not found")
+        return self._error(HTTPStatus.FORBIDDEN, "not on your dashboard")
+
     def do_POST(self):
         if urlparse(self.path).path == "/api/a2a/ask":
             return self._a2a_ask()
+        person = self._person()
+        if person:
+            if not self._same_origin_json():
+                return self._error(HTTPStatus.FORBIDDEN, "cross-origin or non-JSON request refused")
+            if self._route() != ["api", "me", "runs"]:
+                return self._error(HTTPStatus.FORBIDDEN, "not on your dashboard")
+            from . import me
+            body = self._read_json() or {}
+            try:
+                run = me.start(person, str(body.get("prompt") or ""), str(body.get("engine") or "") or None)
+            except (ValueError, PermissionError) as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            start_turn(run, None)
+            return self._json({"run_id": run.id}, HTTPStatus.CREATED)
         if not self._authorized():
             return self._error(HTTPStatus.FORBIDDEN, "not allowed: use localhost, an allowed Tailscale login, or COS_TOKEN")
         if not self._same_origin_json():

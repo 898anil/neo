@@ -280,7 +280,8 @@ def guide() -> str:
         f"(notes for a repo reach everyone only after {owner_name()} approves them). What their neo shares with other "
         "people's neos: \"my neo can answer about deploys, never about costs\". Renaming: \"call my neo Friday\".",
         "- neo's Home tab in Slack (click neo, then Home) shows their sign-ins, tools, brief and digest times, today's "
-        "tasks, watches, and work between neos.",
+        "tasks, watches, and work between neos. Its \"Open my dashboard\" button (or saying \"open my dashboard\") gives "
+        "a sign-in link to their own web dashboard: every task with each step, and they can start tasks there too.",
         f"- People who have a neo now: {', '.join(_who(r) for r in directory()) or 'none'}. "
         "Someone who hasn't messaged neo yet has no neo to ask.",
         f"- Only {owner_name()} sets roles (full, prs-only, read-only, blocked) and team rules.",

@@ -10,6 +10,7 @@ CONNECT, BRIEF, DIGEST, WATCH_REMOVE = "home_connect", "home_brief", "home_diges
 NOTE_APPROVE, NOTE_REJECT = "home_note_approve", "home_note_reject"
 TOOL_NAMES = {"claude": "Claude", "codex": "Codex", "gh": "GitHub", "gcloud": "Google Cloud", "doppler": "Doppler"}
 TOKEN, TOKEN_OFF = "home_token", "home_token_off"
+DASHBOARD = "home_dashboard"
 BRIEF_TIMES = [f"{h:02d}:{m:02d}" for h in range(6, 12) for m in (0, 30)]
 DIGEST_TIMES = [f"{h:02d}:{m:02d}" for h in range(16, 22) for m in (0, 30)]
 STATUS_MARK = {"done": ":white_check_mark:", "failed": ":x:", "stopped": ":black_square_for_stop:"}
@@ -40,6 +41,8 @@ def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], r
               _text(f"I'm {('*' + cos + '*') if cos else 'neo'}, your chief of staff. Ask me anything in a DM or with "
                     "`@neo` in a channel: a task (\"fix the flaky test in backie\") or something about me "
                     "(\"send my brief at 8\"). To rename me, say \"call my neo Friday\".")]
+    blocks.append({"type": "actions", "elements": [{"type": "button", "action_id": DASHBOARD, "style": "primary",
+                                                    "text": {"type": "plain_text", "text": "Open my dashboard"}}]})
 
     blocks += [{"type": "divider"}, _text("*Your sign-ins*")]
     for tool, label in TOOL_NAMES.items():

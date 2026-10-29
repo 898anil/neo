@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>My neo</title>
+<link rel="icon" href="/icon.svg">
+<style>
+/* Layout: a task list beside the selected task's steps; side panels for work between neos, watches and tools. */
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --ink: #17202b; --muted: #5d6877; --line: #dde2e9;
+  --accent: #1f5fbf; --accent-soft: #e6eefb; --ok: #1f7a4d; --ok-soft: #e2f3e9;
+  --warn: #9a5300; --warn-soft: #fcefdc; --bad: #b3261e; --bad-soft: #fbe6e4;
+  --font: "Segoe UI", system-ui, -apple-system, sans-serif; --mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0f141b; --panel: #161d26; --ink: #e5e9ef; --muted: #98a3b2; --line: #2a3442;
+  --accent: #7aa7ff; --accent-soft: #1b2a44; --ok: #6fd3a0; --ok-soft: #15301f;
+  --warn: #f0b060; --warn-soft: #3a2a12; --bad: #ff8a80; --bad-soft: #3a1a18; color-scheme: dark } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--font); }
+header { padding: 18px max(16px, env(safe-area-inset-left)) 12px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { margin: 0; font-size: 1.3rem; }
+.chip { font: 600 0.72rem/1 var(--mono); padding: 5px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+main { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr) minmax(240px, 300px); gap: 16px;
+  padding: 16px max(16px, env(safe-area-inset-right)) 32px max(16px, env(safe-area-inset-left)); align-items: start; }
+@media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
+h2 { margin: 0; font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+textarea, select, button { font: inherit; color: inherit; }
+textarea { width: 100%; min-height: 84px; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+select { padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+button { padding: 8px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: 0.6; cursor: default; }
+button:focus-visible, .task:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.list { display: grid; gap: 4px; max-height: 60vh; overflow-y: auto; }
+.task { all: unset; display: grid; gap: 2px; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.task:hover, .task.on { background: var(--accent-soft); }
+.task .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.meta { color: var(--muted); font-size: 0.82rem; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.st { font: 600 0.7rem/1 var(--mono); padding: 3px 6px; border-radius: 4px; text-transform: uppercase; }
+.st.done { color: var(--ok); background: var(--ok-soft); } .st.failed, .st.stopped { color: var(--bad); background: var(--bad-soft); }
+.st.running, .st.queued, .st.working { color: var(--warn); background: var(--warn-soft); }
+.st.declined, .st.waiting_owner { color: var(--muted); background: var(--bg); }
+.steps { display: grid; gap: 8px; }
+.step { border-left: 3px solid var(--line); padding: 4px 0 4px 10px; min-width: 0; }
+.step.text, .step.result { border-color: var(--accent); }
+.step.error { border-color: var(--bad); }
+.step .k { font: 600 0.72rem/1.4 var(--mono); color: var(--muted); }
+.step .b { white-space: pre-wrap; overflow-wrap: anywhere; }
+.step.tool_call .b, .step.tool_result .b { font: 0.85rem/1.45 var(--mono); color: var(--muted); max-height: 12rem; overflow: auto; }
+.empty { color: var(--muted); }
+a { color: var(--accent); }
+.err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header><h1 id="who">My neo</h1><span class="chip" id="role">loading…</span><span class="meta">Only you see this page.</span></header>
+<main>
+  <div style="display:grid;gap:16px;min-width:0">
+    <section>
+      <h2>Start a task</h2>
+      <form id="new">
+        <textarea id="prompt" placeholder="What should your neo do? e.g. fix the flaky login test in backie"></textarea>
+        <div class="row"><select id="engine"></select><button id="go" type="submit">Start</button><span id="newErr" class="err"></span></div>
+      </form>
+    </section>
+    <section>
+      <h2>Your tasks</h2>
+      <div class="list" id="tasks"><p class="empty">Loading…</p></div>
+    </section>
+  </div>
+  <section id="detail"><h2>Task</h2><p class="empty">Pick a task to see each step it took.</p></section>
+  <div style="display:grid;gap:16px;min-width:0">
+    <section><h2>Work between neos</h2><div id="work" class="steps"></div></section>
+    <section><h2>Watches</h2><div id="watches" class="steps"></div></section>
+    <section><h2>Tools and settings</h2><div id="tools" class="steps"></div>
+      <p class="meta">Connect tools, change times, add watches or set what your neo shares by telling neo in Slack, or on neo's Home tab.</p></section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+let selected = null, timer = null;
+
+async function api(path, opts) {
+  const res = await fetch(path, { credentials: "same-origin", ...opts });
+  if (res.status === 403) { location.reload(); throw new Error("signed out"); }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+const when = (iso) => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+const status = (s) => el("span", "st " + (s || ""), (s || "").replace("_", " "));
+
+function renderOverview(d) {
+  $("who").textContent = d.name + "'s neo";
+  $("role").textContent = d.role;
+  const eng = $("engine");
+  if (!eng.options.length) d.engines.forEach((e) => eng.append(new Option(e, e)));
+  const list = $("tasks"); list.replaceChildren();
+  if (!d.runs.length) list.append(el("p", "empty", "No tasks yet. Start one above, or ask neo in Slack."));
+  d.runs.forEach((r) => {
+    const b = el("button", "task" + (r.id === selected ? " on" : "")); b.type = "button";
+    b.append(el("span", "t", r.title || r.id));
+    const m = el("span", "meta"); m.append(status(r.status), el("span", null, when(r.created_at)), el("span", null, r.engine || ""));
+    b.append(m); b.onclick = () => select(r.id); list.append(b);
+  });
+  const work = $("work"); work.replaceChildren();
+  d.asked.forEach((t) => { const s = el("div", "step"); s.append(el("div", "k", "You asked another neo · " + t.id), el("div", "b", t.request));
+    const m = el("div", "meta"); m.append(status(t.status)); if (t.result) m.append(el("span", null, t.result.slice(0, 160))); s.append(m); work.append(s); });
+  d.doing.forEach((t) => { const s = el("div", "step"); s.append(el("div", "k", "Your neo is doing this for someone · " + t.id), el("div", "b", t.request));
+    const m = el("div", "meta"); m.append(status(t.status)); s.append(m); work.append(s); });
+  if (!work.childElementCount) work.append(el("p", "empty", "Nothing between neos yet."));
+  const w = $("watches"); w.replaceChildren();
+  d.watches.forEach((x) => w.append(el("div", "step", `${x.name} · every ${x.every} min${x.enabled ? "" : " (off)"}`)));
+  if (!d.watches.length) w.append(el("p", "empty", "No watches. Tell neo e.g. \"watch CI failures on backie every hour\"."));
+  const t = $("tools"); t.replaceChildren();
+  t.append(el("div", "step", "Morning brief: " + (d.brief || "off")), el("div", "step", "Evening digest: " + (d.digest || "off")),
+           el("div", "step", "Tokens connected: " + (d.tokens.length ? d.tokens.join(", ") : "none")));
+}
+
+async function refresh() {
+  try { renderOverview(await api("/api/me")); } catch (e) { $("tasks").replaceChildren(el("p", "err", e.message)); }
+}
+
+async function select(id) {
+  selected = id; clearTimeout(timer);
+  document.querySelectorAll(".task").forEach((b) => b.classList.remove("on"));
+  const box = $("detail");
+  try {
+    const r = await api("/api/me/runs/" + id);
+    box.replaceChildren(el("h2", null, "Task"));
+    box.append(el("div", "b", r.prompt));
+    const m = el("div", "meta"); m.append(status(r.status), el("span", null, when(r.created_at)), el("span", null, r.engine || ""));
+    if (r.slack_url) { const a = el("a", null, "Slack thread"); a.href = r.slack_url; a.target = "_blank"; a.rel = "noopener"; m.append(a); }
+    box.append(m);
+    const steps = el("div", "steps");
+    r.events.forEach((e) => {
+      if (!e.title && !e.body) return;
+      const s = el("div", "step " + e.kind);
+      s.append(el("div", "k", e.kind.replace("_", " ") + (e.title && e.body ? " · " + e.title : "")), el("div", "b", e.body || e.title));
+      steps.append(s);
+    });
+    if (!steps.childElementCount) steps.append(el("p", "empty", "No steps yet."));
+    box.append(steps);
+    if (["running", "queued"].includes(r.status)) timer = setTimeout(() => select(id), 3000);
+  } catch (e) { box.replaceChildren(el("h2", null, "Task"), el("p", "err", e.message)); }
+  refresh();
+}
+
+$("new").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const prompt = $("prompt").value.trim(); if (!prompt) return;
+  $("go").disabled = true; $("newErr").textContent = "";
+  try {
+    const r = await api("/api/me/runs", { method: "POST", headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ prompt, engine: $("engine").value }) });
+    $("prompt").value = ""; select(r.run_id);
+  } catch (e) { $("newErr").textContent = e.message; }
+  $("go").disabled = false;
+};
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 15000);
+</script>
+</body>
+</html>

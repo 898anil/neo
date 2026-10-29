@@ -46,7 +46,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import accounts, autonomy, broker, home_tab, intent, learn, logins, onboarding, people, tokens, voice  # noqa: E402
+from cos import accounts, autonomy, broker, dashlink, home_tab, intent, learn, logins, onboarding, people, tokens, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -1456,6 +1456,13 @@ async def handle_intent(client, channel: str, thread_ts: str, user: Optional[str
                                                                                 "text": {"type": "plain_text", "text": "Undo"}}]}])
         asyncio.create_task(publish_home(client, user))
         return
+    if found["intent"] == "dashboard":
+        url = dashlink.link(user)
+        if url:
+            await client.chat_postMessage(channel=user, text=f"Your dashboard (the link works once, for 10 minutes): <{url}|Open my dashboard>")
+            if not channel.startswith("D"):
+                await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=":envelope_with_arrow: Sent you a sign-in link by DM.")
+        return
     if found["intent"] == "work_status":
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                       text=clip("*Work you asked other people's neo for*\n" + await asyncio.to_thread(broker.tasks_text, user)))
@@ -1610,6 +1617,30 @@ async def on_home_connect(ack, body, client) -> None:
     user = body["user"]["id"]
     if await may_use(client, user):
         await handle_login(client, user, None, user, commands.Request("login", engine=body["actions"][0]["value"]))
+
+
+@app.action(home_tab.DASHBOARD)
+async def on_dashboard(ack, body, client) -> None:
+    """A fresh one-time sign-in link to their own web dashboard, in a small form only they see."""
+    await ack()
+    user = body["user"]["id"]
+    if not await may_use(client, user):
+        return
+    url = dashlink.link(user)
+    if not url:
+        return
+    await client.views_open(trigger_id=body["trigger_id"], view={
+        "type": "modal", "title": {"type": "plain_text", "text": "Your dashboard"}, "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "Your tasks with every step, your watches and work "
+                                                                          "between neos. The link works once, for 10 minutes; "
+                                                                          "after that you stay signed in for a week."},
+                    "accessory": {"type": "button", "action_id": "dashboard_open", "url": url, "style": "primary",
+                                  "text": {"type": "plain_text", "text": "Open dashboard"}}}]})
+
+
+@app.action("dashboard_open")
+async def on_dashboard_open(ack) -> None:
+    await ack()  # the button is a link; Slack still sends the click
 
 
 @app.action(re.compile(f"^{home_tab.TOKEN}_"))

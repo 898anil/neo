@@ -113,7 +113,7 @@ class HomeTabTest(Base):
         self.assertIn("using Anil's for now", text)
         self.assertIn("fix login", text)
         self.assertIn("home_watch_remove_ci-abc", text)
-        brief = next(b for b in view["blocks"] if b["type"] == "actions")["elements"][0]
+        brief = next(e for b in view["blocks"] if b["type"] == "actions" for e in b["elements"] if e["type"] == "static_select")
         self.assertEqual(brief["initial_option"]["value"], "09:00")
         self.assertNotIn("web dashboard", text)
 
