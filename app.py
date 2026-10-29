@@ -2568,6 +2568,8 @@ async def main() -> None:
     else:
         raise SystemExit("Slack unreachable")
     BOT_USER_ID = auth["user_id"]
+    from cos import slackread
+    slackread.TOKEN = app.client.token  # neo-slack: agents read the conversation their request came from
     TEAM_ID = auth.get("team_id")
     TEAM_URL = auth.get("url")
     _start_dashboard()

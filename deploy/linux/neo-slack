@@ -1,0 +1,77 @@
+#!/usr/bin/python3 -I
+"""Read the Slack conversation this task came from (cos/slackread.py); installed as /usr/local/bin/neo-slack.
+
+    neo-slack history [--limit 200] [--before <ts>]   the latest messages (oldest first), with file ids
+    neo-slack thread <ts>                              one thread
+    neo-slack file <file id> [<save as>]               a file shared there, saved into the current folder
+
+Only inside a run neo started from Slack: the run's token says which conversation, and only that one.
+"""
+
+import argparse
+import base64
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+def call(body: dict) -> dict:
+    url, token, run_id = (os.environ.get(k, "") for k in ("NEO_A2A_URL", "NEO_A2A_TOKEN", "NEO_RUN_ID"))
+    if not (url and token and run_id):
+        print("neo-slack only works inside a run neo started from Slack.")
+        sys.exit(2)
+    req = urllib.request.Request(f"{url}/api/a2a/ask", data=json.dumps({"run_id": run_id, **body}).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Neo-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        print(f"neo-slack refused: {exc.read().decode(errors='replace')[:300]}")
+        sys.exit(1)
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        print(f"neo-slack couldn't reach neo: {exc}")
+        sys.exit(1)
+
+
+def show(messages: list) -> None:
+    for m in messages:
+        files = "".join(f"\n    [file {f['id']}: {f['name']} ({f.get('type')}, {f.get('size')} bytes)]" for f in m.get("files") or [])
+        replies = f"  ({m['replies']} replies: neo-slack thread {m['ts']})" if m.get("replies") else ""
+        print(f"--- {m['who']} at {m['ts']}{replies}\n{m['text']}{files}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read the Slack conversation this task came from.")
+    sub = parser.add_subparsers(dest="what", required=True)
+    h = sub.add_parser("history")
+    h.add_argument("--limit", type=int, default=100)
+    h.add_argument("--before", default="")
+    t = sub.add_parser("thread")
+    t.add_argument("ts")
+    f = sub.add_parser("file")
+    f.add_argument("file_id")
+    f.add_argument("save_as", nargs="?")
+    args = parser.parse_args()
+    if args.what == "history":
+        out = call({"slack": "history", "limit": args.limit, "before": args.before})
+    elif args.what == "thread":
+        out = call({"slack": "thread", "ts": args.ts})
+    else:
+        out = call({"slack": "file", "file": args.file_id})
+    if out.get("status") != "ok":
+        print(out.get("text", "refused"))
+        return 3
+    if args.what == "file":
+        name = os.path.basename(args.save_as or out["name"]) or args.file_id
+        with open(name, "wb") as fh:
+            fh.write(base64.b64decode(out["data"]))
+        print(f"saved {name} ({os.path.getsize(name)} bytes)")
+    else:
+        show(out["messages"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -632,6 +632,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.FORBIDDEN, "that run has ended")  # a leaked token dies with its run
         if LINUX and self._peer_uid() != account_uid(meta.get("account")):
             return self._error(HTTPStatus.FORBIDDEN, "not from that run's account")
+        if body.get("slack"):
+            return self._slack_read(meta, body)
         if body.get("status"):
             return self._json(broker.status(run_id, str(body.get("task") or "") or None))
         if body.get("work"):
@@ -698,6 +700,28 @@ class Handler(BaseHTTPRequestHandler):
             found = me.run_detail(user, parts[3])
             return self._json(found) if found else self._error(HTTPStatus.NOT_FOUND, "not found")
         return self._error(HTTPStatus.FORBIDDEN, "not on your dashboard")
+
+    def _slack_read(self, meta: dict, body: dict):
+        """neo-slack: the conversation this run was started from, nothing else (cos/slackread.py)."""
+        import base64
+        from . import slackread
+
+        channel = meta.get("slack_channel")
+        if not channel:
+            return self._json({"status": "refused", "text": "This task didn't start in Slack, so there's no conversation to read."})
+        try:
+            what = body.get("slack")
+            if what == "history":
+                return self._json({"status": "ok", "messages": slackread.history(channel, int(body.get("limit") or 100),
+                                                                                  str(body.get("before") or "") or None)})
+            if what == "thread":
+                return self._json({"status": "ok", "messages": slackread.thread(channel, str(body.get("ts") or meta.get("slack_thread") or ""))})
+            if what == "file":
+                name, data = slackread.file(channel, str(body.get("file") or ""))
+                return self._json({"status": "ok", "name": name, "data": base64.b64encode(data).decode()})
+        except (RuntimeError, PermissionError, ValueError, OSError) as exc:
+            return self._json({"status": "refused", "text": str(exc)})
+        return self._json({"status": "refused", "text": "unknown request"})
 
     def do_POST(self):
         if urlparse(self.path).path == "/api/a2a/ask":

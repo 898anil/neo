@@ -231,6 +231,10 @@ def charter(user: Optional[str], may_ask: bool = True) -> str:
              "- Never act as anyone else, and never share secrets, credentials, mail, DMs or other people's information.",
              "- Resolve things yourself first: read the code, git history, PRs, CI, logs and your memory, and work it out."]
     if may_ask:
+        lines.append("- You can read the Slack conversation this request came from, beyond the thread you were given: "
+                     "`neo-slack history [--limit 200]` (its latest messages, with file ids), `neo-slack thread <ts>`, and "
+                     "`neo-slack file <file id>` (saves a file shared there into the current folder). Use them when the "
+                     "person points to something said or shared earlier in the channel.")
         lines.append("- Only when you need knowledge or access that someone else has (their systems, their repos, a decision "
                      "that is theirs), ask their chief of staff: run `neo-ask --tried \"<what you already tried>\" "
                      "\"<one self-contained question>\"`. You don't need to know who: neo finds whose chief of staff can answer "

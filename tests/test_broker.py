@@ -353,3 +353,42 @@ class GuideTest(Base):
         out = self.ask("answer", "x", to="zed")
         self.assertIn("'zed' has no neo yet", out["text"])
         self.assertIn("neo-yosh", out["text"])
+
+
+class SlackReadTest(Base):
+    """neo-slack reads only the conversation the run started from."""
+
+    def test_only_this_runs_conversation(self):
+        from cos import slackread, server
+        calls = []
+
+        def fake_api(method, **params):
+            calls.append((method, params))
+            if method == "conversations.history":
+                return {"ok": True, "messages": [{"ts": "2.0", "user": "U1", "text": "the docs", "files": [{"id": "F1", "name": "terms.pdf"}]}]}
+            if method == "users.info":
+                return {"ok": True, "user": {"profile": {"real_name": "Ajay"}}}
+            raise AssertionError(method)
+        run = self.run_of(AJAY)
+        h = ServerTrustTest.handler(self, body=b"{}")
+        with patch.object(slackread, "_api", side_effect=fake_api):
+            h._slack_read(run.meta(), {"slack": "history", "channel": "CSOMEWHERE-ELSE"})
+        status, out = h.errors[-1]
+        self.assertEqual(out["messages"][0]["files"][0]["id"], "F1")
+        self.assertEqual(calls[0][1]["channel"], "C1")  # the run's own channel, whatever was asked
+
+    def test_a_file_from_elsewhere_is_refused(self):
+        from cos import slackread
+        with patch.object(slackread, "_api", return_value={"ok": True, "file": {"channels": ["COTHER"], "size": 10}}), \
+                patch.object(slackread, "TOKEN", "xoxb"):
+            with self.assertRaises(PermissionError):
+                slackread.file("C1", "F9")
+
+    def test_a_task_not_from_slack_has_nothing_to_read(self):
+        run = Run.create("claude", "x", str(self.dir), "full", source="dashboard", extra={"slack_user": AJAY})
+        h = ServerTrustTest.handler(self, body=b"{}")
+        h._slack_read(run.meta(), {"slack": "history"})
+        self.assertEqual(h.errors[-1][1]["status"], "refused")
+
+    def test_the_charter_mentions_it(self):
+        self.assertIn("neo-slack history", broker.charter(AJAY))
