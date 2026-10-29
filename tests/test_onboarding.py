@@ -251,3 +251,49 @@ class DirectMessageTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CosNameTest(Base):
+    """Each person's neo posts under its own name and photo (chat:write.customize)."""
+
+    def test_default_and_chosen_names(self):
+        import app
+        info = {"profile": {"real_name": "Ajay Arora", "image_72": "https://avatars.slack-edge.com/a.png"}}
+        self.assertEqual(app.cos_name(AJAY, info), "Ajay's neo")
+        self.assertEqual(app.cos_name(OWNER), "Anil's neo")
+        people.save(AJAY, AJAY, cos_name="Friday")
+        self.assertEqual(app.cos_name(AJAY, info), "Friday")
+        self.assertEqual(app.cos_name("UNOBODY1"), "neo")
+
+    def test_posts_speak_as_the_neo_they_are_for_and_otherwise_as_neo(self):
+        import app
+        sent = []
+
+        async def fake_post(self, **kwargs):
+            sent.append(kwargs)
+            return {"ok": True, "ts": "1.1"}
+
+        async def go():
+            client = app.AsyncWebClient(token="xoxb-test")
+            with patch.object(app, "_slack_post", fake_post), \
+                    patch.object(app, "slack_user", AsyncMock(return_value={"profile": {
+                        "real_name": "Ajay Arora", "image_72": "https://avatars.slack-edge.com/a.png"}})):
+                app._COS_ICONS.clear()
+                app.SPEAKER.set(None)
+                await client.chat_postMessage(channel="C1", text="alert RCA")
+                app.SPEAKER.set(AJAY)
+                await client.chat_postMessage(channel="C1", text="your task")
+                await client.chat_postMessage(channel="C1", text="named", username="custom")
+        asyncio.run(go())
+        self.assertNotIn("username", sent[0])
+        self.assertEqual((sent[1]["username"], sent[1]["icon_url"]), ("Ajay's neo", "https://avatars.slack-edge.com/a.png"))
+        self.assertEqual(sent[2]["username"], "custom")
+
+    def test_renaming_in_plain_words_is_a_request_about_neo(self):
+        self.assertTrue(intent.likely("call my neo Friday"))
+        self.assertTrue(intent.likely("rename my assistant to Jarvis"))
+        self.assertEqual(people._check("cos_name", "  Friday  "), "Friday")
+
+    def test_home_tab_says_its_name(self):
+        view = home_tab.view("Ajay", {}, None, None, [], [], cos="Ajay's neo")
+        self.assertIn("*Ajay's neo*", view["blocks"][1]["text"]["text"])

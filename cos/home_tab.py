@@ -31,12 +31,14 @@ def _time_select(action: str, times: list[str], current: Optional[str]) -> dict:
 
 def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], runs: list[dict],
          watches: list[dict], lender: Optional[str] = None, dashboard_url: Optional[str] = None,
-         pending: Optional[list[dict]] = None, policy: str = "", exchanges: Optional[list[dict]] = None) -> dict:
+         pending: Optional[list[dict]] = None, policy: str = "", exchanges: Optional[list[dict]] = None,
+         cos: str = "") -> dict:
     """logins: tool -> "own" | "lent" | "none" | "unknown". brief/digest: "HH:MM" or None (off).
     runs: today's {title, status, url}. watches: {id, name, every, enabled}. lender: whose logins are lent."""
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"Hi {name}"[:150]}},
-              _text("I'm neo, your chief of staff. Ask me anything in a DM or with `@neo` in a channel: "
-                    "a task (\"fix the flaky test in backie\") or something about me (\"send my brief at 8\").")]
+              _text(f"I'm {('*' + cos + '*') if cos else 'neo'}, your chief of staff. Ask me anything in a DM or with "
+                    "`@neo` in a channel: a task (\"fix the flaky test in backie\") or something about me "
+                    "(\"send my brief at 8\"). To rename me, say \"call my neo Friday\".")]
 
     blocks += [{"type": "divider"}, _text("*Your sign-ins*")]
     for tool, label in TOOL_NAMES.items():

@@ -12,6 +12,7 @@ ALLOWED_USER_IDS use it too. Every person gets a small JSON file in NEO_PEOPLE_D
   model      model id for that engine (CLAUDE_MODEL / CODEX_MODEL otherwise)
   brief      HH:MM for their own morning brief by DM on work days (their Slack time zone), or "off"
   digest     HH:MM for their own evening digest by DM, or "off" (DAILY has the defaults)
+  cos_name   what their chief of staff is called in Slack ("Friday"); "<first name>'s neo" when unset
   role       full | prs-only | read-only | blocked; only the owner sets it, and the owner is always full
 
 Roles until each person has their own sandbox (everyone still runs with the owner's logins):
@@ -35,7 +36,7 @@ from typing import Optional
 
 ROLES = ("full", "prs-only", "read-only", "blocked")
 ENGINES = ("claude", "codex")
-FIELDS = ("name", "style", "repos", "channels", "engine", "model", "brief", "digest", "role")
+FIELDS = ("name", "style", "repos", "channels", "engine", "model", "brief", "digest", "cos_name", "role")
 DAILY = {"brief": "09:00", "digest": "19:00"}  # when a person's own brief and digest come unless they set it
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 MAX_TEXT = 300
@@ -165,6 +166,8 @@ def _check(field: str, value):
         raise ValueError(f"unknown setting `{field}`; settings are {', '.join(FIELDS)}")
     if field in ("name", "style"):
         return _text(value)
+    if field == "cos_name":
+        return _text(value)[:60]
     if field in ("repos", "channels"):
         return _items(value)
     if field == "engine":
@@ -255,7 +258,7 @@ def describe(user: str) -> str:
     """Their settings as a Slack message."""
     data = load(user)
     rows = [f"*Settings for {name(user)}* (role: {role(user)}{', set by the owner' if not is_owner(user) else ''})"]
-    for field in ("name", "style", "repos", "channels", "engine", "model", "brief", "digest"):
+    for field in ("name", "style", "repos", "channels", "engine", "model", "brief", "digest", "cos_name"):
         value = data.get(field) or (f"{DAILY[field]} (default)" if field in DAILY else None)
         shown = ", ".join(value) if isinstance(value, list) else value
         rows.append(f"• {field}: {slack_safe(shown) if shown else '_not set_'}")

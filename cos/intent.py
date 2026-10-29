@@ -28,7 +28,7 @@ _LIKELY = re.compile("|".join((  # phrasings about neo itself; bare tool names (
     r"\b(?:connect|disconnect|link|unlink|sign (?:me )?(?:in|out)|log ?(?:me )?(?:in|out))\b.{0,30}\b(?:claude|codex|github|gh)\b",
     r"\b(?:stop|start|pause|resume|keep) watching\b", r"\bwatch (?:for|out for)\b.{0,80}\bevery\b",
     r"\b(?:send|move|turn (?:on|off)|stop|cancel|change|skip)\b.{0,20}\b(?:brief|digest)\b",
-    r"\bcall me\b", r"^\s*remember\b", r"\bwhat (?:do you|can you) (?:remember|do)\b", r"\bwhat are you watching\b",
+    r"\bcall me\b", r"\b(?:call|name|rename) (?:my|the) (?:cos|chief of staff|assistant|bot|neo)\b", r"^\s*remember\b", r"\bwhat (?:do you|can you) (?:remember|do)\b", r"\bwhat are you watching\b",
     r"^\s*(?:help|set me up|onboard me|what can you do)\s*\??\s*$",
     r"\b(?:other|another|their|people'?s) (?:cos|chief of staff|neo)\b", r"\bshare (?:with|about)\b")), re.I)
 
@@ -38,7 +38,7 @@ SCHEMA = {
         "intent": {"type": "string", "enum": list(INTENTS)},
         "tool": {"type": "string", "enum": ["claude", "codex", "gh", ""]},
         "time": {"type": "string", "description": "HH:MM 24-hour, or off"},
-        "field": {"type": "string", "enum": ["name", "style", "repos", "channels", "engine", "model", ""]},
+        "field": {"type": "string", "enum": ["name", "style", "repos", "channels", "engine", "model", "cos_name", ""]},
         "value": {"type": "string"},
         "name": {"type": "string", "description": "a watch's short name"},
         "every": {"type": "integer", "description": "minutes between watch checks"},
@@ -58,7 +58,8 @@ Intents:
 - watch_remove: stop one of their watches (name)
 - watches: list their watches and what they found
 - setting: one of their settings (field: name = what to call them, style = how to answer, repos, channels,
-  engine = claude or codex, model; value: the new value, "" to clear)
+  engine = claude or codex, model, cos_name = what their chief of staff / assistant is called in Slack;
+  value: the new value, "" to clear)
 - remember: a standing rule for their own future runs (what: the rule, in their words)
 - memory: show what neo remembers for them
 - sharing: what their CoS may answer when other people's CoS ask it (value: the whole new policy in their words,

@@ -14,6 +14,7 @@ Every run is recorded under runs/<run_id>/ and shown by the dashboard (cos/serve
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import faulthandler
 import json
 import logging
@@ -35,6 +36,7 @@ load_dotenv()
 
 from slack_bolt.app.async_app import AsyncApp  # noqa: E402
 from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler  # noqa: E402
+from slack_sdk.web.async_client import AsyncWebClient  # noqa: E402
 
 from urllib.parse import quote  # noqa: E402
 
@@ -96,6 +98,56 @@ _THREAD_CONTEXT_LIMIT = 50
 # untrusted text (threads, web pages, repos) that could ask them to print it.
 SLACK_APP_TOKEN = os.environ.pop("SLACK_APP_TOKEN", "")
 app = AsyncApp(token=os.environ.pop("SLACK_BOT_TOKEN"))
+
+# Whose chief of staff is speaking: set where neo starts working for someone (their message, their brief,
+# their watch, a broker note for them). Messages for nobody in particular (alert RCAs) post as neo.
+SPEAKER: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("neo_speaker", default=None)
+_COS_ICONS: dict[str, tuple[float, Optional[str], str]] = {}
+
+
+def cos_name(user: str, info: Optional[dict] = None) -> str:
+    """What this person's CoS is called in Slack: their own choice, else "<first name>'s neo"."""
+    mine = people.load(user)
+    if mine.get("cos_name"):
+        return mine["cos_name"]
+    profile = (info or {}).get("profile") or {}
+    full = mine.get("name") or (owner_name() if people.is_owner(user) else "") or profile.get("display_name") \
+        or profile.get("real_name") or (info or {}).get("real_name") or ""
+    first = full.split()[0] if full.split() else ""
+    return f"{first}'s neo" if first and first.lower() != "the" else "neo"
+
+
+async def _identity(user: str) -> dict:
+    """username / icon_url for a message from this person's CoS (chat:write.customize)."""
+    hit = _COS_ICONS.get(user)
+    if not hit or time.monotonic() > hit[0]:
+        info = await slack_user(app.client, user)
+        icon = ((info or {}).get("profile") or {}).get("image_72")
+        hit = (time.monotonic() + 3600, icon if str(icon or "").startswith("https://") else None, "")
+        _COS_ICONS[user] = hit
+        name = cos_name(user, info)
+    else:
+        name = cos_name(user)
+    out = {"username": name[:80]}
+    if hit[1]:
+        out["icon_url"] = hit[1]
+    return out
+
+
+_slack_post = AsyncWebClient.chat_postMessage
+
+
+async def _post_as_cos(self, **kwargs):
+    who = SPEAKER.get()
+    if who and people.valid_user(who) and "username" not in kwargs and os.environ.get("NEO_COS_NAMES", "1") != "0":
+        try:
+            kwargs.update(await _identity(who))
+        except Exception:  # noqa: BLE001 - post as neo rather than not at all
+            log.exception("could not name the CoS for %s", who)
+    return await _slack_post(self, **kwargs)
+
+
+AsyncWebClient.chat_postMessage = _post_as_cos
 
 # The bot's own user id, resolved at startup so its messages can be labelled as
 # the assistant's when reconstructing a thread transcript.
@@ -1009,6 +1061,7 @@ async def personal_scheduler(client) -> None:
             for user, account in (await asyncio.to_thread(accounts.everyone)).items():
                 if not accounts.isolated(user) or not await may_use(client, user):
                     continue
+                SPEAKER.set(user)
                 info = await slack_user(client, user)
                 if not info:
                     continue
@@ -1043,13 +1096,19 @@ async def personal_scheduler(client) -> None:
         await asyncio.sleep(60)
 
 
+async def as_cos(user: Optional[str], coro):
+    """Run a posting coroutine as this person's CoS (for posts started from worker threads)."""
+    SPEAKER.set(user)
+    return await coro
+
+
 def _post_personal_brief(client, user: str, loop):
     def posted(meta: dict) -> None:
         text = meta.get("text") or ""
         if not text:
             log.info("brief for %s did not finish (%s)", user, meta.get("status"))
             return
-        asyncio.run_coroutine_threadsafe(post_markdown(client, user, None, f"**Your morning brief**\n\n{text}"), loop)
+        asyncio.run_coroutine_threadsafe(as_cos(user, post_markdown(client, user, None, f"**Your morning brief**\n\n{text}")), loop)
     return posted
 
 
@@ -1387,6 +1446,7 @@ async def handle_intent(client, channel: str, thread_ts: str, user: Optional[str
 @app.action("neo_undo")
 async def on_undo(ack, body, client) -> None:
     await ack()
+    SPEAKER.set(body["user"]["id"])
     user, token = body["user"]["id"], body["actions"][0]["value"]
     if not await may_use(client, user):
         return
@@ -1451,7 +1511,7 @@ async def publish_home(client, user: Optional[str], check_logins: bool = False) 
                              f"{when['digest'][0]:02d}:{when['digest'][1]:02d}" if when["digest"] else None,
                              runs, theirs, owner_name(), DASHBOARD_URL if _owner_user(user) else None,
                              await asyncio.to_thread(learn.pending) if _owner_user(user) else None,
-                             broker.policy(user), _exchanges(user))
+                             broker.policy(user), _exchanges(user), cos_name(user, info))
         await client.views_publish(user_id=user, view=view)
     except Exception:  # noqa: BLE001 - the Home tab must never break anything else
         log.exception("could not publish the Home tab for %s", user)
@@ -1485,6 +1545,7 @@ async def on_home_opened(event: dict, client) -> None:
     if event.get("tab") != "home":
         return
     user = event.get("user")
+    SPEAKER.set(user)
     await publish_home(client, user)
     await publish_home(client, user, check_logins=True)  # the sign-in checks take a few seconds
     await maybe_onboard(client, user)
@@ -1493,6 +1554,7 @@ async def on_home_opened(event: dict, client) -> None:
 @app.action(re.compile(f"^{home_tab.CONNECT}_"))
 async def on_home_connect(ack, body, client) -> None:
     await ack()
+    SPEAKER.set(body["user"]["id"])
     user = body["user"]["id"]
     if await may_use(client, user):
         await handle_login(client, user, None, user, commands.Request("login", engine=body["actions"][0]["value"]))
@@ -1572,6 +1634,7 @@ async def onboarding_choice(client, user: str, channel: str, step: str, choice: 
 @app.action(re.compile(f"^{onboarding.ACTION}_"))
 async def on_onboarding(ack, body, client) -> None:
     await ack()
+    SPEAKER.set(body["user"]["id"])
     user = body["user"]["id"]
     if not await may_use(client, user):
         return
@@ -1696,7 +1759,8 @@ def watch_checked(client, loop):
             noun = "problem" if len(worth) == 1 else "problems"
             text = (f"{mention}**{watch['name']}** found {len(worth)} new {noun}\n\n{findings_markdown(worth)}\n\n"
                     "Reply `@neo live fix 1` (or any instruction) in this thread to start an agent on one.")
-        asyncio.run_coroutine_threadsafe(post_markdown(client, where, None, text), loop)
+        speaker = watch["owner"] if personal else people.owner_id()
+        asyncio.run_coroutine_threadsafe(as_cos(speaker, post_markdown(client, where, None, text)), loop)
     return notify
 
 
@@ -1706,6 +1770,7 @@ async def broker_outbox(client) -> None:
     while True:
         try:
             for item in await asyncio.to_thread(broker.take_outbox):
+                SPEAKER.set(item.get("user"))  # a note for someone comes from their own CoS
                 try:
                     if item.get("buttons"):
                         await client.chat_postMessage(channel=item["user"], text=clip(item["text"]), blocks=[
@@ -1730,6 +1795,7 @@ async def broker_outbox(client) -> None:
 @app.action(re.compile("^a2a_(send|decline)$"))
 async def on_a2a_decision(ack, body, client) -> None:
     await ack()
+    SPEAKER.set(body["user"]["id"])
     user, action = body["user"]["id"], body["actions"][0]
     if not await may_use(client, user):
         return
@@ -1819,6 +1885,7 @@ async def handle_dm(event: dict, client) -> None:
     if event.get("channel_type") != "im" or event.get("bot_id") or event.get("subtype"):
         return
     user = event.get("user")
+    SPEAKER.set(user)
     if ALLOWED_USER_IDS and user not in ALLOWED_USER_IDS:
         return
     why = await refusal(client, user)
@@ -2033,6 +2100,7 @@ async def _end_background(thread_ts: str, wait_seconds: float = 30.0) -> bool:
 @app.event("app_mention")
 async def handle_mention(event: dict, client) -> None:
     user = event.get("user")
+    SPEAKER.set(user)  # this task (and what it starts) speaks as their CoS
     if ALLOWED_USER_IDS and user not in ALLOWED_USER_IDS:
         return  # Silently ignore anyone not on the allowlist.
 
@@ -2306,9 +2374,10 @@ async def main() -> None:
         "Starting Neo bot (bot=%s, engine=%s, mode=%s, workdir=%s, dashboard=%s, allowlist=%s)",
         BOT_USER_ID, default_engine(), MODE, WORKDIR, DASHBOARD_URL, sorted(ALLOWED_USER_IDS),
     )
+    alerts = asyncio.create_task(auto_rca(app.client))  # noqa: F841 - posts as neo: for whoever is in the channel
+    SPEAKER.set(people.owner_id())  # the tasks below are the owner's own, so the owner's CoS speaks
     monitor = asyncio.create_task(monitor_agents(app.client))  # noqa: F841 - runs for the process lifetime
     briefs = asyncio.create_task(brief_scheduler(app.client))  # noqa: F841
-    alerts = asyncio.create_task(auto_rca(app.client))  # noqa: F841
     watchers = asyncio.create_task(watch_scheduler(app.client))  # noqa: F841
     held = asyncio.create_task(held_scheduler(app.client))  # noqa: F841
     personal = asyncio.create_task(personal_scheduler(app.client)) if accounts.enabled() else None  # noqa: F841
@@ -2316,6 +2385,7 @@ async def main() -> None:
     chief_jobs = chief.start(app.client, NOTIFY_CHANNEL, NOTIFY_USER, DASHBOARD_URL)  # noqa: F841
     RESUMED.extend(await finish_adopted_slack_runs(app.client))  # hold the tasks so they are not collected
     await resume_live_runs(app.client)
+    SPEAKER.set(None)  # events start as neo; each handler names whose CoS it is working for
     handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
     await handler.start_async()
 
