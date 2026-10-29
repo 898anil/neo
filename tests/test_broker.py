@@ -252,7 +252,7 @@ class ServerTrustTest(Base):
         with patch.object(server, "LINUX", True), patch.dict(os.environ, {"COS_TOKEN": ""}):
             self.assertFalse(self.handler(peer_uid=1035)._authorized())  # neo-ajay
             self.assertTrue(self.handler(peer_uid=os.getuid())._authorized())  # neo itself
-            self.assertTrue(self.handler(peer_uid=0)._authorized())  # root (tailscaled)
+            self.assertFalse(self.handler(peer_uid=0)._authorized())  # root is tailscaled forwarding Funnel/serve traffic
 
     def test_a_faked_tailscale_header_from_another_account_is_refused(self):
         from cos import server

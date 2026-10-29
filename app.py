@@ -1084,7 +1084,11 @@ async def personal_scheduler(client) -> None:
     while True:
         try:
             for user, account in (await asyncio.to_thread(accounts.everyone)).items():
-                if not accounts.isolated(user) or not await may_use(client, user):
+                if not accounts.isolated(user):
+                    continue
+                if not await may_use(client, user):
+                    if await asyncio.to_thread(dashlink.session_alive, user):
+                        await asyncio.to_thread(dashlink.revoke, user)  # gone, blocked or a guest now: signed out
                     continue
                 SPEAKER.set(user)
                 info = await slack_user(client, user)
@@ -1459,7 +1463,8 @@ async def handle_intent(client, channel: str, thread_ts: str, user: Optional[str
     if found["intent"] == "dashboard":
         url = dashlink.link(user)
         if url:
-            await client.chat_postMessage(channel=user, text=f"Your dashboard (the link works once, for 10 minutes): <{url}|Open my dashboard>")
+            await client.chat_postMessage(channel=user, text=f"Your dashboard (the link works once, for 10 minutes): <{url}|Open my dashboard>",
+                                          unfurl_links=False, unfurl_media=False)
             if not channel.startswith("D"):
                 await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=":envelope_with_arrow: Sent you a sign-in link by DM.")
         return

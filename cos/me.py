@@ -11,6 +11,8 @@ from . import accounts, broker, people, tokens, watches
 from .runner import ENGINES, Run, list_runs, valid_run_id
 
 EVENT_LIMIT = 400
+ACTIVE_PER_PERSON = 3  # tasks running at once, started from the dashboard
+STARTS_PER_HOUR = 20
 
 
 def _name(user: str) -> str:
@@ -72,10 +74,30 @@ def run_detail(user: str, run_id: str) -> Optional[dict]:
                     continue
                 if event.get("kind") in ("debug", "usage", "session"):
                     continue
+                if meta.get("kind", "").startswith("a2a") and event.get("kind") in ("prompt", "tool_result"):
+                    continue  # another person's words and raw tool output: their neo's answer is what's theirs
                 events.append({k: event.get(k) for k in ("kind", "title", "body", "ts")})
     except OSError:
         pass
     return {**_row(meta), "prompt": _title(meta), "events": events[-EVENT_LIMIT:]}
+
+
+def check_rate(user: str) -> None:
+    """At most ACTIVE_PER_PERSON running and STARTS_PER_HOUR started from the dashboard per person."""
+    from datetime import datetime
+
+    mine = [m for m in list_runs(300) if m.get("slack_user") == user and m.get("source") == "dashboard"]
+    if sum(1 for m in mine if m.get("status") in ("queued", "running")) >= ACTIVE_PER_PERSON:
+        raise ValueError(f"You have {ACTIVE_PER_PERSON} tasks running; wait for one to finish.")
+    hour_ago = datetime.now().timestamp() - 3600
+    recent = 0
+    for m in mine:
+        try:
+            recent += datetime.fromisoformat(m["created_at"]).timestamp() >= hour_ago
+        except (KeyError, ValueError):
+            pass
+    if recent >= STARTS_PER_HOUR:
+        raise ValueError("That's a lot of tasks this hour; try again a little later.")
 
 
 def start(user: str, prompt: str, engine: Optional[str] = None) -> Run:

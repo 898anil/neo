@@ -69,18 +69,43 @@ class LinkTest(Base):
         self.assertIsNone(dashlink.session_user(value.replace(AJAY, OWNER)))
         self.assertIsNone(dashlink.session_user(dashlink.session_value(AJAY, now=1000)))
 
-    def test_opening_the_link_sets_the_session(self):
+    def test_the_link_shows_a_button_and_only_the_post_signs_in(self):
+        token = dashlink.link_token(AJAY)
         sent = []
-        h = self.handler(f"/login?t={dashlink.link_token(AJAY)}")
-        h.send_response = lambda code: sent.append(("status", int(code)))
-        h.send_header = lambda k, v: sent.append((k, v))
-        h.end_headers = lambda: None
-        h.do_GET()
+
+        def capture(h):
+            h.send_response = lambda code: sent.append(("status", int(code)))
+            h.send_header = lambda k, v: sent.append((k, v))
+            h.end_headers = lambda: None
+            return h
+        capture(self.handler(f"/login?t={token}")).do_GET()  # a link preview or scanner fetching it
+        self.assertNotIn("Set-Cookie", dict(sent))
+        sent.clear()
+        h = capture(self.handler("/login", method="POST", body=json.dumps({"t": token}).encode(),
+                                 headers={"Origin": "https://spark.example.ts.net:8443"}))
+        h.do_POST()
         cookie = dict(sent)["Set-Cookie"]
-        self.assertIn(("status", 303), sent)
+        self.assertIn(("status", 204), sent)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("Secure", cookie)
         self.assertEqual(dashlink.session_user(cookie.split(";")[0].split("=", 1)[1]), AJAY)
+        sent.clear()
+        capture(self.handler("/login", method="POST", body=json.dumps({"t": token}).encode())).do_POST()
+        self.assertNotIn("Set-Cookie", dict(sent))  # once
+
+    def test_logout_and_revoke_end_sessions(self):
+        value = dashlink.session_value(AJAY)
+        self.assertTrue(dashlink.session_alive(AJAY))
+        dashlink.revoke(AJAY)
+        self.assertIsNone(dashlink.session_user(value))
+        self.assertFalse(dashlink.session_alive(AJAY))
+        self.assertEqual(dashlink.session_user(dashlink.session_value(AJAY)), AJAY)  # a new link works again
+
+    def test_odd_signatures_and_a_broken_key_are_safe(self):
+        self.assertIsNone(dashlink.redeem(dashlink._b64("U1.9999999999.ab") + ".\u00e9"))
+        self.assertIsNone(dashlink.session_user("U1.9999999999.0.\u00e9"))
+        (self.dir / "dash.key").write_bytes(b"")
+        self.assertGreaterEqual(len(dashlink._key()), 32)
 
 
 class PersonViewTest(Base):
@@ -111,6 +136,29 @@ class PersonViewTest(Base):
         h = self.handler("/", cookie=dashlink.session_value(OWNER))
         h.do_GET()
         self.assertEqual(h.out[-1], (200, "index.html"))
+
+    def test_public_traffic_faking_localhost_gets_nothing(self):
+        with patch.dict(os.environ, {"COS_TOKEN": ""}), patch.object(server, "LINUX", True):
+            faked = self.handler("/api/overview", headers={"Host": "127.0.0.1", "Tailscale-Funnel-Request": "?1"})
+            self.assertFalse(faked._authorized())
+            root = self.handler("/api/overview", headers={"Host": "127.0.0.1"})  # tailscaled forwarding serve traffic
+            self.assertFalse(root._authorized())
+            neo = self.handler("/api/overview", headers={"Host": "127.0.0.1"})
+            neo._peer_uid = lambda: os.getuid()
+            self.assertTrue(neo._authorized())
+
+    def test_a_blocked_persons_session_stops_working(self):
+        cookie = dashlink.session_value(AJAY)
+        people.save(AJAY, OWNER, role="blocked")
+        h = self.handler("/api/me", cookie=cookie)
+        h.do_GET()
+        self.assertEqual(h.out[-1][0], 403)
+
+    def test_starting_tasks_is_limited(self):
+        for _ in range(me.ACTIVE_PER_PERSON):
+            Run.create("claude", "x", str(self.dir), "full", source="dashboard", extra={"slack_user": AJAY}).update_meta(status="running")
+        with self.assertRaises(ValueError):
+            me.check_rate(AJAY)
 
     def test_public_funnel_traffic_cant_claim_a_tailnet_identity(self):
         env = {"COS_TAILSCALE_USERS": "anil@x.com"}
