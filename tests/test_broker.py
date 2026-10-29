@@ -282,3 +282,53 @@ class ServerTrustTest(Base):
             h = self.handler(headers=headers, body=body, peer_uid=1035)
             h._a2a_ask()
             self.assertEqual(h.errors[-1], (200, {"status": "answered", "text": "ok"}))
+
+
+class DelegatedWorkTest(Base):
+    """One neo asks another to do something with its owner's access; it reports back when done."""
+
+    def delegate(self, decision, to="anil"):
+        run = self.run_of(AJAY)
+        started = []
+        with patch.object(broker, "decide", return_value={"decision": decision, "plan": "fix the test", "reason": "policy", "run": "d"}), \
+                patch.object(broker, "start_work", side_effect=lambda tid, row: started.append(tid) or broker._set_task(tid, **row, status="working", run="w")):
+            out = broker.delegate(run.id, "make the backie login test pass", TRIED, to)
+        return out, started
+
+    def test_accepted_work_returns_a_task_at_once(self):
+        out, started = self.delegate("accept")
+        self.assertEqual(out["status"], "working")
+        self.assertEqual(started, [out["task"]])
+        self.assertIn(out["task"], broker.tasks_text(AJAY))
+
+    def test_declined_and_escalated(self):
+        self.assertEqual(self.delegate("deny")[0]["status"], "declined")
+        out, started = self.delegate("ask_owner")
+        self.assertEqual((out["status"], started), ("pending", []))
+        note = [o for o in broker.take_outbox() if o.get("buttons") == "work"][0]
+        self.assertEqual(note["user"], OWNER)
+        self.assertIsNone(broker.approve_work(out["task"], AJAY, True))  # only the owner of that neo decides
+
+    def test_finishing_tells_both_and_the_askers_neo_gets_a_turn(self):
+        out, _ = self.delegate("accept")
+        work = Run.create("claude", "x", str(self.dir), "full", source="a2a", extra={"kind": "a2a-work"})
+        (work.dir / "events.jsonl").write_text('{"kind": "result", "body": "Fixed the test in PR #12; CI is green."}\n')
+        broker._set_task(out["task"], run=work.id)
+        broker.finish(out["task"], work.update_meta(status="done"))
+        notes = broker.take_outbox()
+        to_asker = [o for o in notes if o["user"] == AJAY][0]
+        self.assertTrue(to_asker["followup"])
+        self.assertIn("PR #12", to_asker["text"])
+        self.assertTrue(any(o["user"] == OWNER and "Finished" in o["text"] for o in notes))
+        self.assertIn("result: Fixed the test", broker.tasks_text(AJAY, out["task"]))
+
+    def test_work_runs_cant_delegate_further(self):
+        self.assertFalse(broker.may_ask({"source": "slack", "kind": "a2a-work"}))
+
+    def test_recover_finishes_work_that_ended_while_neo_was_down(self):
+        out, _ = self.delegate("accept")
+        work = Run.create("claude", "x", str(self.dir), "full", source="a2a", extra={"kind": "a2a-work"})
+        work.update_meta(status="done")
+        broker._set_task(out["task"], run=work.id)
+        self.assertEqual(broker.recover(), [out["task"]])
+        self.assertEqual(broker._task(out["task"])["status"], "done")

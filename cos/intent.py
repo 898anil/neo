@@ -21,7 +21,7 @@ from .runner import claude_available, cli_path
 MODEL = os.environ.get("NEO_INTENT_MODEL", "claude-haiku-5-5")
 MAX_CHARS = 400  # a longer message is a task, not a request about neo
 INTENTS = ("none", "connect", "disconnect", "connections", "brief_time", "digest_time", "watch_add",
-           "watch_remove", "watches", "setting", "remember", "memory", "sharing", "help")
+           "watch_remove", "watches", "setting", "remember", "memory", "sharing", "work_status", "help")
 _LIKELY = re.compile("|".join((  # phrasings about neo itself; bare tool names ("check the github actions") are tasks
     r"\bmy (?:morning |evening )?(?:brief|digest|cos|chief of staff|settings|style|repos?|channels?|engine|model|"
     r"watch(?:es)?|memory|name|sign-?ins?|logins?|accounts?|policy|time ?zone)\b",
@@ -30,7 +30,8 @@ _LIKELY = re.compile("|".join((  # phrasings about neo itself; bare tool names (
     r"\b(?:send|move|turn (?:on|off)|stop|cancel|change|skip)\b.{0,20}\b(?:brief|digest)\b",
     r"\bcall me\b", r"\b(?:call|name|rename) (?:my|the) (?:cos|chief of staff|assistant|bot|neo)\b", r"^\s*remember\b", r"\bwhat (?:do you|can you) (?:remember|do)\b", r"\bwhat are you watching\b",
     r"^\s*(?:help|set me up|onboard me|what can you do)\s*\??\s*$",
-    r"\b(?:other|another|their|people'?s) (?:cos|chief of staff|neo)\b", r"\bshare (?:with|about)\b")), re.I)
+    r"\b(?:other|another|their|people'?s) (?:cos|chief of staff|neo)\b", r"\bshare (?:with|about)\b",
+    r"\b(?:status|progress|how'?s|is it done|done yet)\b.{0,60}\b(?:\w+'s neo|their neo|anil|fix|task|request)\b")), re.I)
 
 SCHEMA = {
     "type": "object",
@@ -64,6 +65,7 @@ Intents:
 - memory: show what neo remembers for them
 - sharing: what their CoS may answer when other people's CoS ask it (value: the whole new policy in their words,
   merged with what they said before if they are only adding to it)
+- work_status: how the work they asked another person's neo / chief of staff to do is going
 - help: what neo can do, or to be set up / onboarded
 - none: anything else. A task for an agent (fix, build, review, investigate, explain, write, check something
   once) is none, even if it mentions GitHub, Claude, a brief or a watch.

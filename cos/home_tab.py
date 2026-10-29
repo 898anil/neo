@@ -32,7 +32,7 @@ def _time_select(action: str, times: list[str], current: Optional[str]) -> dict:
 def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], runs: list[dict],
          watches: list[dict], lender: Optional[str] = None, dashboard_url: Optional[str] = None,
          pending: Optional[list[dict]] = None, policy: str = "", exchanges: Optional[list[dict]] = None,
-         cos: str = "") -> dict:
+         cos: str = "", work: Optional[dict] = None) -> dict:
     """logins: tool -> "own" | "lent" | "none" | "unknown". brief/digest: "HH:MM" or None (off).
     runs: today's {title, status, url}. watches: {id, name, every, enabled}. lender: whose logins are lent."""
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"Hi {name}"[:150]}},
@@ -84,6 +84,13 @@ def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], r
         for row in (exchanges or [])[:6]:
             arrow = f"<@{row['other']}> asked" if row["incoming"] else f"You asked <@{row['other']}>"
             blocks.append(_text(f"{arrow}: _{row['question'][:150]}_ ({decided.get(row['decision'], row['decision'])})"))
+    asked, doing = (work or {}).get("asked") or [], (work or {}).get("doing") or []
+    if asked or doing:
+        blocks += [{"type": "divider"}, _text("*Work between neos*")]
+        for row in asked[:5]:
+            blocks.append(_text(f"You asked <@{row['target']}>'s neo: _{row['request'][:150]}_ ({row.get('status')}, `{row['id']}`)"))
+        for row in doing[:5]:
+            blocks.append(_text(f"For <@{row['asker']}>'s neo: _{row['request'][:150]}_ ({row.get('status')}, `{row['id']}`)"))
     if pending:  # the owner's: shared notes from other people, reaching everyone's runs only once approved
         blocks += [{"type": "divider"}, _text(f"*Shared notes waiting for you* ({len(pending)}): these would reach "
                                               "everyone's agents, yours too.")]

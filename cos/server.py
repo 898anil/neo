@@ -575,6 +575,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.FORBIDDEN, "that run has ended")  # a leaked token dies with its run
         if LINUX and self._peer_uid() != account_uid(meta.get("account")):
             return self._error(HTTPStatus.FORBIDDEN, "not from that run's account")
+        if body.get("status"):
+            return self._json(broker.status(run_id, str(body.get("task") or "") or None))
+        if body.get("work"):
+            return self._json(broker.delegate(run_id, str(body.get("question") or ""), str(body.get("tried") or ""),
+                                              str(body.get("to") or "") or None))
         return self._json(broker.ask(run_id, str(body.get("question") or ""), str(body.get("tried") or ""),
                                      str(body.get("to") or "") or None))
 

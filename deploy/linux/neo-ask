@@ -2,6 +2,8 @@
 """Ask another person's chief of staff (cos/broker.py); installed as /usr/local/bin/neo-ask.
 
     neo-ask --tried "what I already tried" [--to <name>] "one self-contained question"
+    neo-ask --work --tried "what I already tried" [--to <name>] "what needs doing"   (returns a task id at once)
+    neo-ask --status [task id]
 
 Only works inside a run neo started: the run's NEO_RUN_ID, NEO_A2A_TOKEN and NEO_A2A_URL say who is asking.
 Prints the answer (or why there is none) and waits for it, up to 15 minutes.
@@ -17,15 +19,21 @@ import urllib.request
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ask another person's chief of staff.")
-    parser.add_argument("question")
-    parser.add_argument("--tried", required=True, help="what you already tried yourself, and why it wasn't enough")
+    parser.add_argument("question", nargs="?", default="")
+    parser.add_argument("--tried", default="", help="what you already tried yourself, and why it wasn't enough")
+    parser.add_argument("--work", action="store_true", help="ask them to do it with their access (a background task)")
+    parser.add_argument("--status", nargs="?", const="all", default=None, metavar="TASK",
+                        help="how the work you asked for is going (one task id, or all)")
     parser.add_argument("--to", default="", help="whose chief of staff to ask (a first name), if you know")
     args = parser.parse_args()
     url, token, run_id = (os.environ.get(k, "") for k in ("NEO_A2A_URL", "NEO_A2A_TOKEN", "NEO_RUN_ID"))
     if not (url and token and run_id):
         print("neo-ask only works inside a run neo started (and not while answering someone else's question).")
         return 2
-    body = json.dumps({"run_id": run_id, "question": args.question, "tried": args.tried, "to": args.to}).encode()
+    if args.status is None and not (args.question and args.tried):
+        parser.error("give --tried and the question (or --status)")
+    body = json.dumps({"run_id": run_id, "question": args.question, "tried": args.tried, "to": args.to, "work": args.work,
+                       "status": args.status is not None, "task": "" if args.status in (None, "all") else args.status}).encode()
     req = urllib.request.Request(f"{url}/api/a2a/ask", data=body, method="POST",
                                  headers={"Content-Type": "application/json", "X-Neo-Token": token})
     try:
@@ -38,8 +46,9 @@ def main() -> int:
         print(f"neo-ask couldn't reach neo: {exc}")
         return 1
     status, by = out.get("status", "?"), out.get("by")
-    print(f"[{status}{' from ' + by + chr(39) + 's chief of staff' if by else ''}]\n{out.get('text', '')}")
-    return 0 if status == "answered" else 3
+    task = f" task {out['task']}" if out.get("task") else ""
+    print(f"[{status}{task}{' from ' + by + chr(39) + 's chief of staff' if by else ''}]\n{out.get('text', '')}")
+    return 0 if status in ("answered", "working", "ok", "pending") else 3
 
 
 if __name__ == "__main__":
