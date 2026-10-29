@@ -519,6 +519,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 1 and parts[0] in PUBLIC_FILES:
             # App icon and manifest: harmless, and fetched by the phone without cookies.
             return self._static(parts[0], PUBLIC_FILES[parts[0]])
+        if parts == ["slack", "oauth"]:
+            return self._slack_oauth()
         if parts == ["login"]:
             return self._login_page()
         if parts == ["logout"]:
@@ -655,6 +657,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _slack_oauth(self):
+        """Slack sends the browser here after someone allows "connect my slack"; the signed state says who."""
+        from . import slackauth
+
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            slackauth.connect((query.get("code") or [""])[0], (query.get("state") or [""])[0])
+            text = (b"<h2>Slack connected</h2><p>Your neo can now search and read the Slack channels you're in. "
+                    b"You can close this page.</p>")
+        except ValueError as exc:
+            text = b"<h2>That didn't work</h2><p>" + str(exc).replace("<", "&lt;").encode() + b"</p>"
+        body = (b"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>neo</title>"
+                b"<body style='font:16px system-ui;max-width:32rem;margin:15vh auto;padding:0 16px'>" + text)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _logout(self):
         from . import dashlink
 
@@ -706,19 +729,34 @@ class Handler(BaseHTTPRequestHandler):
         import base64
         from . import slackread
 
+        from . import people, slackauth
+
+        mine = slackauth.token(meta.get("slack_user") or people.owner_id())  # their own Slack, if connected
         channel = meta.get("slack_channel")
-        if not channel:
-            return self._json({"status": "refused", "text": "This task didn't start in Slack, so there's no conversation to read."})
+        asked = str(body.get("channel") or "").strip()
+        hint = " Say \"connect my slack\" to neo to let your neo read and search the channels you're in."
         try:
+            if asked:
+                if not mine:
+                    return self._json({"status": "refused", "text": "Your neo can only read the conversation this task came from." + hint})
+                channel = asked if re.fullmatch(r"[CG][A-Z0-9]{6,}", asked) else slackread.find_channel(asked, mine)
+                if not channel:
+                    return self._json({"status": "refused", "text": f"No channel {asked!r} among the ones you're in."})
             what = body.get("slack")
+            if what == "search":
+                if not mine:
+                    return self._json({"status": "refused", "text": "Searching Slack needs your own Slack connected." + hint})
+                return self._json({"status": "ok", "messages": slackread.search(str(body.get("query") or ""), mine)})
+            if what == "file":
+                name, data = slackread.file(channel, str(body.get("file") or ""), mine)
+                return self._json({"status": "ok", "name": name, "data": base64.b64encode(data).decode()})
+            if not channel:
+                return self._json({"status": "refused", "text": "This task didn't start in Slack, so there's no conversation to read." + hint})
             if what == "history":
                 return self._json({"status": "ok", "messages": slackread.history(channel, int(body.get("limit") or 100),
-                                                                                  str(body.get("before") or "") or None)})
+                                                                                  str(body.get("before") or "") or None, mine)})
             if what == "thread":
-                return self._json({"status": "ok", "messages": slackread.thread(channel, str(body.get("ts") or meta.get("slack_thread") or ""))})
-            if what == "file":
-                name, data = slackread.file(channel, str(body.get("file") or ""))
-                return self._json({"status": "ok", "name": name, "data": base64.b64encode(data).decode()})
+                return self._json({"status": "ok", "messages": slackread.thread(channel, str(body.get("ts") or meta.get("slack_thread") or ""), mine)})
         except (RuntimeError, PermissionError, ValueError, OSError) as exc:
             return self._json({"status": "refused", "text": str(exc)})
         return self._json({"status": "refused", "text": "unknown request"})

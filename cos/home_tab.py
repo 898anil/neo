@@ -34,7 +34,7 @@ def _time_select(action: str, times: list[str], current: Optional[str]) -> dict:
 def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], runs: list[dict],
          watches: list[dict], lender: Optional[str] = None, dashboard_url: Optional[str] = None,
          pending: Optional[list[dict]] = None, policy: str = "", exchanges: Optional[list[dict]] = None,
-         cos: str = "", work: Optional[dict] = None, token_tools: Optional[dict] = None) -> dict:
+         cos: str = "", work: Optional[dict] = None, token_tools: Optional[dict] = None, slack: Optional[bool] = None) -> dict:
     """logins: tool -> "own" | "lent" | "none" | "unknown". brief/digest: "HH:MM" or None (off).
     runs: today's {title, status, url}. watches: {id, name, every, enabled}. lender: whose logins are lent."""
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"Hi {name}"[:150]}},
@@ -55,6 +55,11 @@ def view(name: str, logins: dict, brief: Optional[str], digest: Optional[str], r
         if state != "unknown":
             row["accessory"] = {"type": "button", "action_id": f"{CONNECT}_{tool}", "value": tool,
                                 "text": {"type": "plain_text", "text": "Reconnect" if state == "own" else "Connect"}}
+        blocks.append(row)
+    if slack is not None:
+        row = _text(f"*Slack*  {':white_check_mark: your own: search and the channels you are in' if slack else ':white_circle: only the conversation you ask in'}")
+        row["accessory"] = {"type": "button", "action_id": f"{CONNECT}_slack", "value": "slack",
+                            "text": {"type": "plain_text", "text": "Reconnect" if slack else "Connect"}}
         blocks.append(row)
     from .tokens import TOOLS as TOKEN_TOOLS
     for tool, on in (token_tools or {}).items():

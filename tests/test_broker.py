@@ -362,7 +362,7 @@ class SlackReadTest(Base):
         from cos import slackread, server
         calls = []
 
-        def fake_api(method, **params):
+        def fake_api(method, token=None, **params):
             calls.append((method, params))
             if method == "conversations.history":
                 return {"ok": True, "messages": [{"ts": "2.0", "user": "U1", "text": "the docs", "files": [{"id": "F1", "name": "terms.pdf"}]}]}
@@ -372,10 +372,12 @@ class SlackReadTest(Base):
         run = self.run_of(AJAY)
         h = ServerTrustTest.handler(self, body=b"{}")
         with patch.object(slackread, "_api", side_effect=fake_api):
-            h._slack_read(run.meta(), {"slack": "history", "channel": "CSOMEWHERE-ELSE"})
+            h._slack_read(run.meta(), {"slack": "history", "channel": "CSOMEWHERE"})
+            self.assertIn("connect my slack", h.errors[-1][1]["text"])  # another channel needs their own Slack
+            h._slack_read(run.meta(), {"slack": "history"})
         status, out = h.errors[-1]
         self.assertEqual(out["messages"][0]["files"][0]["id"], "F1")
-        self.assertEqual(calls[0][1]["channel"], "C1")  # the run's own channel, whatever was asked
+        self.assertEqual(calls[0][1]["channel"], "C1")  # the run's own channel
 
     def test_a_file_from_elsewhere_is_refused(self):
         from cos import slackread

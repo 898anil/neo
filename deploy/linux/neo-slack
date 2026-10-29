@@ -1,11 +1,13 @@
 #!/usr/bin/python3 -I
 """Read the Slack conversation this task came from (cos/slackread.py); installed as /usr/local/bin/neo-slack.
 
-    neo-slack history [--limit 200] [--before <ts>]   the latest messages (oldest first), with file ids
-    neo-slack thread <ts>                              one thread
-    neo-slack file <file id> [<save as>]               a file shared there, saved into the current folder
+    neo-slack history [--channel <#name or id>] [--limit 200] [--before <ts>]   latest messages, oldest first
+    neo-slack thread <ts> [--channel <#name or id>]                             one thread
+    neo-slack search "<query>"                                                  Slack search (their own Slack)
+    neo-slack file <file id> [<save as>]                                        save a file into the current folder
 
-Only inside a run neo started from Slack: the run's token says which conversation, and only that one.
+Only inside a run neo started. With the person's own Slack connected ("connect my slack"), any channel they're
+in, and search; otherwise only the conversation the task came from.
 """
 
 import argparse
@@ -39,7 +41,8 @@ def show(messages: list) -> None:
     for m in messages:
         files = "".join(f"\n    [file {f['id']}: {f['name']} ({f.get('type')}, {f.get('size')} bytes)]" for f in m.get("files") or [])
         replies = f"  ({m['replies']} replies: neo-slack thread {m['ts']})" if m.get("replies") else ""
-        print(f"--- {m['who']} at {m['ts']}{replies}\n{m['text']}{files}")
+        where = f" in #{m['channel_name']} ({m['channel']}) {m.get('link') or ''}" if m.get("channel_name") else ""
+        print(f"--- {m['who']} at {m['ts']}{where}{replies}\n{m['text']}{files}")
 
 
 def main() -> int:
@@ -48,16 +51,22 @@ def main() -> int:
     h = sub.add_parser("history")
     h.add_argument("--limit", type=int, default=100)
     h.add_argument("--before", default="")
+    h.add_argument("--channel", default="")
     t = sub.add_parser("thread")
     t.add_argument("ts")
+    t.add_argument("--channel", default="")
+    q = sub.add_parser("search")
+    q.add_argument("query")
     f = sub.add_parser("file")
     f.add_argument("file_id")
     f.add_argument("save_as", nargs="?")
     args = parser.parse_args()
     if args.what == "history":
-        out = call({"slack": "history", "limit": args.limit, "before": args.before})
+        out = call({"slack": "history", "limit": args.limit, "before": args.before, "channel": args.channel})
     elif args.what == "thread":
-        out = call({"slack": "thread", "ts": args.ts})
+        out = call({"slack": "thread", "ts": args.ts, "channel": args.channel})
+    elif args.what == "search":
+        out = call({"slack": "search", "query": args.query})
     else:
         out = call({"slack": "file", "file": args.file_id})
     if out.get("status") != "ok":

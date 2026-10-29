@@ -29,8 +29,20 @@
         "files:write",
         "users:read",
         "users:read.email"
+      ],
+      "user": [
+        "search:read",
+        "channels:history",
+        "groups:history",
+        "channels:read",
+        "groups:read",
+        "files:read",
+        "users:read"
       ]
-    }
+    },
+    "redirect_urls": [
+      "https://spark-8a42.tailaf473.ts.net:8443/slack/oauth"
+    ]
   },
   "settings": {
     "event_subscriptions": {

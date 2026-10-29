@@ -202,3 +202,81 @@ class SlackSideTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConnectSlackTest(Base):
+    """"connect my slack": the person's own Slack, used only through neo-slack."""
+
+    def setUp(self):
+        super().setUp()
+        self.slack_env = patch.dict(os.environ, {"SLACK_CLIENT_ID": "123.456", "SLACK_CLIENT_SECRET": "s3cret"})
+        self.slack_env.start()
+
+    def tearDown(self):
+        self.slack_env.stop()
+        super().tearDown()
+
+    def state(self, user):
+        from cos import slackauth
+        from urllib.parse import parse_qs, urlparse
+        return parse_qs(urlparse(slackauth.authorize_url(user)).query)["state"][0]
+
+    def test_connects_once_and_only_as_the_person_the_link_was_for(self):
+        from cos import slackauth
+        ok = lambda code: {"ok": True, "authed_user": {"id": AJAY, "access_token": "xoxp-ajay"}}  # noqa: E731
+        state = self.state(AJAY)
+        self.assertEqual(slackauth.connect("c1", state, exchange=ok), AJAY)
+        self.assertEqual(slackauth.token(AJAY), "xoxp-ajay")
+        with self.assertRaises(ValueError):
+            slackauth.connect("c1", state, exchange=ok)  # once
+        with self.assertRaises(ValueError):  # someone else's Slack can't land on Ajay's neo
+            slackauth.connect("c2", self.state(AJAY), exchange=lambda c: {"ok": True, "authed_user": {"id": YOSH, "access_token": "x"}})
+        from cos import tokens
+        self.assertNotIn("xoxp-ajay", str(tokens.env_for(AJAY)))  # never handed to runs as an env var
+
+    def test_the_pasted_address_is_read_through_slack_formatting(self):
+        from cos import slackauth
+        url = "https://spark.example.ts.net:8443/slack/oauth?code=abc.123&amp;state=U1.99.n.sig"
+        self.assertEqual(slackauth.from_pasted(f"<{url}>"), ("abc.123", "U1.99.n.sig"))
+        self.assertEqual(slackauth.from_pasted("hello"), ("", ""))
+
+    def test_search_needs_their_own_slack_and_uses_it(self):
+        from cos import slackauth, slackread, tokens
+        run = Run.create("claude", "x", str(self.dir), "full", source="slack", extra={"slack_user": AJAY, "slack_channel": "C1"})
+        h = self.handler()
+        h._slack_read(run.meta(), {"slack": "search", "query": "terms"})
+        self.assertIn("connect my slack", h.out[-1][1]["text"])
+        tokens.STORE.update(lambda d: d.setdefault(AJAY, {}).update({"_slack": "xoxp-ajay"}))
+        seen = []
+        with patch.object(slackread, "_api", side_effect=lambda m, token=None, **p: seen.append((m, token)) or
+                          {"ok": True, "messages": {"matches": []}}):
+            h._slack_read(run.meta(), {"slack": "search", "query": "terms"})
+        self.assertEqual(seen[0], ("search.messages", "xoxp-ajay"))
+
+    def test_hints_say_what_to_do(self):
+        import app
+        self.assertIn("connect my claude", app.setup_hint("Not logged in · Please run /login"))
+        self.assertIn("connect my github", app.setup_hint("fatal: could not read Username for 'https://github.com'"))
+        self.assertIsNone(app.setup_hint("All done, PR #12 is open."))
+
+    def test_the_nudge_comes_once_a_day(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock
+        client = AsyncMock()
+
+        async def go():
+            with patch.object(app, "login_states", AsyncMock(return_value={"claude": "lent", "gh": "none"})):
+                await app.nudge_setup(client, AJAY)
+                await app.nudge_setup(client, AJAY)
+        asyncio.run(go())
+        self.assertEqual(client.chat_postMessage.await_count, 1)
+        text = client.chat_postMessage.await_args.kwargs["text"]
+        self.assertIn("connect my github", text)
+        self.assertIn("connect my slack", text)
+
+    def test_home_tab_and_commands(self):
+        import commands
+        from cos import home_tab
+        self.assertIn("home_connect_slack", str(home_tab.view("Ajay", {}, None, None, [], [], slack=False)))
+        self.assertEqual(commands.parse("login slack").engine, "slack")
