@@ -1365,6 +1365,7 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
             if waiting.user == user and waiting.tool == tool:
                 waiting.stop()
                 LOGINS.pop(ts, None)
+                await _mark_replaced(client, user, ts)
         login = await asyncio.to_thread(logins.begin, user, account, tool)
         try:
             url, code = await asyncio.to_thread(login.link)
@@ -1746,6 +1747,18 @@ async def on_onboarding(ack, body, client) -> None:
     await onboarding_choice(client, user, channel, step, choice)
 
 
+async def _mark_replaced(client, user: str, ts: str) -> None:
+    """An older sign-in message: its link no longer works, so say so where the person sees it."""
+    dm = DM_CHANNELS.read().get(user)
+    if not dm:
+        return
+    try:
+        await client.chat_update(channel=dm, ts=ts, text=":no_entry_sign: This sign-in was replaced by a newer one. "
+                                                         "Use the link in the newest message.")
+    except Exception:  # noqa: BLE001 - only a courtesy
+        pass
+
+
 async def _expire_login(ts: str) -> None:
     await asyncio.sleep(logins.WAIT_SECONDS)
     login = LOGINS.pop(ts, None)
@@ -1769,6 +1782,8 @@ async def answer_login(client, channel: str, thread_ts: str, user: str, text: st
     if not login or login.user != user:
         return
     ok, why = await asyncio.to_thread(login.answer, text.strip().strip("`").strip())
+    if not ok:  # what the CLI said, never the code (it doesn't echo what it reads)
+        log.info("%s sign-in for %s: code refused; CLI said: %s", login.tool, user, logins._tail(login.output()))
     if ok:
         LOGINS.pop(thread_ts, None)
         LOGIN_STATE.pop(user, None)
@@ -2527,6 +2542,9 @@ async def main() -> None:
     held = asyncio.create_task(held_scheduler(app.client))  # noqa: F841
     personal = asyncio.create_task(personal_scheduler(app.client)) if accounts.enabled() else None  # noqa: F841
     outbox = asyncio.create_task(broker_outbox(app.client))  # noqa: F841
+    stale = await asyncio.to_thread(logins.stop_orphans)  # sign-ins a previous neo process lost track of
+    if stale:
+        log.info("stopped %d sign-in(s) left from before the restart", stale)
     chief_jobs = chief.start(app.client, NOTIFY_CHANNEL, NOTIFY_USER, DASHBOARD_URL)  # noqa: F841
     RESUMED.extend(await finish_adopted_slack_runs(app.client))  # hold the tasks so they are not collected
     await resume_live_runs(app.client)

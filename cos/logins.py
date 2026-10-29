@@ -21,6 +21,7 @@ import re
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from . import accounts
@@ -209,3 +210,45 @@ def signed_in(account: str, tool: str) -> Optional[bool]:
 def _tail(text: str) -> str:
     lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("neo-run:")]
     return " ".join(lines[-3:])[:300]
+
+
+def stop_orphans() -> int:
+    """Sign-ins a previous neo process started and lost track of (neo restarted while one waited): stop them,
+    so an old link's code can't be pasted into a new sign-in's thread. Each one's sudo (still ours by real
+    uid) gets the signal, which neo-run passes on, as Login.stop does."""
+    logins = {tuple(argv) for (_, action), argv in ARGV.items() if action == "login"}
+    stopped = 0
+    for pid in [p for p in os.listdir("/proc") if p.isdigit()] if os.path.isdir("/proc") else []:
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        words = tuple(os.path.basename(a.decode(errors="replace")) if i == 0 else a.decode(errors="replace")
+                      for i, a in enumerate(argv) if a)
+        if words not in logins:
+            continue
+        sudo = _sudo_above(int(pid))
+        if sudo:
+            try:
+                os.killpg(os.getpgid(sudo), 15)
+                stopped += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+    return stopped
+
+
+def _sudo_above(pid: int):
+    """The sudo neo started this process under (walking up its parents), if neo owns it."""
+    for _ in range(4):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            status = Path(f"/proc/{ppid}/status").read_text()
+            comm = Path(f"/proc/{ppid}/comm").read_text().strip()
+        except (OSError, ValueError, IndexError):
+            return None
+        real_uid = int(next(l.split()[1] for l in status.splitlines() if l.startswith("Uid:")))
+        if comm == "sudo" and real_uid == os.getuid():
+            return ppid
+        pid = ppid
+    return None
