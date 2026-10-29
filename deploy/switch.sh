@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Move the live neo between the Mac mini and spark, from the laptop (ssh hosts "mini" and "spark").
 #
-#   deploy/switch.sh to-spark   stop the mini's bot, copy its state to spark, start neo on spark
-#   deploy/switch.sh to-mini    stop neo on spark, copy what changed back, start the mini's bot again
-#   deploy/switch.sh status     which one is running
+#   deploy/switch.sh to-spark [--with-state]   stop the mini's bot, start neo on spark
+#   deploy/switch.sh to-mini  [--with-state]   stop neo on spark, start the mini's bot again
+#   deploy/switch.sh status                    which one is running
 #
-# Only one may run at a time: Slack splits events between every connected copy. State that moves:
-# neo's files in the checkout (watches, findings, loops, cards, Slack thread map, runs) and its memory
-# and people settings. Each side's .env stays its own. The mini's other launchd jobs are never touched.
+# Only one may run at a time: Slack splits events between every connected copy. Each side keeps its own
+# state unless --with-state copies it across: neo's files in the checkout (watches, findings, loops,
+# cards, Slack thread map, runs) and its memory and people settings. Each side's .env stays its own.
+# The mini's other launchd jobs are never touched.
 set -euo pipefail
 
 MINI=${NEO_MINI_HOST:-mini}
@@ -64,14 +65,19 @@ copy_spark_to_mini() {
   ssh "$SPARK" "sudo tar -C $SPARK_HOME/.neo -cf - memory people" | ssh "$MINI" "cd ~/.neo && tar -xf -"
 }
 
+WITH_STATE=0
+[ "${2:-}" = "--with-state" ] && WITH_STATE=1
+
 case "${1:-}" in
   to-spark)
     spark_running && { say "neo already runs on spark"; exit 0; }
-    wait_for_mini_runs
-    say "stopping the mini's bot"
-    ssh "$MINI" "launchctl bootout gui/\$(id -u)/$MINI_LABEL 2>/dev/null; launchctl disable gui/\$(id -u)/$MINI_LABEL"
-    mini_running && { echo "the mini's bot is still running; stopping here"; exit 1; }
-    copy_mini_to_spark
+    if mini_running; then
+      wait_for_mini_runs
+      say "stopping the mini's bot"
+      ssh "$MINI" "launchctl bootout gui/\$(id -u)/$MINI_LABEL 2>/dev/null; launchctl disable gui/\$(id -u)/$MINI_LABEL"
+      mini_running && { echo "the mini's bot is still running; stopping here"; exit 1; }
+    fi
+    [ "$WITH_STATE" = 1 ] && copy_mini_to_spark
     say "starting neo on spark"
     ssh "$SPARK" "sudo systemctl disable --now neo-web 2>/dev/null || true; cd /home && sudo bash -c 'cd $SPARK_DIR && deploy/install-linux.sh --start' 2>&1 | tail -6"
     spark_running && say "neo runs on spark" || { echo "neo didn't start on spark: run 'deploy/switch.sh to-mini'"; exit 1; }
@@ -81,7 +87,7 @@ case "${1:-}" in
       say "stopping neo on spark"
       ssh "$SPARK" "sudo systemctl disable --now neo"
     fi
-    copy_spark_to_mini
+    [ "$WITH_STATE" = 1 ] && copy_spark_to_mini
     say "starting the mini's bot"
     ssh "$MINI" "launchctl enable gui/\$(id -u)/$MINI_LABEL && launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/$MINI_LABEL.plist 2>/dev/null || launchctl kickstart -k gui/\$(id -u)/$MINI_LABEL"
     sleep 5
