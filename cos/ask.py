@@ -79,10 +79,11 @@ def system_prompt(snap: str) -> str:
 
 
 def current_snapshot() -> str:
+    """The owner's ask box: about the owner's own work (teammates' is on their own dashboards)."""
     from . import cards, loops
 
-    overview = fleet.overview()
+    overview = fleet.overview(None)
     for a in overview.get("agents", []):
         path = fleet._transcript_for(a["engine"], a.get("session_id"), a.get("cwd", "")) if a.get("engine") in ("claude", "codex") else None
         a["transcript"] = str(path) if path and Path(path).exists() else None
-    return snapshot(overview, loops.listing(), cards.STORE.read(), time.time())
+    return snapshot(overview, loops.listing(viewer=None), cards.STORE.read(), time.time())

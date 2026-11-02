@@ -364,8 +364,7 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
 
 def home(since: Optional[float] = None, viewer: Optional[str] = fleet.EVERYONE) -> dict:
     """since: the dashboard pins the start of a visit, so "moved" doesn't empty while you read it.
-    viewer: whose home this is (fleet.owns). Follow-ups and mentions are the owner's for now, so a
-    teammate's home has their own tasks only."""
+    viewer: whose home this is (fleet.owns). Mentions are the owner's for now."""
     from . import cards, loops, mentions
     from .people import is_owner
 
@@ -374,7 +373,7 @@ def home(since: Optional[float] = None, viewer: Optional[str] = fleet.EVERYONE) 
     owner = viewer == fleet.EVERYONE or is_owner(viewer)
     overview = fleet.overview(viewer)
     since = fleet.seen.get(seen_key(viewer)) if since is None else since
-    rows = loops.listing() if owner else []
+    rows = loops.listing(viewer=viewer)  # each person's follow-ups: their watches' findings (the owner's: also alerts, PRs)
     runs = fleet.mine(list_runs(500), viewer)
     return build(overview, rows, cards_for(viewer, overview), since=since, now=time.time(), seen=fleet.seen.get,
                  mentions=mentions.open_items() if owner else [],

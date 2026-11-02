@@ -40,11 +40,13 @@ def alert_loop(channel: str, ts: str, text: str, url: Optional[str]) -> None:
         log.exception("could not open a loop for alert %s", ts)
 
 
-def finding_loops(new: list[dict]) -> None:
+def finding_loops(new: list[dict], owner: Optional[str] = None) -> None:
+    """Serious findings are followed up until fixed in prod, for whoever's watch found them (owner: Slack id)."""
     try:
         for f in new:
             if f.get("severity") in ("high", "critical"):
-                loops.open_loop("finding", f"finding:{f['id']}", f.get("title") or "Finding", {"source": f.get("link") or ""})
+                loops.open_loop("finding", f"finding:{f['id']}", f.get("title") or "Finding", {"source": f.get("link") or ""},
+                                owner=owner)
     except Exception:  # noqa: BLE001 - never break the findings notification that called us
         log.exception("could not open loops for findings")
 

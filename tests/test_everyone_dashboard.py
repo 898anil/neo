@@ -120,8 +120,7 @@ class DashboardTest(Scoped):
     def test_the_owners_extras_stay_the_owners(self):
         for path in ("/api/memory", "/api/usage", "/api/work", "/api/sessions", "/api/agents/s/p"):
             self.assertEqual(self.get(path)[0], 403, path)
-        for path in ("/api/live", "/api/mentions/check", "/api/work/merge", "/api/memory/apply", "/api/loops/x/close",
-                     "/api/system-watches/x/run"):
+        for path in ("/api/live", "/api/mentions/check", "/api/work/merge", "/api/memory/apply", "/api/system-watches/x/run"):
             self.assertEqual(self.post(path)[0], 403, path)
 
     def test_their_stream_leaves_out_another_persons_words(self):
@@ -201,6 +200,24 @@ class ReviewFixesTest(Scoped):
         with patch.object(server.time, "sleep", side_effect=BrokenPipeError):
             h.do_GET()
         self.assertNotIn("raw cli", h.wfile.getvalue().decode())
+
+
+class FollowUpsTest(Scoped):
+    """Serious findings of a person's own watch are followed up on their own home."""
+
+    def test_each_person_sees_and_changes_only_their_follow_ups(self):
+        from cos import loops
+        import chief
+        chief.finding_loops([{"id": "f1", "severity": "high", "title": "Ajay's CI broke"}], owner=AJAY)
+        chief.finding_loops([{"id": "f2", "severity": "critical", "title": "Prod 500s"}])  # the owner's
+        self.assertEqual([l["title"] for l in loops.listing(viewer=AJAY)], ["Ajay's CI broke"])
+        self.assertEqual([l["title"] for l in loops.listing(viewer=None)], ["Prod 500s"])
+        self.assertEqual(len(loops.listing()), 2)  # the follow-up check still sees every loop
+        mine, owners = loops._id("finding:f1"), loops._id("finding:f2")
+        self.assertEqual(self.post(f"/api/loops/{owners}/close")[0], 404)
+        self.assertEqual(self.post(f"/api/loops/{mine}/mute")[0], 200)
+        self.assertEqual(loops.STORE.read()[mine]["status"], "muted")
+        self.assertNotIn("Prod 500s", json.dumps(self.get("/api/home")[1]))
 
 
 if __name__ == "__main__":

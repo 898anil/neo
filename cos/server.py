@@ -922,6 +922,11 @@ class Handler(BaseHTTPRequestHandler):
             if not found or watches.finding_owner(found) != user:
                 return self._error(HTTPStatus.NOT_FOUND, "no such finding")
             return self._json(watches.set_status(parts[2], "dismissed" if parts[3] == "dismiss" else "new"))
+        if len(parts) == 4 and parts[:2] == ["api", "loops"] and parts[3] in LOOP_ACTIONS:
+            loop = loops.STORE.read().get(parts[2])
+            if not loop or loop.get("owner") != user:
+                return self._error(HTTPStatus.NOT_FOUND, "no such follow-up")
+            return self._json(loops.set_status(parts[2], LOOP_ACTIONS[parts[3]]))
         if parts == ["api", "settings"]:
             engine = body.get("default_engine")
             if engine is not None:

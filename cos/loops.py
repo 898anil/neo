@@ -49,14 +49,18 @@ def _id(key: str) -> str:
 
 
 def open_loop(kind: str, key: str, title: str, links: dict, now: Optional[float] = None,
-              stage: str = "detected") -> dict:
-    """The loop for key, created if new (an existing loop is returned unchanged)."""
+              stage: str = "detected", owner: Optional[str] = None) -> dict:
+    """The loop for key, created if new (an existing loop is returned unchanged). owner: the Slack id of the
+    person it is followed up for (their watch's finding); None is the owner's (alerts, the owner's PRs)."""
+    from .people import is_owner
+
     now = time.time() if now is None else now
 
     def write(data: dict) -> dict:
         lid = _id(key)
         if lid not in data:
             data[lid] = {"id": lid, "kind": kind, "key": key, "title": " ".join(title.split())[:200], "stage": stage,
+                         **({"owner": owner} if owner and not is_owner(owner) else {}),
                          "status": "open", "regressed": False,
                          "links": {"prs": [u for u in links.get("prs", []) if _web(u)],
                                    **{k: (v if _web(v) else "") for k, v in links.items() if k != "prs"}}, "stage_at": now,
@@ -194,12 +198,17 @@ def set_status(loop_id: str, status: str) -> dict:
     return STORE.update(write)
 
 
-def listing(now: Optional[float] = None) -> list[dict]:
-    """Every loop except ones closed over a day ago, with `stalled` filled in, newest change first."""
+def listing(now: Optional[float] = None, viewer: Optional[str] = "*") -> list[dict]:
+    """Every loop except ones closed over a day ago, with `stalled` filled in, newest change first.
+    viewer: whose home (cos/fleet.owns); "*" is everyone's, as the follow-up check needs."""
+    from .fleet import owns
+
     now = time.time() if now is None else now
     rows = []
     for loop in STORE.read().values():
         if loop["status"] == "closed" and now - loop["updated_at"] > 86400:
+            continue
+        if not owns(viewer, loop.get("owner")):
             continue
         rows.append({**loop, "stalled": stalled(loop, now)})
     return sorted(rows, key=lambda l: -l["updated_at"])

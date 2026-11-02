@@ -1992,8 +1992,7 @@ def watch_checked(client, loop):
     """Post what a watch found: new problems (not low severity), or that a scheduled check broke."""
     def notify(watch: dict, meta: dict, new: list[dict]) -> None:
         personal = bool(watch.get("owner")) and not people.is_owner(watch["owner"])  # someone's own watch: their DM
-        if not personal:
-            chief.finding_loops(new)
+        chief.finding_loops(new, owner=watch["owner"] if personal else None)  # followed up on their own home
         where = watch["owner"] if personal else (NOTIFY_CHANNEL or NOTIFY_USER)
         if not where:
             return
