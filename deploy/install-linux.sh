@@ -63,6 +63,9 @@ env_set_default NEO_DASHBOARD_PORT "$PORT"
 # The dashboard's password: other ways in (Tailscale login, neo's own uid) are checked too, but a token must exist.
 env_set_default COS_TOKEN "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 HTTPS_PORT="$(env_get NEO_TAILSCALE_HTTPS_PORT)"; HTTPS_PORT="${HTTPS_PORT:-8443}"
+# NEO_TAILSCALE_FUNNEL=1: publish it on the internet with Funnel (people sign in from Slack), not only the
+# tailnet. A plain `serve` on the same port would switch an existing Funnel off on every install.
+SERVE=serve; [ "$(env_get NEO_TAILSCALE_FUNNEL)" = "1" ] && SERVE=funnel
 if [ "$(env_get NEO_TAILSCALE_SERVE)" = "0" ]; then
   echo "  NEO_TAILSCALE_SERVE=0: dashboard on $(env_get NEO_DASHBOARD_URL) (host/token from .env)"
 elif command -v tailscale >/dev/null; then
@@ -75,15 +78,15 @@ user = (d.get("User") or {}).get(str(me.get("UserID")), {})
 print(me["DNSName"].rstrip("."), user.get("LoginName", "-"))' 2>/dev/null || true) || true
   if [ -z "${DNS:-}" ]; then
     echo "  Tailscale is not logged in or not responding; dashboard stays on http://127.0.0.1:$PORT"
-  elif timeout 12 tailscale serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$PORT" >/dev/null; then
+  elif timeout 12 tailscale "$SERVE" --bg --https="$HTTPS_PORT" "http://127.0.0.1:$PORT" >/dev/null; then
     # Listen on 127.0.0.1 behind serve; drop a tailnet address copied from another machine.
     env_unset NEO_DASHBOARD_HOST
     case "$(env_get NEO_DASHBOARD_URL)" in "https://$DNS:$HTTPS_PORT") ;; *) env_unset NEO_DASHBOARD_URL ;; esac
     env_set_default NEO_DASHBOARD_URL "https://$DNS:$HTTPS_PORT"
     [ "$LOGIN" != "-" ] && env_set_default COS_TAILSCALE_USERS "$LOGIN"
-    echo "  https://$DNS:$HTTPS_PORT  (Tailscale logins allowed: $(env_get COS_TAILSCALE_USERS); COS_TOKEN still works)"
+    echo "  https://$DNS:$HTTPS_PORT  ($SERVE; Tailscale logins allowed: $(env_get COS_TAILSCALE_USERS); COS_TOKEN still works)"
   else
-    echo "  tailscale serve failed; dashboard stays on http://127.0.0.1:$PORT"
+    echo "  tailscale $SERVE failed; dashboard stays on http://127.0.0.1:$PORT"
   fi
 else
   echo "  tailscale not found: dashboard stays on http://127.0.0.1:$PORT"
