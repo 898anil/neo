@@ -35,6 +35,9 @@ class OwnsTest(unittest.TestCase):
 class Scoped(Base):
     def setUp(self):
         super().setUp()
+        # Never a real command in someone's account: on spark, sudo works and neo-ajay is a real person's account.
+        self.no_sudo = patch("cos.logins.start", side_effect=AssertionError("tests must not run commands in real accounts"))
+        self.no_sudo.start()
         self.agents = patch("cos.fleet.agents", return_value=[{"session": "s", "pane_id": "p", "status": "idle", "asks": []}])
         self.agents.start()
         self.mine = Run.create("claude", "fix the login test", str(self.dir), "full", source="slack", extra={"slack_user": AJAY})
@@ -42,6 +45,7 @@ class Scoped(Base):
         self.owners = Run.create("claude", "owner things", str(self.dir), "full", source="slack", extra={"slack_user": OWNER})
 
     def tearDown(self):
+        self.no_sudo.stop()
         self.agents.stop()
         super().tearDown()
 
@@ -331,8 +335,10 @@ class MentionsTest(Scoped):
             self.m.store("../../etc")
 
     def test_their_check_runs_as_them_or_not_at_all(self):
-        self.assertIsNone(self.m.start("dashboard", who=AJAY))  # no account login checked yet: not ready
-        self.assertEqual(self.post("/api/mentions/check")[0], 409)
+        with patch.object(self.m, "ready", return_value=None), patch.object(self.m.threading, "Thread") as thread:
+            self.assertIsNone(self.m.start("dashboard", who=AJAY))  # their own Claude + Slack connector isn't there yet
+            self.assertEqual(self.post("/api/mentions/check")[0], 409)
+        thread.assert_not_called()
         with patch.object(self.m, "ready", return_value="neo-ajay"), patch.object(self.m.threading, "Thread"):
             meta = self.m.start("schedule", who=AJAY)
         self.assertEqual((meta["account"], meta["slack_user"], meta["lend"], meta["kind"]), ("neo-ajay", AJAY, False, "mentions"))
@@ -346,6 +352,7 @@ class MentionsTest(Scoped):
 
     def test_ready_needs_their_own_claude_and_slack_connector(self):
         from cos import logins
+        self.m._ready.clear()
         with patch.object(logins, "signed_in", return_value=True), patch.object(logins, "connector_status", return_value="missing"):
             self.assertIsNone(self.m.ready(AJAY))
         self.m._ready.clear()
