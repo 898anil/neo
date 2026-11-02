@@ -72,14 +72,16 @@ def due(payload: dict, now: float, base_url: Optional[str] = None, local_hour: O
     return [o for o in out if o["ledger"] not in sent]
 
 
-def nudge(payload: dict, now: float, local_hour: int, base_url: Optional[str] = None) -> Optional[dict]:
+def nudge(payload: dict, now: float, local_hour: int, base_url: Optional[str] = None, who: str = "") -> Optional[dict]:
     """One message listing card decisions waiting over NUDGE_AFTER_HOURS that were not in an earlier
     nudge, oldest first, each with neo's recommendation. None when there is nothing new or it is
-    too soon or night. Send it, then mark_sent([it])."""
+    too soon or night. Send it, then mark_sent([it]). who: whose home this is (a Slack id; "" for the
+    owner), so each person's nudge keeps its own pace."""
     if not NUDGE_HOURS[0] <= local_hour < NUDGE_HOURS[1]:
         return None
     sent = STORE.read()
-    if now - sent.get("nudge|last", 0) < NUDGE_EVERY_HOURS * 3600:
+    last = f"nudge|last|{who}" if who else "nudge|last"
+    if now - sent.get(last, 0) < NUDGE_EVERY_HOURS * 3600:
         return None
     fresh = lambda d: (d.get("age", 0) >= NUDGE_AFTER_HOURS * 3600  # noqa: E731
                        and f"nudge|{d['key']}|{int(d.get('at') or 0)}" not in sent)
@@ -108,7 +110,7 @@ def nudge(payload: dict, now: float, local_hour: int, base_url: Optional[str] = 
                          f"(idle {int(u['age'] // 3600)}h): {u.get('line', '')[:200]}")
         if len(stopped) > NUDGE_ROWS:
             lines.append(f"• +{len(stopped) - NUDGE_ROWS} more on the dashboard")
-    ledger = ["nudge|last"] + [f"nudge|{d['key']}|{int(d.get('at') or 0)}" for d in rows + stopped]
+    ledger = [last] + [f"nudge|{d['key']}|{int(d.get('at') or 0)}" for d in rows + stopped]
     return {"ledger": ledger, "reason": "nudge", "text": "\n".join(lines)}
 
 

@@ -102,6 +102,13 @@ class NudgeTest(unittest.TestCase):
         self.urgent.mark_sent([n], NOW)
         self.assertIsNone(self.urgent.nudge(p, NOW + 4 * 3600, 15))  # same items: not again
 
+    def test_each_persons_nudge_keeps_its_own_pace(self):
+        p = payload(decide=[self.card_ask("run:a", 5)])
+        self.urgent.mark_sent([self.urgent.nudge(p, NOW, 11)], NOW)  # the owner's
+        ajay = self.urgent.nudge(payload(decide=[self.card_ask("run:b", 5)]), NOW, 11, who="UAJAY01")
+        self.assertIsNotNone(ajay)  # the owner's nudge a minute ago doesn't hold back Ajay's
+        self.assertIn("nudge|last|UAJAY01", ajay["ledger"])
+
     def test_no_nudge_at_night_or_too_soon(self):
         p = payload(decide=[self.card_ask("run:a", 5)])
         self.assertIsNone(self.urgent.nudge(p, NOW, 23))

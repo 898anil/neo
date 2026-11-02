@@ -120,36 +120,56 @@ async def mention_scheduler() -> None:
         await asyncio.sleep(60)
 
 
-async def urgent_scheduler(client, where: str, mention: str, base_url: Optional[str]) -> None:
+def recipients(where: Optional[str], mention: str) -> list[tuple[Optional[str], str, str]]:
+    """Who gets urgent pings and nudges, each about their own home: (viewer, channel, mention). The owner
+    in their channel (or DM); every other person with a neo in their own DM, as if they had their own."""
+    from cos import accounts, people
+
+    out = [(None, where, mention)] if where else []
+    if accounts.enabled():
+        for user in sorted(accounts.everyone()):
+            if not people.is_owner(user) and people.role(user) != "blocked":
+                out.append((user, user, ""))
+    return out
+
+
+async def urgent_pass(client, viewer: Optional[str], where: str, mention: str, base_url: Optional[str],
+                      catch_up: bool) -> None:
+    """One person's urgent items and nudge, from their own home (cos/home.py, viewer)."""
+    payload = await asyncio.to_thread(home.home, None, viewer)
+    items = urgent.due(payload, time.time(), base_url)
+    if catch_up and len(items) > 1:
+        # One message for everything that piled up, not a burst of pings.
+        text = "\n\n".join(item["text"] for item in items[:20])
+        more = f"\n\n…and {len(items) - 20} more on the dashboard" if len(items) > 20 else ""
+        await client.chat_postMessage(channel=where, text=f"{mention}*While notifications were paused*\n{text}{more}"[:3800],
+                                      unfurl_links=False)
+        urgent.mark_sent(items)
+        items = []
+    for item in items:
+        await client.chat_postMessage(channel=where, text=f"{mention}{item['text']}", unfurl_links=False)
+        urgent.mark_sent([item])
+        log.info("urgent ping sent to %s: %s", viewer or "owner", item["ledger"])
+    nudge = urgent.nudge(payload, time.time(), datetime.now().hour, base_url, who=viewer or "")
+    if nudge:
+        await client.chat_postMessage(channel=where, text=f"{mention}{nudge['text']}", unfurl_links=False)
+        urgent.mark_sent([nudge])
+        log.info("decision nudge sent to %s: %d items", viewer or "owner", len(nudge["ledger"]) - 1)
+
+
+async def urgent_scheduler(client, where: Optional[str], mention: str, base_url: Optional[str]) -> None:
     was_paused = False
     while True:
-        try:
-            if pause.is_paused():
-                was_paused = True
-                await asyncio.sleep(URGENT_EVERY_SECONDS)
-                continue  # nothing marked sent, so what is still urgent goes out after the pause
-            payload = await asyncio.to_thread(home.home)
-            items = urgent.due(payload, time.time(), base_url)
-            if was_paused and len(items) > 1:
-                # One message for everything that piled up, not a burst of pings.
-                text = "\n\n".join(item["text"] for item in items[:20])
-                more = f"\n\n…and {len(items) - 20} more on the dashboard" if len(items) > 20 else ""
-                await client.chat_postMessage(channel=where, text=f"{mention}*While notifications were paused*\n{text}{more}"[:3800],
-                                              unfurl_links=False)
-                urgent.mark_sent(items)
-                items = []
-            was_paused = False
-            for item in items:
-                await client.chat_postMessage(channel=where, text=f"{mention}{item['text']}", unfurl_links=False)
-                urgent.mark_sent([item])
-                log.info("urgent ping sent: %s", item["ledger"])
-            nudge = urgent.nudge(payload, time.time(), datetime.now().hour, base_url)
-            if nudge:
-                await client.chat_postMessage(channel=where, text=f"{mention}{nudge['text']}", unfurl_links=False)
-                urgent.mark_sent([nudge])
-                log.info("decision nudge sent: %d items", len(nudge["ledger"]) - 1)
-        except Exception:  # noqa: BLE001
-            log.exception("urgent pass failed")
+        if pause.is_paused():
+            was_paused = True
+            await asyncio.sleep(URGENT_EVERY_SECONDS)
+            continue  # nothing marked sent, so what is still urgent goes out after the pause
+        for viewer, to, at in recipients(where, mention):
+            try:
+                await urgent_pass(client, viewer, to, at, base_url, catch_up=was_paused)
+            except Exception:  # noqa: BLE001 - one person's failure must not stop everyone else's pings
+                log.exception("urgent pass failed for %s", viewer or "owner")
+        was_paused = False
         await asyncio.sleep(URGENT_EVERY_SECONDS)
 
 
@@ -160,7 +180,8 @@ async def digest_scheduler(client, where: str, mention: str, base_url: Optional[
         try:
             now = datetime.now()
             if digest_due(now, DIGEST_AT, STATE.read().get("digest_day")) and not pause.is_paused():
-                payload = await asyncio.to_thread(home.home, digest_since(now))
+                # the owner's own day; everyone else gets their personal digest by DM (app.py personal_digest)
+                payload = await asyncio.to_thread(home.home, digest_since(now), None)
                 text = urgent.digest_text(payload, base_url)
                 link = f"\n<{base_url}|Open the dashboard>" if base_url else ""
                 await client.chat_postMessage(channel=where, text=f"{mention}*Evening digest*\n{text}{link}", unfurl_links=False)
@@ -174,10 +195,10 @@ def start(client, notify_channel: Optional[str], notify_user: Optional[str], bas
     tasks = [asyncio.create_task(card_scheduler()), asyncio.create_task(loop_scheduler()),
              asyncio.create_task(mention_scheduler())]
     where = notify_channel or notify_user
+    mention = f"<@{notify_user}> " if notify_channel and notify_user else ""
+    tasks.append(asyncio.create_task(urgent_scheduler(client, where, mention, base_url)))  # everyone's, see recipients()
     if where:
-        mention = f"<@{notify_user}> " if notify_channel and notify_user else ""
-        tasks += [asyncio.create_task(urgent_scheduler(client, where, mention, base_url)),
-                  asyncio.create_task(digest_scheduler(client, where, mention, base_url))]
+        tasks.append(asyncio.create_task(digest_scheduler(client, where, mention, base_url)))
     log.info("chief of staff on (cards, loop follow-up every %d min, pings to %s, digest at %s)",
              LOOP_CHECK_MINUTES, where or "nobody", DIGEST_AT)
     return tasks

@@ -48,3 +48,45 @@ class ChiefTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryonesPingsTest(unittest.TestCase):
+    """Urgent pings and nudges reach each person about their own home, as if each had their own neo."""
+
+    def setUp(self):
+        home = tempfile.mkdtemp()
+        self.env = patch.dict(os.environ, {"COS_HOME": home, "NEO_OWNER_USER": "UOWNER1", "NEO_ACCOUNTS": "1",
+                                           "NEO_PEOPLE_DIR": home + "/people", "NEO_ACCOUNTS_FILE": home + "/accounts.json"})
+        self.env.start()
+        from cos import accounts, people
+        accounts._save_registry({"UOWNER1": "neo-anil", "UAJAY01": "neo-ajay", "UYOSH01": "neo-yosh"})
+        people.save("UYOSH01", "UOWNER1", role="blocked")
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_the_owner_in_their_channel_and_everyone_else_in_their_dm(self):
+        import chief
+        self.assertEqual(chief.recipients("C1", "<@UOWNER1> "), [(None, "C1", "<@UOWNER1> "), ("UAJAY01", "UAJAY01", "")])
+        self.assertEqual(chief.recipients(None, ""), [("UAJAY01", "UAJAY01", "")])  # no owner channel: people still hear
+
+    def test_each_pass_reads_that_persons_own_home(self):
+        import asyncio
+        import chief
+
+        asked, posted = [], []
+
+        class Client:
+            async def chat_postMessage(self, **kw):
+                posted.append(kw)
+
+        def home(since, viewer):
+            asked.append(viewer)
+            return {"regressed": [{"key": "run:x", "title": "Login fix", "at": 1, "regressed_at": 5, "line": "broke again"}],
+                    "decide": [], "unfinished": []}
+
+        with patch.object(chief.home, "home", side_effect=home):
+            asyncio.run(chief.urgent_pass(Client(), "UAJAY01", "UAJAY01", "", None, catch_up=False))
+        self.assertEqual(asked, ["UAJAY01"])
+        self.assertEqual([p["channel"] for p in posted], ["UAJAY01"])
+        self.assertIn("Login fix", posted[0]["text"])
