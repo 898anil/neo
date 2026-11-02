@@ -362,15 +362,18 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
     }
 
 
-def home(since: Optional[float] = None) -> dict:
-    """since: the dashboard pins the start of a visit, so "moved" doesn't empty while you read it."""
+def home(since: Optional[float] = None, owner_only: bool = False) -> dict:
+    """since: the dashboard pins the start of a visit, so "moved" doesn't empty while you read it.
+    owner_only: the owner's web dashboard, without teammates' runs (fleet.owners)."""
     from . import cards, loops, mentions
 
     from .runner import list_runs
 
-    overview = fleet.overview()
+    overview = fleet.overview(owner_only=owner_only)
     since = fleet.seen.get("home") if since is None else since
     rows, runs = loops.listing(), list_runs(500)
+    if owner_only:
+        runs = fleet.owners(runs)
     return build(overview, rows, cards.STORE.read(), since=since, now=time.time(), seen=fleet.seen.get,
                  mentions=mentions.open_items(), traces={**thread_runs(runs=runs), **loop_traces(rows, overview, runs)})
 

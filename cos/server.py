@@ -541,7 +541,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html", "text/html; charset=utf-8")
         if parts == ["api", "overview"]:
             # Each agent and task carries needs / result (home.annotate), so its row can say Idle, Partly done, Needs you.
-            data = home.annotate(fleet.overview(), cards.STORE.read(), fleet.seen.get)
+            # The owner's own runs only: teammates' are on their own pages (/api/me).
+            data = home.annotate(fleet.overview(owner_only=True), cards.STORE.read(), fleet.seen.get)
             return self._json({**board_overview(data), "default_engine": default_engine(), "notifications": pause.state(),
                                "findings": [board_finding(f) for f in watches.open_findings()]})
         if parts == ["api", "home"]:
@@ -550,7 +551,7 @@ class Handler(BaseHTTPRequestHandler):
                 since = float(raw) if raw else None
             except ValueError:
                 return self._error(HTTPStatus.BAD_REQUEST, "since must be a number")
-            return self._json(board_home(home.home(since)))
+            return self._json(board_home(home.home(since, owner_only=True)))
         if parts == ["api", "watches"]:
             return self._json(watches.listing())
         if parts == ["api", "settings"]:
@@ -606,7 +607,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.BAD_REQUEST, "bad key")
             return self._json(digest.status(key, fleet.overview()))
         if parts == ["api", "runs"]:
-            runs = [fresh_meta(Run(m["id"])) for m in list_runs()]
+            runs = [fresh_meta(Run(m["id"])) for m in fleet.owners(list_runs())]
             return self._json({"runs": runs})
         if len(parts) >= 3 and parts[:2] == ["api", "runs"]:
             run = self._run_or_404(parts[2])

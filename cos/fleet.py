@@ -352,9 +352,19 @@ def agents() -> list[dict]:
     return agents_checked()[0]
 
 
-def overview() -> dict:
+def owners(runs: list[dict]) -> list[dict]:
+    """The owner's runs only: their Slack and dashboard runs, and the ones nobody started (scheduled jobs,
+    watches, the owner's neo answering others). Teammates see theirs on their own page."""
+    from .people import is_owner
+
+    return [m for m in runs if is_owner(m.get("slack_user"))]
+
+
+def overview(owner_only: bool = False) -> dict:
+    """owner_only: the owner's web dashboard, which leaves out teammates' runs."""
     rows = agents()
-    runs = [{**m, "title": run_title(m)} for m in list_runs(60, include_running=True)
+    listed = list_runs(60, include_running=True)
+    runs = [{**m, "title": run_title(m)} for m in (owners(listed) if owner_only else listed)
             if m.get("runtime", "headless") == "headless" or m.get("status") != "closed"]
     counts = {}
     for row in rows:
