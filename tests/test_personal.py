@@ -34,6 +34,12 @@ if argv[:3] == ['claude', 'auth', 'login']:
 elif argv == ['codex', 'login', '--device-auth']:
     print('1. Open this link\n   https://auth.openai.com/codex/device\n2. Enter this one-time code\n   MKSA-RJI4C', flush=True)
     sys.exit(0)
+elif argv == ['claude', 'mcp', 'login', 'plugin:slack:slack', '--no-browser']:
+    if not sys.stdin.isatty(): sys.exit(2)
+    print('Visit: https://slack.com/oauth/v2_user/authorize?state=test', flush=True)
+    line = sys.stdin.readline()
+    if 'code=secret123' in line: print('Connected.', flush=True); sys.exit(0)
+    sys.exit(1)
 elif argv == ['claude', 'auth', 'status']:
     print('{"loggedIn": %s, "authMethod": "claude.ai"}' % sys.argv[2])
 elif argv == ['codex', 'login', 'status']:
@@ -100,6 +106,15 @@ class OwnerAccountTest(Base):
 
 
 class LoginTest(Base):
+    def test_slack_oauth_uses_a_terminal_without_echoing_the_redirect(self):
+        with self.fake():
+            login = logins.begin_slack_mcp(AJAY, 'neo-ajay')
+            url, _ = login.link(timeout=10)
+            self.assertTrue(url.startswith('https://slack.com/'))
+            redirect = 'http://localhost:3118/callback?code=secret123&state=test'
+            ok, _ = login.answer(redirect, timeout=10)
+            self.assertTrue(ok)
+            self.assertNotIn('secret123', login.output())
     def test_claude_sign_in_takes_the_code_from_slack(self):
         with self.fake(), patch.dict(os.environ, {"NEO_SHARED_CLAUDE_TOKEN": "sk-owner"}):
             login = logins.begin(AJAY, "neo-ajay", "claude")
@@ -471,3 +486,23 @@ class SignInCodeTest(unittest.TestCase):
             self.assertEqual(logins.code_from(reply), code, reply)
         self.assertEqual(logins.code_from("4/0AfJohXk_long-google_code"), "4/0AfJohXk_long-google_code")
         self.assertEqual(logins.code_from("<@U0C0W6X3ZNV> hi"), "")
+
+class SlackMCPStatusTest(unittest.TestCase):
+    def test_plugin_connection_is_recognized_without_claude_ai_connector(self):
+        from cos import logins
+        def status(account, tool, action, timeout=60):
+            if action == 'mcp_slack': return 1, 'No MCP server named "claude.ai Slack"'
+            if action == 'mcp_plugin_slack': return 0, 'plugin:slack:slack:\n  Status: ✔ Connected\n'
+            raise AssertionError(action)
+        with patch.object(logins, 'run', side_effect=status):
+            self.assertEqual(logins.slack_mcp_status('neo-ajay'), 'connected')
+
+    def test_restricted_roles_deny_slack_plugin_while_others_neo_is_answering(self):
+        from cos import broker, people
+        self.assertIn('mcp__plugin_slack_slack', people.PRS_ONLY_DENIED)
+        self.assertIn('mcp__plugin_slack_slack', broker.ANSWER_DENIED)
+
+    def test_slack_login_command_is_in_orphan_cleanup_allowlist(self):
+        from cos import logins
+        self.assertEqual(logins.SLACK_MCP_LOGIN,
+                         ['claude', 'mcp', 'login', 'plugin:slack:slack', '--no-browser'])

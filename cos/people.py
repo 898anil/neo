@@ -59,7 +59,7 @@ PRS_ONLY_DENIED = (
     "Bash(helm:*)", "Bash(terraform apply:*)", "Bash(terraform destroy:*)",
     "Bash(gcloud deploy:*)", "Bash(gcloud run deploy:*)", "Bash(gcloud sql:*)", "Bash(doppler secrets set:*)",
     # The owner's mail, calendar, Drive and Slack, and tools that change databases or GitHub directly.
-    "mcp__claude_ai_Gmail", "mcp__claude_ai_Google_Calendar", "mcp__claude_ai_Google_Drive", "mcp__claude_ai_Slack",
+    "mcp__claude_ai_Gmail", "mcp__claude_ai_Google_Calendar", "mcp__claude_ai_Google_Drive", "mcp__claude_ai_Slack", "mcp__plugin_slack_slack",
     "mcp__claude_ai_Sentry__update_issue", "mcp__Neon", "mcp__plugin_github_github",
 )
 

@@ -619,7 +619,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({**info, "events": events})
         if parts == ["api", "memory"]:
             from . import autonomy, learn
-            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files(), "review": autonomy.view()})
+            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files(everyone=False), "review": autonomy.view()})
         if parts == ["api", "usage"]:
             from .runner import usage_summary
 
@@ -769,6 +769,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.FORBIDDEN, "not from that run's account")
         if body.get("slack"):
             return self._slack_read(meta, body)
+        if "shared_drive" in body:
+            from . import shared_drive
+            return self._json(shared_drive.request(meta, body.get("shared_drive")))
         if body.get("status"):
             return self._json(broker.status(run_id, str(body.get("task") or "") or None))
         if body.get("work"):
@@ -829,6 +832,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if self._scoped_get(user, parts):
             return
+        if parts == ["api", "memory"]:
+            from . import learn
+
+            files = learn.all_files(user=user, everyone=False)
+            return self._json({"files": [
+                {"name": "personal" if f["name"].startswith("people/") else f["name"],
+                 "scope": "personal" if f["name"].startswith("people/") else "shared",
+                 "entries": [{"text": entry["text"]} for entry in f["entries"]]}
+                for f in files
+            ]})
         if parts == ["api", "work"]:
             return self._json(work.prs(who=user))  # their own pull requests, with their own GitHub login
         if parts == ["api", "me"]:

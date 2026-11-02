@@ -21,6 +21,10 @@ import re
 import subprocess
 import threading
 import time
+import pty
+import termios
+import html
+from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +38,7 @@ ARGV = {
     ("claude", "logout"): ["claude", "auth", "logout"],
     ("claude", "status"): ["claude", "auth", "status"],
     ("claude", "mcp_slack"): ["claude", "mcp", "get", "claude.ai Slack"],
+    ("claude", "mcp_plugin_slack"): ["claude", "mcp", "get", "plugin:slack:slack"],
     ("claude", "mcp_sentry"): ["claude", "mcp", "get", "claude.ai Sentry"],
     ("codex", "login"): ["codex", "login", "--device-auth"],
     ("codex", "logout"): ["codex", "logout"],
@@ -49,6 +54,7 @@ ARGV = {
     ("doppler", "status"): ["doppler", "me", "--no-check-version"],
     ("doppler", "token"): ["doppler", "configure", "get", "token", "--plain", "--no-check-version"],
 }
+SLACK_MCP_LOGIN = ["claude", "mcp", "login", "plugin:slack:slack", "--no-browser"]
 DEVICE_CODE = {  # the one-time code a device sign-in shows, per tool
     "codex": re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b"),
     "gh": re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b"),
@@ -56,23 +62,37 @@ DEVICE_CODE = {  # the one-time code a device sign-in shows, per tool
 }
 _URL = re.compile(r"https://[^\s<>\"']+")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
-def start(account: str, argv: list[str], stdin=subprocess.PIPE) -> subprocess.Popen:
+def start(account: str, argv: list[str], stdin=subprocess.PIPE, terminal: bool = False) -> subprocess.Popen:
     """The CLI in this account, nothing lent, stdout piped (stderr joins it); stdin piped unless given."""
     # whose account it is decides whose tokens it gets: a person's own, never the owner's (accounts.user_of)
     meta = {"cwd": accounts.cwd_for(account, None), "lend": False, "slack_user": accounts.user_of(account)}
     spec = json.dumps(accounts.spec(meta, argv, {}, {})).encode()
     read_fd, write_fd = os.pipe()
+    master = slave = None
+    if terminal:
+        master, slave = pty.openpty()
+        attrs = termios.tcgetattr(slave)
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
     try:
-        proc = subprocess.Popen(accounts.command(account, read_fd), cwd="/", stdin=stdin,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+        proc = subprocess.Popen(accounts.command(account, read_fd), cwd="/", stdin=slave if terminal else stdin,
+                                stdout=slave if terminal else subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
                                 pass_fds=(read_fd,), env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"})
     except BaseException:
         os.close(write_fd)
+        if master is not None:
+            os.close(master)
         raise
     finally:
         os.close(read_fd)
+        if slave is not None:
+            os.close(slave)
+    if terminal:
+        proc.stdout = os.fdopen(os.dup(master), "rb", buffering=0)
+        proc.stdin = os.fdopen(master, "wb", buffering=0)
     with os.fdopen(write_fd, "wb") as fh:  # small: fits the pipe's buffer
         fh.write(spec)
     return proc
@@ -89,10 +109,13 @@ class Login:
         threading.Thread(target=self._read, daemon=True, name=f"login-{tool}").start()
 
     def _read(self) -> None:
-        for line in iter(self.proc.stdout.readline, b""):
-            with self._changed:
-                self._out.append(_ANSI.sub("", line.decode(errors="replace")))
-                self._changed.notify_all()
+        try:
+            for line in iter(self.proc.stdout.readline, b""):
+                with self._changed:
+                    self._out.append(_ANSI.sub("", _OSC.sub("", line.decode(errors="replace"))))
+                    self._changed.notify_all()
+        except OSError:  # a PTY closes with EIO when its last slave exits
+            pass
         self.proc.wait()
         for pipe in (self.proc.stdout, self.proc.stdin):
             try:
@@ -187,6 +210,53 @@ def begin(user: str, account: str, tool: str) -> Login:
     return Login(user, tool, start(account, ARGV[(tool, "login")]))
 
 
+def install_slack_plugin(account: str) -> None:
+    code, _ = run_argv(account, ["claude", "plugin", "install", "slack", "--scope", "user", "--json"], timeout=120)
+    if code:
+        raise RuntimeError("Could not install the Slack MCP plugin in your workspace")
+
+
+def begin_slack_mcp(user: str, account: str) -> Login:
+    return Login(user, "slack-mcp", start(account, SLACK_MCP_LOGIN, terminal=True))
+
+
+def logout_slack_mcp(account: str) -> None:
+    code, output = run_argv(account, ["claude", "mcp", "logout", "plugin:slack:slack"], timeout=30)
+    if code and "No MCP server named" not in output and "not found" not in output.lower():
+        raise RuntimeError("Could not disconnect Slack MCP")
+
+
+def slack_redirect_from(text: str) -> str:
+    match = re.search(r"https?://[^\s<>|]+", html.unescape(text or ""))
+    if not match:
+        return ""
+    candidate = match.group(0).rstrip('`.,')
+    try:
+        url = urlparse(candidate)
+        query = parse_qs(url.query)
+        if url.scheme != "http" or url.hostname not in ("localhost", "127.0.0.1") or url.port != 3118:
+            return ""
+        if url.username or url.password or url.fragment or not query.get("code") or not query.get("state"):
+            return ""
+    except ValueError:
+        return ""
+    return candidate
+
+
+def slack_mcp_status(account: str) -> str:
+    try:
+        code, output = run(account, "claude", "mcp_plugin_slack", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if re.search(r"Status:.*\bConnected\b", output, re.I):
+        return "connected"
+    if re.search(r"No MCP server named|not found", output, re.I):
+        return "missing"
+    if re.search(r"needs authentication|failed to connect|disconnected", output, re.I):
+        return "unavailable"
+    return "unknown"
+
+
 def run(account: str, tool: str, action: str, timeout: float = 60) -> tuple[int, str]:
     """A quick logout/status command in the account: (exit code, output)."""
     return run_argv(account, ARGV[(tool, action)], timeout)
@@ -215,13 +285,12 @@ def connector_status(account: str, connector: str) -> str:
         code, output = run(account, "claude", "mcp_" + connector, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return "unknown"
-    if "No MCP server named" in output:
-        return "missing"
     if re.search(r"Status:.*\bConnected\b", output, re.I):
         return "connected"
-    if re.search(r"Status:.*(?:Needs authentication|Failed to connect|Disconnected)", output, re.I):
-        return "unavailable"
-    return "unknown"
+    current = ("missing" if "No MCP server named" in output else
+               "unavailable" if re.search(r"Status:.*(?:Needs authentication|Failed to connect|Disconnected)", output, re.I)
+               else "unknown")
+    return current
 
 
 def doppler_token(account: str) -> str:
@@ -264,7 +333,7 @@ def stop_orphans() -> int:
     """Sign-ins a previous neo process started and lost track of (neo restarted while one waited): stop them,
     so an old link's code can't be pasted into a new sign-in's thread. Each one's sudo (still ours by real
     uid) gets the signal, which neo-run passes on, as Login.stop does."""
-    logins = {tuple(argv) for (_, action), argv in ARGV.items() if action == "login"}
+    logins = {tuple(argv) for (_, action), argv in ARGV.items() if action == "login"} | {tuple(SLACK_MCP_LOGIN)}
     stopped = 0
     for pid in [p for p in os.listdir("/proc") if p.isdigit()] if os.path.isdir("/proc") else []:
         try:

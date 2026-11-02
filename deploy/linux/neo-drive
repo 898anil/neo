@@ -1,0 +1,22 @@
+#!/usr/bin/python3 -I
+"""Use neo's shared Google Drive connector: pass the request on stdin."""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+url, token, run_id = (os.environ.get(k, '') for k in ('NEO_A2A_URL', 'NEO_A2A_TOKEN', 'NEO_RUN_ID'))
+if not (url and token and run_id):
+    sys.exit('neo-drive only works inside a run started by neo.')
+question = sys.stdin.read(30001)
+req = urllib.request.Request(url + '/api/a2a/ask', method='POST',
+    data=json.dumps({'run_id': run_id, 'shared_drive': question}).encode(),
+    headers={'Content-Type': 'application/json', 'X-Neo-Token': token})
+try:
+    with urllib.request.urlopen(req, timeout=210) as response:
+        result = json.load(response)
+except (urllib.error.URLError, OSError, ValueError) as exc:
+    sys.exit('Could not reach shared Google Drive: ' + str(exc))
+print(result.get('text', 'No result'))
+sys.exit(0 if result.get('status') == 'ok' else 1)

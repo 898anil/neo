@@ -129,7 +129,7 @@ class PersonViewTest(Base):
             h = self.handler("/api/overview", cookie=cookie)
             h.do_GET()
         self.assertEqual([r["id"] for r in h.out[-1][1]["runs"]], [mine.id])
-        for path in ("/api/memory", "/api/usage", "/api/sessions"):  # the owner's extras
+        for path in ("/api/usage", "/api/sessions"):  # the owner's extras
             h = self.handler(path, cookie=cookie)
             h.do_GET()
             self.assertEqual(h.out[-1][0], 403, path)
@@ -216,20 +216,28 @@ if __name__ == "__main__":
 class ConnectSlackTest(Base):
     """Slack connection instructions and the conversation-only bot reader."""
 
-    def test_connection_guidance_uses_claude_connector(self):
+    def test_connection_guidance_starts_slack_mcp_login(self):
         import asyncio
         import app
-        from unittest.mock import AsyncMock
+        from unittest.mock import AsyncMock, MagicMock
         client, say = AsyncMock(), AsyncMock()
+        client.chat_postMessage.return_value = {'ts': '1.23', 'channel': 'D1'}
+        login = MagicMock(user=AJAY, tool='slack-mcp')
+        login.link.return_value = ('https://slack.com/oauth/v2_user/authorize?state=test', None)
         with patch.object(app.accounts, "enabled", return_value=True), \
                 patch.object(app, "_account_of", AsyncMock(return_value="neo-ajay")), \
-                patch.object(app.logins, "connector_status", return_value="missing"):
+                patch.object(app.logins, "connector_status", return_value="missing"), \
+                patch.object(app.logins, 'install_slack_plugin'), \
+                patch.object(app.logins, 'slack_mcp_status', return_value='unavailable'), \
+                patch.object(app.logins, 'begin_slack_mcp', return_value=login), \
+                patch.object(app, '_expire_login', AsyncMock()):
             asyncio.run(app._slack_sign_in(client, "C1", "1.0", AJAY, False, say))
         self.assertEqual(client.chat_postMessage.await_count, 1)
         message = str(client.chat_postMessage.await_args.kwargs["text"])
-        self.assertIn("Claude", message)
-        self.assertIn("Connectors", message)
+        self.assertIn("Slack", message)
+        self.assertIn("redirect", message)
         self.assertNotIn("client id", message.lower())
+        app.LOGINS.clear()
 
     def test_already_connected_does_not_send_setup_instructions(self):
         import asyncio
@@ -250,7 +258,8 @@ class ConnectSlackTest(Base):
         from unittest.mock import AsyncMock
         tokens.STORE.update(lambda d: d.setdefault(AJAY, {}).update({"_slack": "xoxp-old"}))
         say = AsyncMock()
-        asyncio.run(app._slack_sign_in(AsyncMock(), "D1", "1.0", AJAY, True, say))
+        with patch.object(app.accounts, 'enabled', return_value=False):
+            asyncio.run(app._slack_sign_in(AsyncMock(), "D1", "1.0", AJAY, True, say))
         self.assertNotIn("_slack", tokens.STORE.read()[AJAY])
         self.assertIn("Claude", say.await_args.args[0])
 
@@ -296,3 +305,137 @@ class ConnectSlackTest(Base):
         from cos import home_tab
         self.assertIn("home_connect_slack", str(home_tab.view("Ajay", {}, None, None, [], [], slack=False)))
         self.assertEqual(commands.parse("login slack").engine, "slack")
+
+class SlackMCPLoginTest(Base):
+    def test_connect_starts_per_user_slack_oauth_in_dm(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock, MagicMock
+        client, say = AsyncMock(), AsyncMock()
+        client.chat_postMessage.return_value = {'ts': '1.23', 'channel': 'D1'}
+        login = MagicMock(user=AJAY, tool='slack-mcp')
+        login.link.return_value = ('https://slack.com/oauth/v2_user/authorize?state=test', None)
+        with patch.object(app.accounts, 'enabled', return_value=True), \
+             patch.object(app, '_account_of', AsyncMock(return_value='neo-ajay')), \
+             patch.object(app.logins, 'connector_status', return_value='missing'), \
+             patch.object(app.logins, 'install_slack_plugin', return_value=None) as install, \
+             patch.object(app.logins, 'slack_mcp_status', return_value='unavailable'), \
+             patch.object(app.logins, 'begin_slack_mcp', return_value=login) as begin, \
+             patch.object(app, '_expire_login', AsyncMock()):
+            asyncio.run(app._slack_sign_in(client, 'C1', '1.0', AJAY, False, say))
+        install.assert_called_once_with('neo-ajay')
+        begin.assert_called_once_with(AJAY, 'neo-ajay')
+        self.assertIn('redirect', client.chat_postMessage.await_args.kwargs['text'].lower())
+        app.LOGINS.clear()
+
+    def test_redirect_parser_only_accepts_loopback_oauth_url(self):
+        from cos import logins
+        value = 'http://localhost:3118/callback?code=abc123&state=xyz'
+        self.assertEqual(logins.slack_redirect_from('<' + value + '>'), value)
+        self.assertEqual(logins.slack_redirect_from('https://evil.example/?code=abc'), '')
+
+    def test_redirect_is_accepted_only_from_the_requesting_user(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock, MagicMock
+        client = AsyncMock()
+        login = MagicMock(user=AJAY, tool='slack-mcp')
+        login.answer.return_value = (True, '')
+        app.LOGINS['1.23'] = login
+        redirect = 'http://localhost:3118/callback?code=secret&state=test'
+        with patch.object(app, 'publish_home', AsyncMock()):
+            asyncio.run(app.answer_login(client, 'D1', '1.23', YOSH, redirect))
+            login.answer.assert_not_called()
+            asyncio.run(app.answer_login(client, 'D1', '1.23', AJAY, '<' + redirect + '>'))
+        login.answer.assert_called_once_with(redirect)
+        self.assertNotIn('secret', str(client.chat_postMessage.await_args))
+        app.LOGINS.clear()
+
+    def test_home_reports_connected_for_slack_mcp(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock
+        app.LOGIN_STATE.clear()
+        with patch.object(app.accounts, 'enabled', return_value=True), \
+             patch.object(app, '_account_of', AsyncMock(return_value='neo-ajay')), \
+             patch.object(app, '_lent', return_value={x: False for x in app.logins.TOOLS}), \
+             patch.object(app.logins, 'signed_in', return_value=False), \
+             patch.object(app.accounts, '_shared_doppler', return_value=''), \
+             patch.object(app.logins, 'connector_status', return_value='missing'), \
+             patch.object(app.logins, 'slack_mcp_status', return_value='connected'):
+            states = asyncio.run(app.login_states(AsyncMock(), AJAY, fresh=True))
+        self.assertEqual(states['slack'], 'connected')
+
+    def test_disconnect_logs_out_of_the_users_slack_mcp(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock
+        say = AsyncMock()
+        with patch.object(app.accounts, 'enabled', return_value=True), \
+             patch.object(app, '_account_of', AsyncMock(return_value='neo-ajay')), \
+             patch.object(app.logins, 'logout_slack_mcp', return_value=None) as logout:
+            asyncio.run(app._slack_sign_in(AsyncMock(), 'D1', '1.0', AJAY, True, say))
+        logout.assert_called_once_with('neo-ajay')
+
+    def test_slack_login_error_does_not_expose_sensitive_cli_output(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock, MagicMock
+        login = MagicMock(user=AJAY, tool='slack-mcp')
+        login.link.side_effect = RuntimeError('secret-authorization-url')
+        with patch.object(app.accounts, 'enabled', return_value=True), \
+             patch.object(app, '_account_of', AsyncMock(return_value='neo-ajay')), \
+             patch.object(app.logins, 'connector_status', return_value='missing'), \
+             patch.object(app.logins, 'install_slack_plugin'), \
+             patch.object(app.logins, 'slack_mcp_status', return_value='unavailable'), \
+             patch.object(app.logins, 'begin_slack_mcp', return_value=login):
+            with self.assertRaises(RuntimeError) as err:
+                asyncio.run(app._slack_sign_in(AsyncMock(), 'C1', '1.0', AJAY, False, AsyncMock()))
+        self.assertNotIn('secret-authorization-url', str(err.exception))
+        login.stop.assert_called_once()
+
+    def test_disconnect_cancels_pending_slack_oauth(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock, MagicMock
+        login = MagicMock(user=AJAY, tool='slack-mcp')
+        app.LOGINS['1.23'] = login
+        with patch.object(app.accounts, 'enabled', return_value=True), \
+             patch.object(app, '_account_of', AsyncMock(return_value='neo-ajay')), \
+             patch.object(app.logins, 'logout_slack_mcp'), \
+             patch.object(app, '_mark_replaced', AsyncMock()):
+            asyncio.run(app._slack_sign_in(AsyncMock(), 'D1', '1.0', AJAY, True, AsyncMock()))
+        login.stop.assert_called_once()
+        self.assertNotIn('1.23', app.LOGINS)
+
+    def test_disconnect_cannot_race_with_an_oauth_start(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock
+        app.SIGNING_IN.add(AJAY)
+        say = AsyncMock()
+        try:
+            with patch.object(app.logins, 'logout_slack_mcp') as logout:
+                asyncio.run(app._slack_sign_in(AsyncMock(), 'D1', '1.0', AJAY, True, say))
+            logout.assert_not_called()
+            self.assertIn('starting', say.await_args.args[0])
+        finally:
+            app.SIGNING_IN.discard(AJAY)
+
+    def test_another_users_pending_oauth_gets_a_clear_retry(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock, MagicMock
+        login = MagicMock(user=YOSH, tool='slack-mcp')
+        login.proc.poll.return_value = None
+        login.expired.return_value = False
+        app.LOGINS['other'] = login
+        say = AsyncMock()
+        try:
+            with patch.object(app.accounts, 'enabled', return_value=True), \
+                 patch.object(app.logins, 'install_slack_plugin') as install:
+                asyncio.run(app._slack_sign_in(AsyncMock(), 'D1', '1.0', AJAY, False, say))
+            install.assert_not_called()
+            self.assertIn('another', say.await_args.args[0].lower())
+        finally:
+            app.LOGINS.clear()

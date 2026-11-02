@@ -23,6 +23,7 @@ import re
 import secrets
 import shutil
 import signal
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -1384,6 +1385,8 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
                      else f"{owner_name()}'s shared token available" if shared else "not connected")
             rows.append(f"• {label}: {state}")
         slack_status = await asyncio.to_thread(logins.connector_status, account, "slack")
+        if slack_status != "connected" and await asyncio.to_thread(logins.slack_mcp_status, account) == "connected":
+            slack_status = "connected"
         rows.append(f"• Slack: {slack_status} in Claude" if slack_status != "unknown" else "• Slack: could not check Claude connector")
         await say("*Your sign-ins*\n" + "\n".join(rows))
         return
@@ -1462,43 +1465,77 @@ async def nudge_setup(client, user: str) -> None:
 
 
 SLACK_SIGN_INS = JsonStore("slack_sign_ins.json")  # DM ts -> Slack id of a "connect my slack" message
+SLACK_MCP_STARTING = False  # the official plugin uses one fixed localhost callback port
 
 
 async def _slack_sign_in(client, channel: str, thread_ts: Optional[str], user: str, off: bool, say) -> None:
+    global SLACK_MCP_STARTING
+    if user in SIGNING_IN:
+        await say(":hourglass: Your sign-in is still starting; try again shortly.")
+        return
     if off:
         from cos import tokens
-        await asyncio.to_thread(tokens.STORE.update, lambda d: (d.get(user) or {}).pop("_slack", None))
-        await say("Manage or disconnect Slack in your Claude account under Connectors. Any old neo Slack token was removed.")
-        return
-    if accounts.enabled():
-        try:
+        for ts, waiting in list(LOGINS.items()):
+            if waiting.user == user and waiting.tool == "slack-mcp":
+                waiting.stop()
+                LOGINS.pop(ts, None)
+                await _mark_replaced(client, user, ts)
+        if accounts.enabled():
             account = await _account_of(client, user)
-            status = await asyncio.to_thread(logins.connector_status, account, "slack")
-        except (OSError, RuntimeError):
-            status = "unknown"
-        if status == "connected":
-            await say(":white_check_mark: Slack is connected in your Claude account. Ask me to search Slack with Claude.")
-            return
-    else:
-        status = "unknown"
-    if status == "unknown":
-        await say("I couldn't check your Claude Slack connector. Check your own Claude account under Connectors.")
+            await asyncio.to_thread(logins.logout_slack_mcp, account)
+        await asyncio.to_thread(tokens.STORE.update, lambda d: (d.get(user) or {}).pop("_slack", None))
+        LOGIN_STATE.pop(user, None)
+        await say("Slack MCP is disconnected. Manage any separate Claude Slack connector in Claude under Connectors.")
         return
-    await client.chat_postMessage(channel=user, unfurl_links=False, text=(
-        "*Connect Slack to Claude*\n1. Sign in to your own Claude account and open Customize (or Plugins) → Connectors. "
-        "Find Slack and connect your own Slack account.\n2. Make sure neo is signed in to that same Claude account "
-        "(say *connect my claude*). Claude runs can then use your Slack connector. "
-        "Use your own Claude account, not a shared login. Access depends on your role and Claude and Slack workspace settings; "
-        "Slack access may include DMs, depending on the permissions you grant. "
-        "Codex runs can read the conversation they started from."))
-    if not str(channel).startswith(("D", "U")):
-        await say(":envelope_with_arrow: I sent you Slack connection instructions by DM.")
+    if not accounts.enabled():
+        await say("Connecting Slack needs your own neo account on this machine.")
+        return
+    if SLACK_MCP_STARTING or any(waiting.user != user and waiting.tool == "slack-mcp"
+                                 and not waiting.expired() and waiting.proc.poll() is None
+                                 for waiting in LOGINS.values()):
+        await say(":hourglass: Another Slack sign-in is in progress. Try again after it finishes or expires (up to 15 minutes).")
+        return
+    SLACK_MCP_STARTING = True
+    SIGNING_IN.add(user)
+    try:
+        account = await _account_of(client, user)
+        if await asyncio.to_thread(logins.connector_status, account, "slack") == "connected":
+            await say(":white_check_mark: Your Claude Slack connector is connected.")
+            return
+        await asyncio.to_thread(logins.install_slack_plugin, account)
+        if await asyncio.to_thread(logins.slack_mcp_status, account) == "connected":
+            await say(":white_check_mark: Your Slack MCP connection is connected.")
+            return
+        for ts, waiting in list(LOGINS.items()):
+            if waiting.user == user and waiting.tool == "slack-mcp":
+                waiting.stop()
+                LOGINS.pop(ts, None)
+                await _mark_replaced(client, user, ts)
+                try:
+                    await asyncio.to_thread(waiting.proc.wait, timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError("The previous Slack sign-in is still closing; try again shortly") from None
+        login = await asyncio.to_thread(logins.begin_slack_mcp, user, account)
+        try:
+            url, code = await asyncio.to_thread(login.link)
+            await _send_sign_in(client, channel, user, "slack-mcp", login, url, code, say)
+        except Exception:
+            login.stop()
+            raise RuntimeError("Slack sign-in could not be started; please try again") from None
+    finally:
+        SIGNING_IN.discard(user)
+        SLACK_MCP_STARTING = False
 
 
 async def _send_sign_in(client, channel: str, user: str, tool: str, login: logins.Login, url: str,
                         code: Optional[str], say) -> None:
     label = home_tab.TOOL_NAMES.get(tool, tool)
-    if tool in logins.PASTE:
+    if tool == "slack-mcp":
+        text = (f"*Connect your Slack account*\n1. Open <{url}|this link> and authorize with your own Slack account. "
+                "Slack may ask an admin to approve the connection.\n2. After authorization, your browser may show an "
+                "unreachable localhost page. Copy the entire redirect URL from the address bar and reply with it in this "
+                "DM thread. The link expires in 15 minutes.")
+    elif tool in logins.PASTE:
         whose = {"claude": "Claude", "gcloud": "Google"}.get(tool, label)
         text = (f"*Sign in to {label} for your neo workspace*\n1. Open <{url}|this link> and sign in with *your own* {whose} account.\n"
                 "2. Copy the code the page shows you and reply with it *in this thread*.\nThe link works for 15 minutes.")
@@ -1509,9 +1546,10 @@ async def _send_sign_in(client, channel: str, user: str, tool: str, login: login
     dm = await client.chat_postMessage(channel=user, text=text, unfurl_links=False)
     if not channel.startswith(("D", "U")):
         await say(":envelope_with_arrow: I sent you a DM to sign in.")
-    if tool in logins.PASTE:
+    if tool in logins.PASTE or tool == "slack-mcp":
         LOGINS[dm["ts"]] = login
-        SIGN_IN_THREADS.update(lambda d: d.update({dm["ts"]: user}))  # kept after it ends (and across restarts)
+        store = SLACK_SIGN_INS if tool == "slack-mcp" else SIGN_IN_THREADS
+        store.update(lambda d: d.update({dm["ts"]: user}))  # kept after it ends (and across restarts)
         asyncio.create_task(_expire_login(dm["ts"]))
     else:
         asyncio.create_task(_finish_device_login(client, dm["channel"], dm["ts"], login))
@@ -1663,6 +1701,8 @@ async def login_states(client, user: str, fresh: bool = False) -> dict:
         if await asyncio.to_thread(accounts._shared_doppler, account):
             states["doppler"] = "lent"
     states["slack"] = await asyncio.to_thread(logins.connector_status, account, "slack")
+    if states["slack"] != "connected" and await asyncio.to_thread(logins.slack_mcp_status, account) == "connected":
+        states["slack"] = "connected"
     states["sentry"] = await asyncio.to_thread(logins.connector_status, account, "sentry")
     LOGIN_STATE[user] = (time.monotonic() + 600, states)
     return states
@@ -1936,13 +1976,14 @@ async def answer_login(client, channel: str, thread_ts: str, user: str, text: st
     login = LOGINS.get(thread_ts)
     if not login or login.user != user:
         return
-    code = logins.code_from(text)
+    code = logins.slack_redirect_from(text) if login.tool == "slack-mcp" else logins.code_from(text)
     if not code:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                      text="I didn't find a code in that. Reply with just the code the sign-in page shows.")
+                                      text=("Reply with the complete localhost redirect URL from your browser." if login.tool == "slack-mcp"
+                                            else "I didn't find a code in that. Reply with just the code the sign-in page shows."))
         return
     ok, why = await asyncio.to_thread(login.answer, code)
-    if not ok:  # what the CLI said, never the code (it doesn't echo what it reads)
+    if not ok and login.tool != "slack-mcp":  # never log an OAuth redirect or any echoed token
         log.info("%s sign-in for %s: code refused; CLI said: %s", login.tool, user, logins._tail(login.output()))
     if ok:
         LOGINS.pop(thread_ts, None)
@@ -1951,14 +1992,15 @@ async def answer_login(client, channel: str, thread_ts: str, user: str, text: st
         when = people.daily(user, "brief")
         brief = (f" I'll DM you a morning brief at {when[0]:02d}:{when[1]:02d} on work days, from your own mail, "
                  "calendar and Slack (`@neo set my brief off` to stop)." if when and accounts.isolated(user) else "")
-        label = home_tab.TOOL_NAMES.get(login.tool, login.tool)
+        label = "Slack" if login.tool == "slack-mcp" else home_tab.TOOL_NAMES.get(login.tool, login.tool)
         brief = brief if login.tool == "claude" else ""
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                       text=f":white_check_mark: Signed in to {label}. Your agents use your own account from now on.{brief}")
     else:
         if login.proc.poll() is not None:
             LOGINS.pop(thread_ts, None)
-        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: {why}")
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                      text=":x: Slack authorization did not finish. Say `connect my slack` to try again." if login.tool == "slack-mcp" else f":x: {why}")
 
 
 async def route_apply(req, thread_ts: str):

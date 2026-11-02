@@ -122,6 +122,7 @@ getent group neo-people >/dev/null || groupadd --system neo-people
 install -o root -g root -m 755 deploy/linux/neo-run /usr/local/bin/neo-run
 install -o root -g root -m 755 deploy/linux/neo-ask /usr/local/bin/neo-ask  # one CoS asks another (cos/broker.py)
 install -o root -g root -m 755 deploy/linux/neo-slack /usr/local/bin/neo-slack  # an agent reads the conversation its task came from
+install -o root -g root -m 755 deploy/linux/neo-drive /usr/local/bin/neo-drive  # shared Google Drive connector
 install -o root -g root -m 700 deploy/linux/neo-account /usr/local/sbin/neo-account
 SUDOERS_TMP="$(mktemp)"
 sed "s/SVC_USER/$SVC_USER/g" deploy/linux/sudoers > "$SUDOERS_TMP"

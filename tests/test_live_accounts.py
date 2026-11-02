@@ -206,7 +206,7 @@ class WhichAccountTest(Base):
         self.assertEqual(self.create(slack_user=OWNER)["account"], "neo-anil")
         self.assertEqual(self.create()["account"], "neo-anil")  # the dashboard: nobody's Slack id
         meta = self.create(slack_user=AJAY)
-        self.assertEqual(meta["cwd"], f"{accounts.home('neo-ajay')}/code/app")  # neo's workdir, in their ~/code
+        self.assertEqual(meta["cwd"], str((Path(accounts.home('neo-ajay')) / "code/app").resolve()))  # in their ~/code
 
     def test_a_caller_may_keep_a_run_in_neos_own_checkout(self):
         meta = self.create(slack_user=OWNER, account=None)

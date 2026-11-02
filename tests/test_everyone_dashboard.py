@@ -7,7 +7,7 @@ import unittest
 import unittest.mock
 from unittest.mock import patch
 
-from cos import dashlink, fleet, home, people, server, watches
+from cos import dashlink, fleet, home, learn, people, server, watches
 from cos.runner import Run
 from tests.test_dashboard_people import AJAY, OWNER, YOSH, Base
 
@@ -123,10 +123,39 @@ class DashboardTest(Scoped):
         self.assertEqual(self.post("/api/settings", {"default_engine": "gpt"})[0], 400)
 
     def test_the_owners_extras_stay_the_owners(self):
-        for path in ("/api/memory", "/api/usage", "/api/sessions", "/api/agents/s/p"):
+        for path in ("/api/usage", "/api/sessions", "/api/agents/s/p"):
             self.assertEqual(self.get(path)[0], 403, path)
         for path in ("/api/live", "/api/memory/apply", "/api/system-watches/x/run"):
             self.assertEqual(self.post(path)[0], 403, path)
+
+    def test_memory_is_personal_with_shared_notes_and_no_owner_metadata(self):
+        learn.add("Owner private preference", "rule", user=OWNER)
+        learn.add("Ajay private preference", "rule", user=AJAY)
+        learn.add("Yosh private preference", "rule", user=YOSH)
+        learn.add("Shared team guidance", "rule", team=True, user=OWNER)
+        learn.add("Shared lesson", "lesson", user=OWNER)
+        learn.add("Shared repo guidance", "rule", repo="backend", user=OWNER)
+        for user, own, other in ((AJAY, "Ajay private preference", "Yosh private preference"),
+                                 (YOSH, "Yosh private preference", "Ajay private preference")):
+            status, data = self.get("/api/memory", user=user)
+            self.assertEqual(status, 200)
+            text = json.dumps(data)
+            self.assertIn(own, text)
+            self.assertIn("Shared team guidance", text)
+            self.assertIn("Shared lesson", text)
+            self.assertIn("Shared repo guidance", text)
+            self.assertNotIn(other, text)
+            self.assertNotIn("Owner private preference", text)
+            self.assertNotIn(str(self.dir), text)
+            self.assertNotIn("review", data)
+
+    def test_owner_dashboard_memory_does_not_show_other_personal_rules(self):
+        learn.add("Owner personal rule", "rule", user=OWNER)
+        learn.add("Ajay personal rule", "rule", user=AJAY)
+        status, data = self.get("/api/memory", user=OWNER)
+        self.assertEqual(status, 200)
+        self.assertIn("Owner personal rule", json.dumps(data))
+        self.assertNotIn("Ajay personal rule", json.dumps(data))
 
     def test_their_stream_leaves_out_another_persons_words(self):
         answer = Run.create("claude", "a question from Yosh's neo", str(self.dir), "readonly", source="a2a",

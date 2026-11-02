@@ -198,6 +198,14 @@ class HardeningTest(Base):
 
 
 class CharterTest(Base):
+    def test_missing_access_is_delegated_once_before_giving_up(self):
+        text = broker.charter(AJAY)
+        self.assertIn('make exactly one request to another CoS', text)
+        self.assertIn('before telling the requester you cannot proceed', text)
+        self.assertIn('never repeat or redirect a declined or pending request', text)
+        self.assertIn('neo-ask --work', text)
+        self.assertNotIn('make exactly one request', broker.charter(AJAY, may_ask=False))
+
     def test_each_cos_knows_its_job_and_asks_last(self):
         people.save(AJAY, OWNER, role="prs-only")
         text = broker.charter(AJAY)
