@@ -139,13 +139,16 @@ class LoopsTest(unittest.TestCase):
         from cos.runner import Run, runs_dir
         runs_dir()
         l = self.loops.open_loop("pr", "pr:o/r#7", "fix: x", {"prs": ["u"]}, stage="fix_pr")
-        run = Run.create("claude", "check", os.environ["COS_HOME"], "readonly", extra={"kind": "loops"})
+        other = self.loops.open_loop("finding", "finding:f9", "someone else's", {})
+        run = Run.create("claude", "check", os.environ["COS_HOME"], "readonly", extra={"kind": "loops", "loop_ids": [l["id"]]})
         answer = {"updates": [{"id": l["id"], "stage": "merged", "note": "merged", "evidence": "gh pr view: MERGED"},
-                              {"id": l["id"], "stage": "fix_pr", "note": "", "evidence": "x"}]}
+                              {"id": l["id"], "stage": "fix_pr", "note": "", "evidence": "x"},
+                              {"id": other["id"], "stage": "merged", "note": "", "evidence": "x"}]}
         (run.dir / "raw.jsonl").write_text(json.dumps({"type": "result", "structured_output": answer}) + "\n")
         out = self.loops.finish_check(run)
-        self.assertEqual([o["applied"] for o in out], [True, False])
-        self.assertEqual(self.loops.listing()[0]["stage"], "merged")
+        self.assertEqual([o["applied"] for o in out], [True, False, False])  # never a loop it wasn't given
+        self.assertEqual(self.loops.STORE.read()[l["id"]]["stage"], "merged")
+        self.assertEqual(self.loops.STORE.read()[other["id"]]["stage"], "detected")
         self.assertEqual(run.meta()["loops_applied"], 1)
 
     def test_check_not_blocked_by_a_dead_running_check(self):

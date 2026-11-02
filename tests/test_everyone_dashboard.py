@@ -4,6 +4,7 @@ import io
 import json
 import os
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 from cos import dashlink, fleet, home, people, server, watches
@@ -239,8 +240,13 @@ class PullRequestsTest(Scoped):
         self.out = (0, "neo-run: starting\n" + PR_JSON)
         self.gh = patch("cos.logins.run_argv", side_effect=lambda account, argv, timeout=60: self.calls.append((account, argv)) or self.out)
         self.gh.start()
+        # a person's first fetch runs in the background: run it at once here
+        self.thread = patch.object(work.threading, "Thread", side_effect=lambda target, args=(), **kw:
+                                   unittest.mock.Mock(start=lambda: target(*args)))
+        self.thread.start()
 
     def tearDown(self):
+        self.thread.stop()
         self.gh.stop()
         super().tearDown()
 
@@ -267,13 +273,21 @@ class PullRequestsTest(Scoped):
     def test_review_and_fix_are_tasks_in_their_account(self):
         from cos import me
         started = []
-        with patch.object(me, "start", side_effect=lambda user, prompt, engine=None: started.append((user, prompt)) or self.mine), \
+        with patch.object(me, "start", side_effect=lambda user, prompt, engine=None, kind=None: started.append((user, prompt, kind)) or self.mine), \
                 patch.object(server, "start_turn"):
             self.assertEqual(self.post("/api/work/review", {"repo": "acme/backie", "number": 12})[0], 201)
             self.assertEqual(self.post("/api/work/fix", {"repo": "acme/backie", "number": 12})[0], 201)
             self.assertEqual(self.post("/api/work/review", {"repo": "acme/deskie", "number": 9})[0], 404)  # not theirs
-        self.assertEqual([u for u, _ in started], [AJAY, AJAY])
+        self.assertEqual([(u, k) for u, _, k in started], [(AJAY, "pr-review"), (AJAY, "pr-fix")])  # no broker token, no memory
         self.assertIn("Review pull request", started[0][1])
+
+    def test_commands_in_their_account_never_get_the_owners_tokens(self):
+        from cos import accounts, tokens
+        tokens.STORE.update(lambda d: d.update({OWNER: {"sentry": "sntrys_owner_secret"}}))
+        spec = accounts.spec({"cwd": "/x", "lend": False, "slack_user": accounts.user_of("neo-ajay")}, ["gh"], {}, {})
+        self.assertNotIn("sntrys_owner_secret", json.dumps(spec))
+        self.assertEqual(accounts.user_of("neo-ajay"), AJAY)
+        self.assertEqual(accounts.user_of("neo-stranger"), "-")  # an account neo doesn't know: nobody's tokens
 
     def test_their_open_prs_are_followed_up_for_them(self):
         from cos import loops
@@ -281,7 +295,9 @@ class PullRequestsTest(Scoped):
         self.assertEqual([l["owner"] for l in loops.listing(viewer=AJAY)], [AJAY])
         self.assertEqual(loops.listing(viewer=None), [])
         loops.sync_prs([], None)  # the owner's (empty) list doesn't mark Ajay's PR closed
-        self.assertTrue(loops.STORE.read()[loops._id("pr:acme/backie#12")]["pr_open"])
+        self.assertTrue(loops.STORE.read()[loops._id(f"pr:{AJAY}:acme/backie#12")]["pr_open"])
+        loops.sync_prs(self.work.prs(who=AJAY)["mine"], None)  # the same PR on the owner's list: a loop of its own
+        self.assertEqual(len(loops.listing()), 2)
 
 
 def hit(ts, **kw):

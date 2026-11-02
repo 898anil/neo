@@ -77,7 +77,8 @@ def sync_prs(mine: list[dict], owner: Optional[str] = None) -> list[dict]:
     from .people import is_owner
 
     owner = None if is_owner(owner) else owner
-    rows = [open_loop("pr", f"pr:{p['repo']}#{p['number']}", p["title"], {"prs": [p["url"]]}, stage="fix_pr", owner=owner)
+    who = f"{owner}:" if owner else ""  # a person's own loop, never the owner's (or another person's) for the same PR
+    rows = [open_loop("pr", f"pr:{who}{p['repo']}#{p['number']}", p["title"], {"prs": [p["url"]]}, stage="fix_pr", owner=owner)
             for p in mine if not p.get("draft")]
     still_open = {r["id"] for r in rows}
 
@@ -260,9 +261,12 @@ def deploy_hint() -> str:
     return (f"Look at the prod deploy workflows in the {repo} repo\n"
             f"  (`gh run list -R {full} ...`) and which commit or image prod runs.")
 
-def _open_for_check(now: float) -> list[dict]:
+def _open_for_check(now: float, who: Optional[str] = None) -> list[dict]:
+    """The loops one check looks at: one owner's (who: a person's Slack id; None the owner's)."""
     rows = []
     for l in STORE.read().values():
+        if (l.get("owner") or None) != who:
+            continue
         recent_verified = l["stage"] == "verified" and now - l["stage_at"] < KEEP_VERIFIED_DAYS * 86400
         if l["status"] != "open" and not recent_verified:
             continue
@@ -272,34 +276,51 @@ def _open_for_check(now: float) -> list[dict]:
     return rows
 
 
-def check_running() -> bool:
+def check_running(who: Optional[str] = None) -> bool:
     # retry_owner: a run waiting to auto-restart after an API error has no pid but is still live
-    return any(m.get("kind") == "loops" and m.get("status") == "running"
+    return any(m.get("kind") == "loops" and m.get("status") == "running" and (m.get("slack_user") or None) == who
                and (pid_alive(m.get("pid")) or pid_alive(m.get("retry_owner"))) for m in list_runs(40))
 
 
-def start_check() -> Optional[dict]:
-    """Start the follow-up check in the background; None when one is running or nothing is open."""
+def start_check(who: Optional[str] = None) -> Optional[dict]:
+    """Start the follow-up check in the background; None when one is running or nothing is open.
+    who: a person's own loops, checked in their account with their own logins (and no Slack: their loops
+    are their PRs and findings), so text from their PRs never reaches the owner's tools. None: the owner's."""
     from . import watches  # read-only tool limits
 
     with _check_lock:
-        if check_running():
+        if check_running(who):
             return None
-        rows = _open_for_check(time.time())
+        rows = _open_for_check(time.time(), who)
         if not rows:
             return None
         if not claude_available()[0]:
             return None
         every_turn, _ = watches.cli_args()
-        from .mentions import SLACK_READ  # the alert threads live in Slack: read-only access to them
-        at = every_turn.index("--allowedTools") + 1 if "--allowedTools" in every_turn else None
-        if at:
-            every_turn = every_turn[:at] + [",".join([every_turn[at], *SLACK_READ])] + every_turn[at + 1:]
+        fields, cwd = owner_fields(), workdir()
+        extra = {"kind": "loops", "title": f"Follow-up: {len(rows)} open loops", "loop_ids": [r["id"] for r in rows],
+                 "first_turn_args": ["--json-schema", json.dumps(UPDATE_SCHEMA)]}
+        if who is None:
+            from .mentions import SLACK_READ  # the alert threads live in Slack: read-only access to them
+            at = every_turn.index("--allowedTools") + 1 if "--allowedTools" in every_turn else None
+            if at:
+                every_turn = every_turn[:at] + [",".join([every_turn[at], *SLACK_READ])] + every_turn[at + 1:]
+        else:
+            from . import accounts, people
+            from .me import _name
+
+            account = accounts.everyone().get(who)
+            if not account or people.role(who) == "blocked":
+                return None
+            name = _name(who)
+            fields = {"owner": name, "Owner": name[:1].upper() + name[1:], "owner_intro": name}
+            cwd = accounts.cwd_for(account, None)
+            # the model only is lent; gh and the rest are their own logins in their own account
+            extra.update(account=account, slack_user=who, role=people.role(who), lend="claude")
+        extra["cli_args"] = every_turn
         prompt = CHECK_PROMPT.format(stages=" -> ".join(STAGES), quiet=VERIFY_QUIET_HOURS, loops=json.dumps(rows, indent=1),
-                                     deploy=deploy_hint(), **owner_fields())
-        run = Run.create("claude", prompt, workdir(), "readonly", source="schedule",
-                         extra={"kind": "loops", "title": f"Follow-up: {len(rows)} open loops", "loop_ids": [r["id"] for r in rows],
-                                "cli_args": every_turn, "first_turn_args": ["--json-schema", json.dumps(UPDATE_SCHEMA)]})
+                                     deploy=deploy_hint(), **fields)
+        run = Run.create("claude", prompt, cwd, "readonly", source="schedule", extra=extra)
 
     def work():
         try:
@@ -339,9 +360,11 @@ def finish_check(run: Run) -> list[dict]:
     answer = _answer(run)
     if answer is not None:  # the check ran to the end: every loop it was given has been looked at
         mark_checked(list(run.meta().get("loop_ids") or []))
+    given = set(run.meta().get("loop_ids") or [])
     for upd in (answer or {}).get("updates") or []:
         if isinstance(upd, dict) and upd.get("id"):
-            ok, why = apply_update(str(upd["id"]), upd)
+            # only the loops this check was given: a check never moves someone else's
+            ok, why = apply_update(str(upd["id"]), upd) if str(upd["id"]) in given else (False, "not a loop this check was given")
             out.append({"loop_id": upd["id"], "applied": ok, "reason": why, "update": upd})
     run.update_meta(loops_applied=sum(1 for o in out if o["applied"]), loops_refused=sum(1 for o in out if not o["applied"]))
     return out

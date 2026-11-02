@@ -241,6 +241,18 @@ def _own_tokens(meta: dict) -> dict:
     return tokens.env_for(meta.get("slack_user") or people.owner_id())
 
 
+def user_of(account: str) -> str:
+    """Whose account this is, for a command run in it without a run (cos/logins.start): the person's Slack id;
+    None for the owner's own account; "-" (nobody, so no tokens at all) for an account neo doesn't know.
+    A lookup only: it never creates an account."""
+    from . import people
+
+    for user, name in everyone().items():
+        if name == account:
+            return None if people.is_owner(user) else user
+    return "-"
+
+
 def command(account: str, spec_fd: int) -> list[str]:
     """sudo keeps fds below -C open: the spec pipe is the highest one neo-run needs."""
     return ["sudo", "-n", "-C", str(max(spec_fd + 1, 3)), "-u", account, NEO_RUN, "--spec-fd", str(spec_fd)]

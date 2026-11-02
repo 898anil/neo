@@ -100,8 +100,9 @@ def check_rate(user: str) -> None:
         raise ValueError("That's a lot of tasks this hour; try again a little later.")
 
 
-def start(user: str, prompt: str, engine: Optional[str] = None) -> Run:
-    """A task they start from the dashboard: in their own account, with their role, like one from Slack."""
+def start(user: str, prompt: str, engine: Optional[str] = None, kind: Optional[str] = None) -> Run:
+    """A task they start from the dashboard: in their own account, with their role, like one from Slack.
+    kind: what it is when it reads other people's text (pr-review, pr-fix, mention-task: cos/cards.NOT_OWNER_KINDS)."""
     from . import learn
 
     prompt = (prompt or "").strip()
@@ -117,7 +118,7 @@ def start(user: str, prompt: str, engine: Optional[str] = None) -> Run:
     engine = settings["engine"] or (engine if engine in ENGINES else None) or people.load(user).get("engine") or default_engine()
     system = "\n\n".join(filter(None, (learn.brief(None, user=user), broker.charter(user), broker.guide(), accounts.brief(account))))
     extra = {"account": account, "slack_user": user, "role": people.role(user), "system_prompt": system, "conclude": True,
-             "title": prompt[:80]}
+             "title": prompt[:80], **({"kind": kind} if kind else {})}
     if settings["cli_args"]:
         extra["cli_args"] = settings["cli_args"]
     if settings["model"]:

@@ -35,6 +35,7 @@ log = logging.getLogger("neo")
 STORE = JsonStore("mentions.json")  # the owner's; each person's is mentions-<slack id>.json (store())
 _STORES: dict = {}
 READY_SECONDS = 3600  # how long "their own Claude with its Slack connector is connected" is trusted
+NOT_READY_SECONDS = 300  # and how soon to look again when it wasn't (they may connect it any minute)
 EVERY_MINUTES = int(os.environ.get("NEO_MENTIONS_EVERY", "15"))
 HOURS = (8, 22)  # local time, every day: people tag the owner at weekends too
 FIRST_LOOK_HOURS = 24
@@ -132,7 +133,7 @@ def ready(who: str) -> Optional[str]:
     from . import accounts, logins
 
     at, account = _ready.get(who, (0.0, None))
-    if time.time() - at < READY_SECONDS:
+    if time.time() - at < (READY_SECONDS if account else NOT_READY_SECONDS):
         return account
     account = accounts.everyone().get(who)
     if account and not (logins.signed_in(account, "claude") and logins.connector_status(account, "slack") == "connected"):
@@ -463,6 +464,6 @@ def hand_to_neo(mid: str, who: Optional[str] = None) -> Run:
     else:
         from . import me
 
-        run = me.start(who, task)
+        run = me.start(who, task, kind="mention-task")
     _set(mid, who, status="working", task_run=run.id, note="handed to neo")
     return run

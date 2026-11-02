@@ -912,6 +912,7 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[3] == "send":
                     return self._json(mentions.send(parts[2], str(body.get("text", "")), who=user), HTTPStatus.ACCEPTED)
                 if parts[3] == "neo":
+                    me.check_rate(user)
                     run = mentions.hand_to_neo(parts[2], who=user)
                     start_turn(run, None)
                     return self._json(person_run(run.meta()), HTTPStatus.CREATED)
@@ -935,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
             prompt = work.review_prompt(pr) if parts[2] == "review" else work.fix_ci_prompt(pr)
             try:
                 me.check_rate(user)
-                run = me.start(user, prompt)  # a task in their own account, like Slack (live agents are the owner's)
+                run = me.start(user, prompt, kind=f"pr-{parts[2]}")  # in their own account (live agents are the owner's)
             except (ValueError, PermissionError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
             start_turn(run, None)

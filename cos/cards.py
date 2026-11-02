@@ -269,7 +269,7 @@ def build(target: dict) -> Optional[dict]:
 
 # Runs whose log is mostly other people's or tools' text (alerts, Slack mentions, scheduled checks):
 # nothing in them may write memory, which every later agent reads.
-NOT_OWNER_KINDS = {"mentions", "mention-send", "loops", "watch", "brief", "alert-rca", "pr-fix"}
+NOT_OWNER_KINDS = {"mentions", "mention-send", "mention-task", "loops", "watch", "brief", "alert-rca", "pr-fix"}
 NOT_OWNER_PREFIXES = ("pr-",)  # PR reviews and CI fixes read other people's code review and CI logs
 
 

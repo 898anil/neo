@@ -97,9 +97,10 @@ async def loop_scheduler() -> None:
                 prs = await asyncio.to_thread(work.prs, False, viewer)  # theirs, with their own gh login
                 if not prs.get("error"):  # an empty list from a failed fetch would look like every PR merged
                     await asyncio.to_thread(loops.sync_prs, prs.get("mine") or [], viewer)
-            started = await asyncio.to_thread(loops.start_check)
-            if started:
-                log.info("loop follow-up started: %s", started["id"])
+            for viewer in [None] + [r[0] for r in recipients(None, "") if r[0]]:  # each person's in their own account
+                started = await asyncio.to_thread(loops.start_check, viewer)
+                if started:
+                    log.info("loop follow-up started for %s: %s", viewer or "owner", started["id"])
         except Exception:  # noqa: BLE001
             log.exception("loop follow-up failed to start")
         await asyncio.sleep(LOOP_CHECK_MINUTES * 60)

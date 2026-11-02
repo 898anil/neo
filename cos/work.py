@@ -122,7 +122,7 @@ def prs(force: bool = False, who: Optional[str] = None) -> dict:
             state["refreshing"] = True
         have = state["data"] is not None
     if start:
-        if have:
+        if have or who is not None:  # a person's first fetch runs in the background too: the page polls
             threading.Thread(target=_fetch, args=(who,), daemon=True).start()
         else:
             _fetch(who)

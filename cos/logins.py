@@ -60,7 +60,9 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 def start(account: str, argv: list[str], stdin=subprocess.PIPE) -> subprocess.Popen:
     """The CLI in this account, nothing lent, stdout piped (stderr joins it); stdin piped unless given."""
-    spec = json.dumps(accounts.spec({"cwd": accounts.cwd_for(account, None), "lend": False}, argv, {}, {})).encode()
+    # whose account it is decides whose tokens it gets: a person's own, never the owner's (accounts.user_of)
+    meta = {"cwd": accounts.cwd_for(account, None), "lend": False, "slack_user": accounts.user_of(account)}
+    spec = json.dumps(accounts.spec(meta, argv, {}, {})).encode()
     read_fd, write_fd = os.pipe()
     try:
         proc = subprocess.Popen(accounts.command(account, read_fd), cwd="/", stdin=stdin,
