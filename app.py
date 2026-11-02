@@ -46,7 +46,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import accounts, autonomy, broker, dashlink, home_tab, intent, learn, logins, onboarding, people, slackauth, tokens, voice  # noqa: E402
+from cos import accounts, autonomy, broker, dashlink, home_tab, intent, learn, logins, onboarding, people, tokens, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -1327,15 +1327,15 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
     async def say(text: str) -> None:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=clip(text))
 
-    if not accounts.enabled():
-        await say("Signing in from Slack needs each person's own account on this machine (NEO_ACCOUNTS=1), which is off.")
-        return
     if not people.valid_user(user):
         await say(":x: I can't tell who you are.")
         return
     tool = req.engine or "claude"
     if tool == "slack" and req.command != "logins":
         await _slack_sign_in(client, channel, thread_ts, user, req.command == "logout", say)
+        return
+    if not accounts.enabled():
+        await say("Signing in from Slack needs each person's own account on this machine (NEO_ACCOUNTS=1), which is off.")
         return
     if tool in tokens.TOOLS and req.command != "logins":  # a token, typed into a Slack form, never a message
         label = tokens.TOOLS[tool][0]
@@ -1356,12 +1356,20 @@ async def handle_login(client, channel: str, thread_ts: str, user: Optional[str]
         for tool in logins.TOOLS:
             own = await asyncio.to_thread(logins.signed_in, account, tool)
             lent = _lent(user)[tool]
+            if tool == "doppler" and not _owner_user(user):
+                lent = bool(await asyncio.to_thread(accounts._shared_doppler, account))
             state = ("your own login" if own else f"{owner_name()}'s, lent (`@neo login {tool}` to use yours)" if lent
                      else f"not signed in (`@neo login {tool}`)") if own is not None else "couldn't tell"
             rows.append(f"• {home_tab.TOOL_NAMES.get(tool, tool)}: {state}")
         mine = tokens.connected(user)
-        rows += [f"• {label}: {'connected' if tool in mine else 'not connected'}" for tool, (label, _, _) in tokens.TOOLS.items()]
-        rows.append(f"• Slack: {'your own (search and every channel you are in)' if slackauth.token(user) else 'not connected (say connect my slack)'}")
+        sentry_status = await asyncio.to_thread(logins.connector_status, account, "sentry")
+        for tool, (label, _, _) in tokens.TOOLS.items():
+            shared = not _owner_user(user) and tool in tokens.connected(people.owner_id())
+            state = ("your token" if tool in mine else "your Claude connector" if tool == "sentry" and sentry_status == "connected"
+                     else f"{owner_name()}'s shared token available" if shared else "not connected")
+            rows.append(f"• {label}: {state}")
+        slack_status = await asyncio.to_thread(logins.connector_status, account, "slack")
+        rows.append(f"• Slack: {slack_status} in Claude" if slack_status != "unknown" else "• Slack: could not check Claude connector")
         await say("*Your sign-ins*\n" + "\n".join(rows))
         return
     if req.command == "logout":
@@ -1398,7 +1406,6 @@ MISSING = (
                 r"Authentication failed for 'https://github\.com", re.I), "github", "GitHub", "your neo couldn't reach GitHub"),
     (re.compile(r"gcloud auth login|do not currently have an active account selected", re.I), "google cloud", "Google Cloud",
      "your neo couldn't reach Google Cloud"),
-    (re.compile(r"connect my slack", re.I), "slack", "Slack", "your neo couldn't read the Slack it needed"),
 )
 NUDGED = JsonStore("nudged.json")  # Slack id -> the day they were last told what they could connect
 
@@ -1434,8 +1441,6 @@ async def nudge_setup(client, user: str) -> None:
         missing.append("*connect my claude*: your own mail, calendar and Drive, and your own Claude usage")
     if states.get("gh") != "own":
         missing.append("*connect my github*: clone and read your repos, open PRs as you")
-    if not slackauth.token(user) and slackauth.configured():
-        missing.append("*connect my slack*: search Slack and read the channels you're in")
     if missing:
         await client.chat_postMessage(channel=user, text=":bulb: Your neo can do more once you connect a few things. "
                                                          "Say any of these to neo:\n• " + "\n• ".join(missing))
@@ -1446,39 +1451,33 @@ SLACK_SIGN_INS = JsonStore("slack_sign_ins.json")  # DM ts -> Slack id of a "con
 
 async def _slack_sign_in(client, channel: str, thread_ts: Optional[str], user: str, off: bool, say) -> None:
     if off:
-        gone = await asyncio.to_thread(slackauth.disconnect, user)
-        await say(":wave: Your neo no longer uses your Slack." if gone else "Your Slack wasn't connected.")
-        asyncio.create_task(publish_home(client, user))
+        from cos import tokens
+        await asyncio.to_thread(tokens.STORE.update, lambda d: (d.get(user) or {}).pop("_slack", None))
+        await say("Manage or disconnect Slack in your Claude account under Connectors. Any old neo Slack token was removed.")
         return
-    if not slackauth.configured():
-        await say(f"Connecting Slack isn't set up yet: {owner_name()} needs to add the Slack app's client id and secret "
-                  "to neo. Until then your neo can read the conversation a request comes from.")
+    if accounts.enabled():
+        try:
+            account = await _account_of(client, user)
+            status = await asyncio.to_thread(logins.connector_status, account, "slack")
+        except (OSError, RuntimeError):
+            status = "unknown"
+        if status == "connected":
+            await say(":white_check_mark: Slack is connected in your Claude account. Ask me to search Slack with Claude.")
+            return
+    else:
+        status = "unknown"
+    if status == "unknown":
+        await say("I couldn't check your Claude Slack connector. Check your own Claude account under Connectors.")
         return
-    url = slackauth.authorize_url(user)
-    dm = await client.chat_postMessage(channel=user, unfurl_links=False, text=(
-        f"*Connect your Slack to your neo*\n1. Open <{url}|this link> and click *Allow*. It lets your neo search and read "
-        "the channels you're in (not your DMs).\n2. If the page after that says it's connected, you're done. If it doesn't "
-        "load, copy the whole address from your browser's address bar and reply with it *in this thread*.\nThe link works for 10 minutes."))
-    SLACK_SIGN_INS.update(lambda d: d.update({dm["ts"]: user}))
+    await client.chat_postMessage(channel=user, unfurl_links=False, text=(
+        "*Connect Slack to Claude*\n1. Sign in to your own Claude account and open Customize (or Plugins) → Connectors. "
+        "Find Slack and connect your own Slack account.\n2. Make sure neo is signed in to that same Claude account "
+        "(say *connect my claude*). Claude runs can then use your Slack connector. "
+        "Use your own Claude account, not a shared login. Access depends on your role and Claude and Slack workspace settings; "
+        "Slack access may include DMs, depending on the permissions you grant. "
+        "Codex runs can read the conversation they started from."))
     if not str(channel).startswith(("D", "U")):
-        await say(":envelope_with_arrow: I sent you a DM to connect Slack.")
-
-
-async def answer_slack_sign_in(client, channel: str, thread_ts: str, user: str, text: str) -> None:
-    code, state = slackauth.from_pasted(text)
-    if not code:
-        await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                      text="I didn't find the address in that. Copy the whole address from your browser's address bar and reply with it.")
-        return
-    try:
-        await asyncio.to_thread(slackauth.connect, code, state)
-    except ValueError as exc:
-        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f":x: {exc}")
-        return
-    SLACK_SIGN_INS.update(lambda d: d.pop(thread_ts, None))
-    await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                  text=":white_check_mark: Slack connected. Your neo can now search and read the channels you're in.")
-    asyncio.create_task(publish_home(client, user, check_logins=True))
+        await say(":envelope_with_arrow: I sent you Slack connection instructions by DM.")
 
 
 async def _send_sign_in(client, channel: str, user: str, tool: str, login: logins.Login, url: str,
@@ -1645,6 +1644,11 @@ async def login_states(client, user: str, fresh: bool = False) -> dict:
     for tool in logins.TOOLS:
         own = await asyncio.to_thread(logins.signed_in, account, tool)
         states[tool] = "unknown" if own is None else "own" if own else "lent" if lent[tool] else "none"
+    if states.get("doppler") == "none" and not _owner_user(user):
+        if await asyncio.to_thread(accounts._shared_doppler, account):
+            states["doppler"] = "lent"
+    states["slack"] = await asyncio.to_thread(logins.connector_status, account, "slack")
+    states["sentry"] = await asyncio.to_thread(logins.connector_status, account, "sentry")
     LOGIN_STATE[user] = (time.monotonic() + 600, states)
     return states
 
@@ -1674,7 +1678,7 @@ async def publish_home(client, user: Optional[str], check_logins: bool = False) 
                              await asyncio.to_thread(learn.pending) if _owner_user(user) else None,
                              broker.policy(user), _exchanges(user), cos_name(user, info),
                              {"asked": broker.tasks_for(user), "doing": broker.tasks_for(user, asked=False)},
-                             {tool: tool in tokens.connected(user) for tool in tokens.TOOLS}, bool(slackauth.token(user)))
+                             {tool: ("own" if tool in tokens.connected(user) else "connector" if tool == "sentry" and states.get("sentry") == "connected" else "lent" if not _owner_user(user) and tool in tokens.connected(people.owner_id()) else "none") for tool in tokens.TOOLS}, states.get("slack", "unknown"))
         await client.views_publish(user_id=user, view=view)
     except Exception:  # noqa: BLE001 - the Home tab must never break anything else
         log.exception("could not publish the Home tab for %s", user)
@@ -1761,8 +1765,8 @@ async def on_token_button(ack, body, client) -> None:
         "title": {"type": "plain_text", "text": f"Connect {label}"[:24]},
         "submit": {"type": "plain_text", "text": "Connect"}, "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"Make a personal token at <{where}|{label}> and paste it here. "
-                                                                   "Only your own agents get it (as `" + variable + "`), and it "
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"Make a personal token at <{where}|{label}> and paste it here. " +
+                                                                   ("Your token is shared as the default for others (as `" if _owner_user(user) else "Only your agents get your token (as `") + variable + "`), and it "
                                                                    "isn't posted anywhere in Slack."}},
             {"type": "input", "block_id": "token", "label": {"type": "plain_text", "text": f"{label} token"},
              "element": {"type": "plain_text_input", "action_id": "value", "placeholder": {"type": "plain_text", "text": "paste here"}}}]})
@@ -2198,7 +2202,7 @@ async def handle_dm(event: dict, client) -> None:
         await answer_login(client, channel, thread_ts, user, event.get("text", ""))
         return
     if thread_ts and (await asyncio.to_thread(SLACK_SIGN_INS.read)).get(thread_ts) == user:
-        await answer_slack_sign_in(client, channel, thread_ts, user, event.get("text", ""))
+        await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text="That sign-in has ended. Say connect my slack for the new instructions.")
         return
     if thread_ts and thread_ts in (await asyncio.to_thread(SIGN_IN_THREADS.read)):
         # a code for a sign-in that ended (expired, replaced, neo restarted): never a task prompt

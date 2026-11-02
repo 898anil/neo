@@ -45,7 +45,8 @@ SIGN_INS = {  # other tools only sign the account in or out, exactly as neo asks
                ("auth", "list", "--filter=status:ACTIVE", "--format=value(account)")),
     "doppler": (("login", "--yes", "--no-check-version"),
                 ("logout", "--yes", "--no-check-version"),
-                ("me", "--no-check-version")),
+                ("me", "--no-check-version"),
+                ("configure", "get", "token", "--plain", "--no-check-version")),
 }
 PATH = "/usr/local/bin:/usr/bin:/bin"
 REFUSED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "BASH_ENV", "ENV", "IFS")

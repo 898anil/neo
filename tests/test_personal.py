@@ -384,6 +384,52 @@ class ToolsTest(Base):
         self.assertTrue(tokens.remove(AJAY, "sentry"))
         self.assertEqual(tokens.env_for(AJAY), {})
 
+    def test_claude_connector_status_distinguishes_absent_and_errors(self):
+        with patch.object(logins, "run", return_value=(0, "claude.ai Slack:\n  Status: ✔ Connected\n")):
+            self.assertEqual(logins.connector_status("neo-ajay", "slack"), "connected")
+        with patch.object(logins, "run", return_value=(1, 'No MCP server named "claude.ai Slack".')):
+            self.assertEqual(logins.connector_status("neo-ajay", "slack"), "missing")
+        with patch.object(logins, "run", return_value=(1, "network unavailable")):
+            self.assertEqual(logins.connector_status("neo-ajay", "slack"), "unknown")
+
+    def test_shared_sentry_token_only_when_person_has_none(self):
+        from cos import tokens
+        tokens.save(OWNER, "sentry", "owner_sentry_token")
+        meta = {"cwd": "/x", "slack_user": AJAY, "account": "neo-ajay"}
+        with patch.object(accounts, "_shared_doppler", return_value=""), \
+                patch.object(logins, "connector_status", return_value="missing"):
+            shared_spec = accounts.spec(meta, ["claude", "-p"], {}, {})
+            self.assertEqual(shared_spec["tokens"]["SENTRY_AUTH_TOKEN"], "owner_sentry_token")
+            self.assertIn("--mcp-config", shared_spec["argv"])
+            self.assertNotIn("owner_sentry_token", str(shared_spec["argv"]))
+            strict = accounts.spec(meta, ["claude", "-p", "--strict-mcp-config"], {}, {})
+            self.assertNotIn("--mcp-config", strict["argv"])
+            tokens.save(AJAY, "sentry", "personal_sentry_token")
+            self.assertEqual(accounts.spec(meta, ["claude"], {}, {})["tokens"]["SENTRY_AUTH_TOKEN"], "personal_sentry_token")
+            self.assertEqual(accounts.spec({**meta, "lend": False}, ["claude"], {}, {})["tokens"]["SENTRY_AUTH_TOKEN"], "personal_sentry_token")
+            self.assertEqual(accounts.spec({**meta, "lend": "claude"}, ["claude"], {}, {})["tokens"], {})
+
+    def test_personal_sentry_connector_prevents_shared_token(self):
+        from cos import tokens
+        tokens.save(OWNER, "sentry", "owner_sentry_token")
+        meta = {"cwd": "/x", "slack_user": AJAY, "account": "neo-ajay"}
+        with patch.object(accounts, "_shared_doppler", return_value=""), \
+                patch.object(logins, "connector_status", return_value="connected"):
+            result = accounts.spec(meta, ["claude", "-p"], {}, {})
+        self.assertNotIn("SENTRY_AUTH_TOKEN", result["tokens"])
+        self.assertNotIn("--mcp-config", result["argv"])
+
+    def test_doppler_fallback_respects_personal_login(self):
+        meta = {"cwd": "/x", "slack_user": AJAY, "account": "neo-ajay"}
+        with patch.object(logins, "signed_in", return_value=False), patch.object(logins, "doppler_token", return_value="owner_doppler_token"), \
+                patch.object(accounts, "_registry", return_value={OWNER: "neo-owner"}):
+            self.assertEqual(accounts.spec(meta, ["claude"], {}, {})["tokens"]["DOPPLER_TOKEN"], "owner_doppler_token")
+            self.assertNotIn("DOPPLER_TOKEN", accounts.spec({**meta, "lend": False}, ["claude"], {}, {})["tokens"])
+        with patch.object(accounts, "_registry", return_value={OWNER: "neo-owner"}), \
+                patch.object(logins, "signed_in", return_value=True), patch.object(logins, "doppler_token") as getter:
+            self.assertNotIn("DOPPLER_TOKEN", accounts.spec(meta, ["claude"], {}, {})["tokens"])
+            getter.assert_not_called()
+
     def test_neo_run_takes_only_tool_like_names(self):
         sys.path.insert(0, str(ROOT / "tests"))
         from test_accounts import load_script

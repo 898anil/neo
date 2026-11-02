@@ -196,12 +196,43 @@ def spec(meta: dict, argv: list[str], env: dict, files: dict) -> dict:
     shared = shared_logins(meta.get("role") or "full") if lend else {}
     if lend == "claude":
         shared = {"claude_token": shared.get("claude_token", ""), "gh_token": "", "openai_key": ""}
+    own_tokens = _own_tokens(meta) if lend != "claude" else {}
+    if lend is True and meta.get("account") and meta.get("role") != "blocked":
+        from . import people, tokens
+        owner_tokens = tokens.env_for(people.owner_id())
+        if owner_tokens.get("SENTRY_AUTH_TOKEN") and "SENTRY_AUTH_TOKEN" not in own_tokens:
+            from . import logins
+            if logins.connector_status(meta["account"], "sentry") in ("missing", "unavailable"):
+                own_tokens["SENTRY_AUTH_TOKEN"] = owner_tokens["SENTRY_AUTH_TOKEN"]
+        doppler = _shared_doppler(meta["account"])
+        if doppler:
+            own_tokens["DOPPLER_TOKEN"] = doppler
+    argv = list(argv)
+    if own_tokens.get("SENTRY_AUTH_TOKEN") and argv and os.path.basename(argv[0]) == "claude" and "-p" in argv and "--strict-mcp-config" not in argv:
+        # Claude expands this variable at runtime; the token never appears in argv or a config file.
+        skills = "?skills=inspect" if meta.get("role") in ("read-only", "prs-only") or meta.get("mode") == "readonly" else ""
+        config = {"mcpServers": {"neo_sentry": {"type": "http", "url": "https://mcp.sentry.dev/mcp" + skills,
+                  "headers": {"Authorization": "Sentry-Bearer ${SENTRY_AUTH_TOKEN}"}}}}
+        at = argv.index("--") if "--" in argv else len(argv)
+        argv[at:at] = ["--mcp-config", json.dumps(config)]
     return {"argv": argv, "cwd": meta["cwd"], "files": files,
             "env": {k: env[k] for k in (*ENV_FOR_RUNS, *extra) if env.get(k)},
             "shared": shared,
             # the person's own tool tokens (cos/tokens.py), never to a run answering someone else
-            "tokens": _own_tokens(meta) if lend != "claude" else {},
+            "tokens": own_tokens,
             "git_name": meta.get("git_name") or "", "git_email": meta.get("git_email") or ""}
+
+
+def _shared_doppler(account: str) -> str:
+    """Lend the owner's CLI token only if this account has no Doppler login."""
+    from . import logins, people
+    try:
+        owner = _registry().get(people.owner_id())
+        if not owner or account == owner or logins.signed_in(account, "doppler") is not False:
+            return ""
+        return logins.doppler_token(owner)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return ""
 
 
 def _own_tokens(meta: dict) -> dict:

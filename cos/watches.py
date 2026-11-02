@@ -34,9 +34,11 @@ MAX_INSTRUCTIONS = 4000
 # What a watch may use. Claude refuses every other tool (and every other shell command).
 READ_ONLY_TOOLS = [
     "Read", "Grep", "Glob", "ToolSearch",
-    "mcp__claude_ai_Sentry",
+    "mcp__claude_ai_Sentry", "mcp__neo_sentry",
     "Bash(gcloud logging read:*)", "Bash(gcloud logging logs list:*)", "Bash(gcloud projects list:*)",
     "Bash(gcloud config list:*)", "Bash(gcloud container clusters list:*)",
+    "Bash(doppler me:*)", "Bash(doppler projects list:*)", "Bash(doppler configs list:*)",
+    "Bash(doppler secrets get:*)",
     "Bash(kubectl get:*)", "Bash(kubectl describe:*)", "Bash(kubectl logs:*)", "Bash(kubectl top:*)",
     "Bash(kubectl config get-contexts:*)",
     "Bash(gh run list:*)", "Bash(gh run view:*)", "Bash(gh pr list:*)", "Bash(gh pr view:*)",

@@ -2,8 +2,9 @@
 
 A person pastes the token into a Slack form (a modal: what is typed there is never a message, so Slack
 keeps no copy in any conversation). neo keeps it in COS_HOME/tokens.json (0600, the service account's)
-and passes it only to that person's own runs, as the tool's usual environment variable, through
-neo-run's launch spec (accounts.spec). A CoS answering someone else never gets it.
+and passes it as the tool's usual environment variable through neo-run's launch spec (accounts.spec).
+The owner's token is also a fallback for regular runs without a personal Sentry connection. A CoS
+answering someone else never gets it.
 """
 
 from __future__ import annotations

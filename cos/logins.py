@@ -33,6 +33,8 @@ ARGV = {
     ("claude", "login"): ["claude", "auth", "login"],
     ("claude", "logout"): ["claude", "auth", "logout"],
     ("claude", "status"): ["claude", "auth", "status"],
+    ("claude", "mcp_slack"): ["claude", "mcp", "get", "claude.ai Slack"],
+    ("claude", "mcp_sentry"): ["claude", "mcp", "get", "claude.ai Sentry"],
     ("codex", "login"): ["codex", "login", "--device-auth"],
     ("codex", "logout"): ["codex", "logout"],
     ("codex", "status"): ["codex", "login", "status"],
@@ -45,6 +47,7 @@ ARGV = {
     ("doppler", "login"): ["doppler", "login", "--yes", "--no-check-version"],
     ("doppler", "logout"): ["doppler", "logout", "--yes", "--no-check-version"],
     ("doppler", "status"): ["doppler", "me", "--no-check-version"],
+    ("doppler", "token"): ["doppler", "configure", "get", "token", "--plain", "--no-check-version"],
 }
 DEVICE_CODE = {  # the one-time code a device sign-in shows, per tool
     "codex": re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b"),
@@ -195,6 +198,33 @@ def run(account: str, tool: str, action: str, timeout: float = 60) -> tuple[int,
             os.killpg(proc.pid, 9)
             out, _ = proc.communicate()
     return proc.returncode, _ANSI.sub("", out.decode(errors="replace"))
+
+
+def connector_status(account: str, connector: str) -> str:
+    """Check a Claude connector in this account; distinguish missing from an inconclusive check."""
+    if connector not in ("slack", "sentry"):
+        raise ValueError("unsupported connector")
+    try:
+        code, output = run(account, "claude", "mcp_" + connector, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if "No MCP server named" in output:
+        return "missing"
+    if re.search(r"Status:.*\bConnected\b", output, re.I):
+        return "connected"
+    if re.search(r"Status:.*(?:Needs authentication|Failed to connect|Disconnected)", output, re.I):
+        return "unavailable"
+    return "unknown"
+
+
+def doppler_token(account: str) -> str:
+    """Obtain the account's CLI token without writing it to logs or disk."""
+    try:
+        code, output = run(account, "doppler", "token", timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    lines = [line.strip() for line in output.splitlines() if line.strip() and not line.startswith("neo-run:")]
+    return lines[0] if code == 0 and len(lines) == 1 and re.fullmatch(r"[A-Za-z0-9_.-]+", lines[0]) else ""
 
 
 def signed_in(account: str, tool: str) -> Optional[bool]:

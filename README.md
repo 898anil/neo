@@ -92,6 +92,23 @@ a Claude RCA in its thread (repeats within 30 minutes are skipped; `NEO_AUTO_RCA
 The brief's time is `NEO_BRIEF_AT` (default 08:30, weekdays; `off` to disable); its instructions are in
 `prompts/brief.md`, and every agent's standing instructions in `prompts/slack-agent.md`.
 
+**Connect Slack for Claude.** In your own Claude account, open Customize (or Plugins) → Connectors,
+connect Slack, and sign in to the same Claude account in neo (`connect my claude`). Say `connect my slack`
+to neo for these instructions. Claude can then use the Slack connector within the permissions you authorize;
+neo checks the connector in your own account when you say `connect my slack`. Claude and workspace policies may restrict access. Codex and Claude
+can still read the Slack conversation where a task started via the bot. The Slack bot itself still needs its
+bot and Socket Mode tokens. Slack connector access may include DMs depending on the permissions granted.
+For personal access, use your own Claude account; a shared Claude login is not a personal Slack connection.
+Restricted neo roles may block the connector.
+
+**Doppler and Sentry access.** Each person's own Doppler login or Sentry token takes precedence. When they
+have none, neo can use the owner's Doppler login and the Sentry token the owner connects on neo's Home tab.
+The Sentry token enables the Sentry MCP server for Claude runs. A person's connected Claude Sentry connector
+takes precedence over the owner's token; if its status cannot be checked, neo does not guess. The shared
+Doppler token lets users access secrets allowed to the owner's account. Shared credentials are only passed to
+regular runs, not sign-ins or runs that explicitly refuse lending. Sentry's token needs the scopes required
+for the Sentry MCP tools. Neo does not currently wire the token-based Sentry MCP into Codex runs.
+
 **Voice notes.** Record a Slack voice clip in a DM to neo, in a thread neo is working in, or with
 `@neo` typed beside it. neo transcribes it on this machine, posts what it heard, runs it like a typed
 mention, and replies with text plus a spoken clip. Speech-to-text is mlx-whisper (`NEO_STT_MODEL`,

@@ -214,53 +214,55 @@ if __name__ == "__main__":
 
 
 class ConnectSlackTest(Base):
-    """"connect my slack": the person's own Slack, used only through neo-slack."""
+    """Slack connection instructions and the conversation-only bot reader."""
 
-    def setUp(self):
-        super().setUp()
-        self.slack_env = patch.dict(os.environ, {"SLACK_CLIENT_ID": "123.456", "SLACK_CLIENT_SECRET": "s3cret"})
-        self.slack_env.start()
+    def test_connection_guidance_uses_claude_connector(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock
+        client, say = AsyncMock(), AsyncMock()
+        with patch.object(app.accounts, "enabled", return_value=True), \
+                patch.object(app, "_account_of", AsyncMock(return_value="neo-ajay")), \
+                patch.object(app.logins, "connector_status", return_value="missing"):
+            asyncio.run(app._slack_sign_in(client, "C1", "1.0", AJAY, False, say))
+        self.assertEqual(client.chat_postMessage.await_count, 1)
+        message = str(client.chat_postMessage.await_args.kwargs["text"])
+        self.assertIn("Claude", message)
+        self.assertIn("Connectors", message)
+        self.assertNotIn("client id", message.lower())
 
-    def tearDown(self):
-        self.slack_env.stop()
-        super().tearDown()
+    def test_already_connected_does_not_send_setup_instructions(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock
+        client, say = AsyncMock(), AsyncMock()
+        with patch.object(app.accounts, "enabled", return_value=True), \
+                patch.object(app, "_account_of", AsyncMock(return_value="neo-ajay")), \
+                patch.object(app.logins, "connector_status", return_value="connected"):
+            asyncio.run(app._slack_sign_in(client, "D1", "1.0", AJAY, False, say))
+        self.assertIn("connected", say.await_args.args[0])
+        client.chat_postMessage.assert_not_awaited()
 
-    def state(self, user):
-        from cos import slackauth
-        from urllib.parse import parse_qs, urlparse
-        return parse_qs(urlparse(slackauth.authorize_url(user)).query)["state"][0]
-
-    def test_connects_once_and_only_as_the_person_the_link_was_for(self):
-        from cos import slackauth
-        ok = lambda code: {"ok": True, "authed_user": {"id": AJAY, "access_token": "xoxp-ajay"}}  # noqa: E731
-        state = self.state(AJAY)
-        self.assertEqual(slackauth.connect("c1", state, exchange=ok), AJAY)
-        self.assertEqual(slackauth.token(AJAY), "xoxp-ajay")
-        with self.assertRaises(ValueError):
-            slackauth.connect("c1", state, exchange=ok)  # once
-        with self.assertRaises(ValueError):  # someone else's Slack can't land on Ajay's neo
-            slackauth.connect("c2", self.state(AJAY), exchange=lambda c: {"ok": True, "authed_user": {"id": YOSH, "access_token": "x"}})
+    def test_disconnect_removes_old_token_and_points_to_claude(self):
+        import asyncio
+        import app
         from cos import tokens
-        self.assertNotIn("xoxp-ajay", str(tokens.env_for(AJAY)))  # never handed to runs as an env var
+        from unittest.mock import AsyncMock
+        tokens.STORE.update(lambda d: d.setdefault(AJAY, {}).update({"_slack": "xoxp-old"}))
+        say = AsyncMock()
+        asyncio.run(app._slack_sign_in(AsyncMock(), "D1", "1.0", AJAY, True, say))
+        self.assertNotIn("_slack", tokens.STORE.read()[AJAY])
+        self.assertIn("Claude", say.await_args.args[0])
 
-    def test_the_pasted_address_is_read_through_slack_formatting(self):
-        from cos import slackauth
-        url = "https://spark.example.ts.net:8443/slack/oauth?code=abc.123&amp;state=U1.99.n.sig"
-        self.assertEqual(slackauth.from_pasted(f"<{url}>"), ("abc.123", "U1.99.n.sig"))
-        self.assertEqual(slackauth.from_pasted("hello"), ("", ""))
-
-    def test_search_needs_their_own_slack_and_uses_it(self):
-        from cos import slackauth, slackread, tokens
+    def test_legacy_token_does_not_grant_search(self):
+        from cos import slackread, tokens
         run = Run.create("claude", "x", str(self.dir), "full", source="slack", extra={"slack_user": AJAY, "slack_channel": "C1"})
+        tokens.STORE.update(lambda d: d.setdefault(AJAY, {}).update({"_slack": "xoxp-old"}))
         h = self.handler()
-        h._slack_read(run.meta(), {"slack": "search", "query": "terms"})
-        self.assertIn("connect my slack", h.out[-1][1]["text"])
-        tokens.STORE.update(lambda d: d.setdefault(AJAY, {}).update({"_slack": "xoxp-ajay"}))
-        seen = []
-        with patch.object(slackread, "_api", side_effect=lambda m, token=None, **p: seen.append((m, token)) or
-                          {"ok": True, "messages": {"matches": []}}):
+        with patch.object(slackread, "_api") as api:
             h._slack_read(run.meta(), {"slack": "search", "query": "terms"})
-        self.assertEqual(seen[0], ("search.messages", "xoxp-ajay"))
+        api.assert_not_called()
+        self.assertIn("Claude", h.out[-1][1]["text"])
 
     def test_hints_say_what_to_do(self):
         import app
@@ -282,7 +284,12 @@ class ConnectSlackTest(Base):
         self.assertEqual(client.chat_postMessage.await_count, 1)
         text = client.chat_postMessage.await_args.kwargs["text"]
         self.assertIn("connect my github", text)
-        self.assertIn("connect my slack", text)
+
+    def test_home_tab_reports_verified_connector_status(self):
+        from cos import home_tab
+        text = str(home_tab.view("Ajay", {}, None, None, [], [], slack="connected"))
+        self.assertIn("connected in Claude", text)
+        self.assertNotIn("not connected", text.split("*Slack*")[1].split("action_id")[0])
 
     def test_home_tab_and_commands(self):
         import commands

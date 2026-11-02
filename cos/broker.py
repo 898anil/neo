@@ -235,10 +235,9 @@ def charter(user: Optional[str], may_ask: bool = True) -> str:
              "- Never act as anyone else, and never share secrets, credentials, mail, DMs or other people's information.",
              "- Resolve things yourself first: read the code, git history, PRs, CI, logs and your memory, and work it out."]
     if may_ask:
-        lines.append("- Slack, beyond the thread you were given: `neo-slack history [--channel #name] [--limit 200]` (latest "
-                     "messages, with file ids), `neo-slack thread <ts>`, `neo-slack search \"<query>\"`, and `neo-slack file "
-                     "<file id>` (saves it into the current folder). Without the person's own Slack connected it reads only "
-                     "the conversation this request came from; if you need more, tell them to say \"connect my slack\".")
+        lines.append("- Slack: use your own Claude Slack connector to search and read beyond the conversation. "
+                     "For the originating conversation, `neo-slack history`, `neo-slack thread <ts>`, and "
+                     "`neo-slack file <file id>` use the bot. If Slack access is missing, say connect my slack.")
         lines.append("- When you can't do something because a sign-in or access is missing, say exactly what the person can "
                      "do about it (e.g. \"say *connect my github* to neo\"), not just the error.")
         lines.append("- Only when you need knowledge or access that someone else has (their systems, their repos, a decision "
@@ -284,7 +283,7 @@ def guide() -> str:
         "- Connecting tools: they say it in plain words to neo, e.g. \"connect my claude\" (their own Claude account; "
         f"until then they use {owner_name()}'s shared one), \"connect my codex\", \"connect my github\", "
         "\"connect my google cloud\" (gcloud and kubectl), \"connect my doppler\", \"connect my slack\" (search and read "
-        "the channels they're in, through neo-slack). neo DMs them the sign-in link; for "
+        "using their Claude Slack connector). neo DMs Slack setup instructions; for "
         "Claude and Google Cloud they reply in that DM thread with the code the page shows. Sentry connects "
         "with a personal token through the Connect button on neo's Home tab (a private form). \"which tools am I "
         "connected to\" lists them. Do not tell anyone to run `claude /login`, `setup-token` or similar themselves.",

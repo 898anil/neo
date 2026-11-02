@@ -1,13 +1,11 @@
 #!/usr/bin/python3 -I
 """Read the Slack conversation this task came from (cos/slackread.py); installed as /usr/local/bin/neo-slack.
 
-    neo-slack history [--channel <#name or id>] [--limit 200] [--before <ts>]   latest messages, oldest first
-    neo-slack thread <ts> [--channel <#name or id>]                             one thread
-    neo-slack search "<query>"                                                  Slack search (their own Slack)
+    neo-slack history [--limit 200] [--before <ts>]   latest messages, oldest first
+    neo-slack thread <ts>                             one thread
     neo-slack file <file id> [<save as>]                                        save a file into the current folder
 
-Only inside a run neo started. With the person's own Slack connected ("connect my slack"), any channel they're
-in, and search; otherwise only the conversation the task came from.
+Only the conversation the task came from. For broader access use Claude's Slack connector.
 """
 
 import argparse

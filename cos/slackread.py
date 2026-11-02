@@ -1,9 +1,7 @@
 """Reading Slack for an agent: the channel (or DM) its request came from, with its threads and shared files.
 
-An agent runs `neo-slack` (deploy/linux/neo-slack) with its run's token, like neo-ask. When its person has
-connected their own Slack (cos/slackauth.py), it reads and searches with their token: whatever they can see.
-Otherwise it may read only the conversation the run was started from (the run's slack_channel), through neo's
-bot: its person asked there, so they can see it. app.py hands over the bot token at start.
+An agent runs `neo-slack` (deploy/linux/neo-slack) with its run's token. It reads only the
+conversation the run started from, through neo's bot. Broader access is through Claude's Slack connector.
 """
 
 from __future__ import annotations
@@ -98,7 +96,7 @@ def file(channel: Optional[str], file_id: str, token: Optional[str] = None) -> t
     shared = set(info.get("channels") or []) | set(info.get("groups") or []) | set(info.get("ims") or [])
     shared |= set(((info.get("shares") or {}).get("public") or {}).keys()) | set(((info.get("shares") or {}).get("private") or {}).keys())
     if not token and channel not in shared:
-        raise PermissionError("that file wasn't shared in this conversation (say \"connect my slack\" to let your neo open files you can see)")
+        raise PermissionError("that file wasn't shared in this conversation (say \"connect my slack\" for Claude connector instructions)")
     if int(info.get("size") or 0) > MAX_FILE_BYTES:
         raise ValueError("that file is over 20 MB")
     url = info.get("url_private_download") or info.get("url_private")
