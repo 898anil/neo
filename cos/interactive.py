@@ -324,19 +324,32 @@ class InteractiveRun:
         except HerdrError as exc:
             if exc.code not in ("agent_not_ready", "timeout"):
                 raise
-            proc = herdr._run(["pane", "read", pane, "--source", "visible", "--lines", "40"], timeout=10)
-            if not re.search(r"trust (this|the files in this) (folder|project|workspace)|project you trust", proc.stdout, re.I):
+            # One-time CLI screens that stop an unattended start. Each is answered only when the screen
+            # shows it, and only by moving to the named option and confirming once that option is selected.
+            screens = (
+                # "do you trust this folder?": an allowed user asked to run an agent here. Default is "No, exit".
+                (r"trust (this|the files in this) (folder|project|workspace)|project you trust", r"❯\s*(?:\d\.\s*)?Yes,? I trust"),
+                # Claude Code's "Try the new fullscreen renderer?" notice: keep the classic renderer neo reads.
+                (r"fullscreen renderer", r"❯\s*\d\.\s*Not now"),
+            )
+            answered = False
+            for _ in range(len(screens)):
+                visible = herdr._run(["pane", "read", pane, "--source", "visible", "--lines", "40"], timeout=10).stdout
+                match = next((option for question, option in screens if re.search(question, visible, re.I)), None)
+                if match is None:
+                    break
+                guard()
+                herdr._run(["pane", "send-keys", pane, "down"], timeout=15)
+                time.sleep(0.5)
+                screen = herdr._run(["pane", "read", pane, "--source", "visible", "--lines", "40"], timeout=10).stdout
+                if not re.search(match, screen):
+                    raise
+                guard()
+                herdr._run(["pane", "send-keys", pane, "enter"], timeout=15)
+                answered = True
+                time.sleep(1.5)
+            if not answered:
                 raise
-            # The highlighted default is "No, exit": move to "Yes, I trust this folder" first, and
-            # confirm only when the screen shows that option selected.
-            guard()
-            herdr._run(["pane", "send-keys", pane, "down"], timeout=15)
-            time.sleep(0.5)
-            screen = herdr._run(["pane", "read", pane, "--source", "visible", "--lines", "40"], timeout=10).stdout
-            if not re.search(r"❯\s*Yes,? I trust", screen):
-                raise
-            guard()
-            herdr._run(["pane", "send-keys", pane, "enter"], timeout=15)
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 try:
