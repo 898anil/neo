@@ -495,10 +495,23 @@ def sync_system(rows: list[dict]) -> None:
             _write("findings.json", store)
 
 
-def open_findings() -> list[dict]:
+def watch_owner(watch_id: str) -> Optional[str]:
+    """Whose a watch (and so its findings) is: a person's Slack id, or None for the owner's (and system ones)."""
+    watch = next((w for w in load() if w["id"] == watch_id), None)
+    return (watch or {}).get("owner")
+
+
+def finding_owner(f: dict) -> Optional[str]:
+    return watch_owner(f.get("watch_id") or "")
+
+
+def open_findings(viewer: Optional[str] = "*") -> list[dict]:
+    """viewer: whose dashboard (cos/fleet.owns); "*" is everyone's."""
+    from .fleet import owns
+
     system_watches.listing()  # cached; brings system watch breaches into the store
     rank = {s: i for i, s in enumerate(SEVERITIES)}
-    rows = [f for f in _findings().values() if f["status"] in OPEN]
+    rows = [f for f in _findings().values() if f["status"] in OPEN and owns(viewer, finding_owner(f))]
     rows.sort(key=lambda f: f["last_seen"], reverse=True)
     rows.sort(key=lambda f: (f["status"] != "new", rank.get(f["severity"], 1)))
     return [view(f) for f in rows]
@@ -551,12 +564,16 @@ def task_prompt(f: dict) -> str:
     ]))
 
 
-def listing() -> dict:
-    """Everything the Watches screen shows."""
+def listing(viewer: Optional[str] = "*") -> dict:
+    """Everything the Watches screen shows, for one viewer (cos/fleet.owns): their own watches and findings.
+    System watches are about the machine, so only the owner sees them."""
+    from .fleet import owns
+    from .people import is_owner
+
     recent = {m["id"]: m for m in list_runs(300) if m.get("kind") == "watch"}
     store = _findings()
     rows = []
-    for w in load():
+    for w in (w for w in load() if owns(viewer, w.get("owner"))):
         last = recent.get(w.get("last_run_id") or "")
         rows.append({
             **w,
@@ -564,4 +581,6 @@ def listing() -> dict:
             "open": sum(1 for f in store.values() if f["watch_id"] == w["id"] and f["status"] in OPEN),
             "last_run": {k: last.get(k) for k in ("id", "status", "created_at", "watch_summary", "watch_found", "watch_new", "cost_usd")} if last else None,
         })
-    return {"watches": rows, "findings": open_findings(), "templates": templates(), "system": system_watches.listing()}
+    machine = viewer == "*" or is_owner(viewer)
+    return {"watches": rows, "findings": open_findings(viewer), "templates": templates(),
+            "system": system_watches.listing() if machine else []}

@@ -115,14 +115,21 @@ class PersonViewTest(Base):
         cookie = dashlink.session_value(AJAY)
         h = self.handler("/", cookie=cookie)
         h.do_GET()
-        self.assertEqual(h.out[-1], (200, "me.html"))
+        self.assertEqual(h.out[-1], (200, "index.html"))  # the same dashboard as the owner's, with their own things
         h = self.handler("/api/me", cookie=cookie)
         h.do_GET()
         self.assertEqual([r["id"] for r in h.out[-1][1]["runs"]], [mine.id])
         h = self.handler(f"/api/me/runs/{theirs.id}", cookie=cookie)
         h.do_GET()
         self.assertEqual(h.out[-1][0], 404)
-        for path in ("/api/overview", "/api/home", f"/api/runs/{theirs.id}", "/api/watches"):
+        h = self.handler(f"/api/runs/{theirs.id}", cookie=cookie)
+        h.do_GET()
+        self.assertEqual(h.out[-1][0], 404)  # someone else's run doesn't exist for them
+        with patch("cos.fleet.agents", return_value=[]):
+            h = self.handler("/api/overview", cookie=cookie)
+            h.do_GET()
+        self.assertEqual([r["id"] for r in h.out[-1][1]["runs"]], [mine.id])
+        for path in ("/api/memory", "/api/usage", "/api/work", "/api/sessions"):  # the owner's extras
             h = self.handler(path, cookie=cookie)
             h.do_GET()
             self.assertEqual(h.out[-1][0], 403, path)
@@ -175,9 +182,11 @@ class PersonViewTest(Base):
             h = self.handler("/api/me/runs", method="POST", cookie=dashlink.session_value(AJAY), body=body)
             h.do_POST()
             self.assertEqual(h.out[-1][0], 201)
-            h = self.handler("/api/runs", method="POST", cookie=dashlink.session_value(AJAY), body=body)
+            h = self.handler("/api/runs", method="POST", cookie=dashlink.session_value(AJAY),
+                             body=json.dumps({"prompt": "fix it", "cwd": "/home/neo", "mode": "full"}).encode())
             h.do_POST()
-            self.assertEqual(h.out[-1][0], 403)  # the owner's run endpoint isn't theirs
+            self.assertEqual(h.out[-1][0], 201)  # the dashboard's + button: still their account, whatever it asks for
+        self.assertEqual({m["account"] for m in started}, {"neo-ajay"})
         meta = started[0]
         self.assertEqual((meta["account"], meta["slack_user"], meta["source"]), ("neo-ajay", AJAY, "dashboard"))
         self.assertIn("Ajay", meta["system_prompt"] + me._name(AJAY))

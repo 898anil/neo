@@ -129,6 +129,35 @@ PROMPT_CHARS = 300
 GZIP_MIN_BYTES = 1024
 
 
+def person_run(meta: dict) -> dict:
+    """One of a person's own runs as their dashboard gets it: without neo's instructions and CLI arguments,
+    and, for a run where their neo answered or worked for someone else, without that person's words
+    (cos/me.py does the same): their neo's answer is what is theirs."""
+    row = {k: v for k, v in meta.items() if k not in RUN_HEAVY_KEYS}
+    if str(row.get("kind") or "").startswith("a2a"):
+        row["prompt"] = row.get("title") or ""
+    return row
+
+
+HIDDEN_EVENT = json.dumps({"kind": "debug", "title": "", "body": ""})
+
+
+def hidden_from_person(meta: dict, event: dict) -> bool:
+    """A step a person's dashboard leaves out: another person's words and raw tool output in a run where
+    their neo answered or worked for someone else (as cos/me.py does)."""
+    return str(meta.get("kind") or "").startswith("a2a") and event.get("kind") in ("prompt", "tool_result")
+
+
+def viewer_info(viewer: str | None) -> dict:
+    """Who the dashboard is for, so the page shows the owner's extras (live agents, PRs, memory) only to them."""
+    from . import me
+    from .config import owner_name
+    from .people import is_owner, role
+
+    owner = is_owner(viewer)
+    return {"owner": owner, "name": owner_name() if owner else me._name(viewer), "role": role(viewer)}
+
+
 def board_run(meta: dict) -> dict:
     """A run as the overview lists it: no CLI arguments, prompt cut to its first lines."""
     row = {k: v for k, v in meta.items() if k not in RUN_HEAVY_KEYS}
@@ -537,28 +566,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(LOGIN_PAGE)
                 return
             return self._error(HTTPStatus.FORBIDDEN, "not allowed: use localhost, an allowed Tailscale login, or COS_TOKEN")
-        if not parts:
-            return self._static("index.html", "text/html; charset=utf-8")
-        if parts == ["api", "overview"]:
-            # Each agent and task carries needs / result (home.annotate), so its row can say Idle, Partly done, Needs you.
-            # The owner's own runs only: teammates' are on their own pages (/api/me).
-            data = home.annotate(fleet.overview(owner_only=True), cards.STORE.read(), fleet.seen.get)
-            return self._json({**board_overview(data), "default_engine": default_engine(), "notifications": pause.state(),
-                               "findings": [board_finding(f) for f in watches.open_findings()]})
-        if parts == ["api", "home"]:
-            raw = (parse_qs(urlparse(self.path).query).get("since") or [""])[0]
-            try:
-                since = float(raw) if raw else None
-            except ValueError:
-                return self._error(HTTPStatus.BAD_REQUEST, "since must be a number")
-            return self._json(board_home(home.home(since, owner_only=True)))
-        if parts == ["api", "watches"]:
-            return self._json(watches.listing())
-        if parts == ["api", "settings"]:
-            return self._json({"default_engine": default_engine(), "notifications": pause.state()})
-        if len(parts) == 3 and parts[:2] == ["api", "findings"]:
-            found = watches.get_finding(parts[2])
-            return self._json(watches.view(found)) if found else self._error(HTTPStatus.NOT_FOUND, "no such finding")
+        if self._scoped_get(None, parts):
+            return
         if parts == ["api", "sessions"]:
             q = (parse_qs(urlparse(self.path).query).get("q") or [""])[0][:200]
             if q.strip():
@@ -601,23 +610,105 @@ class Handler(BaseHTTPRequestHandler):
             except HerdrError as exc:
                 status = HTTPStatus.NOT_FOUND if exc.code == "agent_not_found" else HTTPStatus.BAD_GATEWAY
                 return self._error(status, str(exc))
-        if parts == ["api", "digest"]:
-            key = (parse_qs(urlparse(self.path).query).get("key") or [""])[0]
-            if not digest.valid_key(key):
-                return self._error(HTTPStatus.BAD_REQUEST, "bad key")
-            return self._json(digest.status(key, fleet.overview()))
-        if parts == ["api", "runs"]:
-            runs = [fresh_meta(Run(m["id"])) for m in fleet.owners(list_runs())]
-            return self._json({"runs": runs})
-        if len(parts) >= 3 and parts[:2] == ["api", "runs"]:
-            run = self._run_or_404(parts[2])
-            if not run:
-                return
-            if len(parts) == 3:
-                return self._json({**fresh_meta(run), "card": cards.get(f"run:{run.id}")})
-            if parts[3] == "stream":
-                return self._stream(run)
         self._error(HTTPStatus.NOT_FOUND, "not found")
+
+    # ----------------------------------------------------------------- everyone's own dashboard
+    # Every person gets the same dashboard, as if they had their own neo: each endpoint below shows only
+    # what the viewer owns (fleet.owns). viewer None is the owner; a Slack id is that person, signed in
+    # from Slack. Anything not here (live agents, mentions, PRs, memory, usage, sessions) is the owner's.
+
+    def _scoped_get(self, viewer: str | None, parts: list) -> bool:
+        from .people import is_owner
+
+        owner = is_owner(viewer)
+        if not parts:
+            self._static("index.html", "text/html; charset=utf-8")
+        elif parts == ["api", "overview"]:
+            # Each agent and task carries needs / result (home.annotate), so its row can say Idle, Partly done, Needs you.
+            data = home.annotate(fleet.overview(viewer), cards.STORE.read(), fleet.seen.get)
+            if not owner:
+                data = {**data, "runs": [person_run(r) for r in data["runs"]], "tasks": [person_run(r) for r in data["tasks"]]}
+            self._json({**board_overview(data), **self._settings_for(viewer), "viewer": viewer_info(viewer),
+                        "findings": [board_finding(f) for f in watches.open_findings(viewer)]})
+        elif parts == ["api", "home"]:
+            raw = (parse_qs(urlparse(self.path).query).get("since") or [""])[0]
+            try:
+                since = float(raw) if raw else None
+            except ValueError:
+                self._error(HTTPStatus.BAD_REQUEST, "since must be a number")
+                return True
+            self._json(board_home(home.home(since, viewer)))
+        elif parts == ["api", "watches"]:
+            self._json(watches.listing(viewer))
+        elif parts == ["api", "settings"]:
+            self._json(self._settings_for(viewer))
+        elif len(parts) == 3 and parts[:2] == ["api", "findings"]:
+            found = watches.get_finding(parts[2])
+            if found and fleet.owns(viewer, watches.finding_owner(found)):
+                self._json(watches.view(found))
+            else:
+                self._error(HTTPStatus.NOT_FOUND, "no such finding")
+        elif parts == ["api", "digest"]:
+            key = (parse_qs(urlparse(self.path).query).get("key") or [""])[0]
+            if not digest.valid_key(key) or not self._key_is_mine(viewer, key):
+                self._error(HTTPStatus.BAD_REQUEST, "bad key")
+            else:
+                self._json(digest.status(key, fleet.overview(viewer)))
+        elif parts == ["api", "runs"]:
+            runs = [fresh_meta(Run(m["id"])) for m in fleet.mine(list_runs(), viewer)]
+            self._json({"runs": runs if owner else [person_run(r) for r in runs]})
+        elif len(parts) in (3, 4) and parts[:2] == ["api", "runs"] and (len(parts) == 3 or parts[3] == "stream"):
+            run = self._viewers_run(viewer, parts[2])
+            if not run:
+                return True
+            if len(parts) == 4:
+                self._stream(run, person=not owner)
+            else:
+                meta = fresh_meta(run)
+                self._json({**(meta if owner else person_run(meta)), "card": cards.get(f"run:{run.id}")})
+        else:
+            return False
+        return True
+
+    def _settings_for(self, viewer: str | None) -> dict:
+        """The default engine is each person's own; pausing notifications is the owner's (their channel)."""
+        from .people import is_owner, load
+
+        if is_owner(viewer):
+            return {"default_engine": default_engine(), "notifications": pause.state()}
+        return {"default_engine": load(viewer).get("engine") or default_engine(), "notifications": None}
+
+    def _viewers_run(self, viewer: str | None, run_id: str) -> Run | None:
+        """The run, if the viewer may open it: a person only their own (anything else is "not found", so
+        they can't tell it exists); the owner any, so a link someone sends them still opens."""
+        from .people import is_owner
+
+        run = self._run_or_404(run_id)
+        if not run or is_owner(viewer):
+            return run
+        try:
+            mine = run.meta().get("slack_user") == viewer
+        except (OSError, ValueError):
+            mine = False
+        if not mine:
+            self._error(HTTPStatus.NOT_FOUND, "run not found")
+            return None
+        return run
+
+    @staticmethod
+    def _key_is_mine(viewer: str | None, key: str) -> bool:
+        """A card or digest key (run:<id>, or a live agent's) the viewer owns. Live agents are the owner's."""
+        from .people import is_owner
+
+        if key.startswith("run:"):
+            run_id = key[4:]
+            if not valid_run_id(run_id):
+                return False
+            try:
+                return fleet.owns(viewer, Run(run_id).meta().get("slack_user"))
+            except (OSError, ValueError):
+                return False
+        return is_owner(viewer)
 
     def _a2a_ask(self):
         """neo-ask: one CoS asks another (cos/broker.py). Its own auth: the asking run's token, from the
@@ -716,13 +807,75 @@ class Handler(BaseHTTPRequestHandler):
     def _person_get(self, user: str, parts: list):
         from . import me
 
-        if not parts:
-            return self._static("me.html", "text/html; charset=utf-8")
+        if self._scoped_get(user, parts):
+            return
         if parts == ["api", "me"]:
             return self._json(me.overview(user))
         if len(parts) == 4 and parts[:3] == ["api", "me", "runs"]:
             found = me.run_detail(user, parts[3])
             return self._json(found) if found else self._error(HTTPStatus.NOT_FOUND, "not found")
+        return self._error(HTTPStatus.FORBIDDEN, "not on your dashboard")
+
+    def _person_post(self, user: str, parts: list, body: dict):
+        """What a person may change on their own dashboard: their tasks, their watches and findings, their
+        settings. Tasks start in their own account with their role (me.start), whatever the request says."""
+        from . import me, people
+
+        if parts in (["api", "runs"], ["api", "me", "runs"], ["api", "ask"]):
+            try:
+                me.check_rate(user)
+                run = me.start(user, str(body.get("prompt") or body.get("question") or ""), str(body.get("engine") or "") or None)
+            except (ValueError, PermissionError) as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            start_turn(run, None)
+            found = watches.get_finding(str(body.get("finding") or ""))
+            if found and watches.finding_owner(found) == user:
+                self._mark_finding(body, {"run_id": run.id})
+            return self._json({**person_run(run.meta()), "run_id": run.id}, HTTPStatus.CREATED)
+        if len(parts) == 4 and parts[:2] == ["api", "runs"]:
+            run = self._viewers_run(user, parts[2])
+            if not run:
+                return
+            return self._run_action(run, parts[3], body)
+        if parts == ["api", "home", "seen"]:
+            home.mark_seen(user)
+            return self._json({"ok": True})
+        if parts == ["api", "home", "close"]:
+            key = str(body.get("key") or "")
+            if not self._key_is_mine(user, key):
+                return self._error(HTTPStatus.NOT_FOUND, "not on your dashboard")
+            return self._json(home.close_waiting(key))
+        if parts == ["api", "digest", "refresh"]:
+            key = str(body.get("key") or "")
+            if not digest.valid_key(key) or not self._key_is_mine(user, key):
+                return self._error(HTTPStatus.BAD_REQUEST, "bad key")
+            return self._json(digest.refresh(key, fleet.overview(user)), HTTPStatus.ACCEPTED)
+        if parts == ["api", "watches"]:
+            if body.get("id") and watches.watch_owner(str(body["id"])) != user:
+                return self._error(HTTPStatus.NOT_FOUND, "no such watch")
+            try:
+                return self._json(watches.save({**body, "owner": user}), HTTPStatus.CREATED)
+            except ValueError as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        if len(parts) == 4 and parts[:2] == ["api", "watches"] and parts[3] in ("run", "delete"):
+            if not watches.get(parts[2]) or watches.watch_owner(parts[2]) != user:
+                return self._error(HTTPStatus.NOT_FOUND, "no such watch")
+            if parts[3] == "delete":
+                watches.delete(parts[2])
+                return self._json({"ok": True})
+            return self._json(watches.start(parts[2], "dashboard"), HTTPStatus.ACCEPTED)
+        if len(parts) == 4 and parts[:2] == ["api", "findings"] and parts[3] in ("dismiss", "reopen"):
+            found = watches.get_finding(parts[2])
+            if not found or watches.finding_owner(found) != user:
+                return self._error(HTTPStatus.NOT_FOUND, "no such finding")
+            return self._json(watches.set_status(parts[2], "dismissed" if parts[3] == "dismiss" else "new"))
+        if parts == ["api", "settings"]:
+            engine = body.get("default_engine")
+            if engine is not None:
+                if engine not in ENGINES:
+                    return self._error(HTTPStatus.BAD_REQUEST, f"default_engine must be one of {', '.join(ENGINES)}")
+                people.save(user, user, engine=engine)
+            return self._json(self._settings_for(user))
         return self._error(HTTPStatus.FORBIDDEN, "not on your dashboard")
 
     def _slack_read(self, meta: dict, body: dict):
@@ -771,17 +924,7 @@ class Handler(BaseHTTPRequestHandler):
         if person:
             if not self._same_origin_json():
                 return self._error(HTTPStatus.FORBIDDEN, "cross-origin or non-JSON request refused")
-            if self._route() != ["api", "me", "runs"]:
-                return self._error(HTTPStatus.FORBIDDEN, "not on your dashboard")
-            from . import me
-            body = self._read_json() or {}
-            try:
-                me.check_rate(person)
-                run = me.start(person, str(body.get("prompt") or ""), str(body.get("engine") or "") or None)
-            except (ValueError, PermissionError) as exc:
-                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
-            start_turn(run, None)
-            return self._json({"run_id": run.id}, HTTPStatus.CREATED)
+            return self._person_post(person, self._route(), self._read_json() or {})
         if not self._authorized():
             return self._error(HTTPStatus.FORBIDDEN, "not allowed: use localhost, an allowed Tailscale login, or COS_TOKEN")
         if not self._same_origin_json():
@@ -1016,36 +1159,41 @@ class Handler(BaseHTTPRequestHandler):
             run = self._run_or_404(parts[2])
             if not run:
                 return
-            meta = fresh_meta(run)
-            if parts[3] == "seen":
-                fleet.mark_run_seen(run.id)
-                return self._json({"ok": True})
-            if parts[3] == "rename":
-                try:
-                    title = fleet.clean_title((body or {}).get("title", ""))
-                except ValueError as exc:
-                    return self._error(HTTPStatus.BAD_REQUEST, str(exc))
-                if not title:
-                    return self._error(HTTPStatus.BAD_REQUEST, "title is required")
-                run.update_meta(title=title)
-                return self._json({"ok": True})
-            if meta.get("runtime", "headless") != "headless":
-                return self._error(HTTPStatus.CONFLICT, "live runs are controlled from Slack or `herdr session attach`")
-            if parts[3] == "cancel":
-                if meta["status"] != "running":
-                    return self._error(HTTPStatus.CONFLICT, "run is not running")
-                run.cancel()
-                return self._json({"ok": True})
-            if parts[3] == "message":
-                prompt = str((body or {}).get("prompt", "")).strip()
-                if not prompt:
-                    return self._error(HTTPStatus.BAD_REQUEST, "prompt is required")
-                if meta["status"] == "running":
-                    return self._error(HTTPStatus.CONFLICT, "wait for the current turn to finish")
-                if not meta.get("session_id"):
-                    return self._error(HTTPStatus.CONFLICT, "no session to continue")
-                start_turn(run, prompt)
-                return self._json({"ok": True}, HTTPStatus.ACCEPTED)
+            return self._run_action(run, parts[3], body)
+        self._error(HTTPStatus.NOT_FOUND, "not found")
+
+    def _run_action(self, run: Run, action: str, body: dict | None):
+        """Seen, rename, cancel or a follow-up message on one run (the caller checked whose it is)."""
+        meta = fresh_meta(run)
+        if action == "seen":
+            fleet.mark_run_seen(run.id)
+            return self._json({"ok": True})
+        if action == "rename":
+            try:
+                title = fleet.clean_title((body or {}).get("title", ""))
+            except ValueError as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            if not title:
+                return self._error(HTTPStatus.BAD_REQUEST, "title is required")
+            run.update_meta(title=title)
+            return self._json({"ok": True})
+        if meta.get("runtime", "headless") != "headless":
+            return self._error(HTTPStatus.CONFLICT, "live runs are controlled from Slack or `herdr session attach`")
+        if action == "cancel":
+            if meta["status"] != "running":
+                return self._error(HTTPStatus.CONFLICT, "run is not running")
+            run.cancel()
+            return self._json({"ok": True})
+        if action == "message":
+            prompt = str((body or {}).get("prompt", "")).strip()
+            if not prompt:
+                return self._error(HTTPStatus.BAD_REQUEST, "prompt is required")
+            if meta["status"] == "running":
+                return self._error(HTTPStatus.CONFLICT, "wait for the current turn to finish")
+            if not meta.get("session_id"):
+                return self._error(HTTPStatus.CONFLICT, "no session to continue")
+            start_turn(run, prompt)
+            return self._json({"ok": True}, HTTPStatus.ACCEPTED)
         self._error(HTTPStatus.NOT_FOUND, "not found")
 
     @staticmethod
@@ -1057,7 +1205,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ----------------------------------------------------------------- stream
 
-    def _stream(self, run: Run):
+    def _stream(self, run: Run, person: bool = False):
+        """person: a teammate's own dashboard, which gets their run without neo's instructions or another
+        person's words (person_run, hidden_from_person); event numbering stays the same either way."""
         fleet.mark_run_seen(run.id)  # you opened it: it no longer needs reading on the board
         query = parse_qs(urlparse(self.path).query)
         try:
@@ -1080,7 +1230,10 @@ class Handler(BaseHTTPRequestHandler):
                     line = fh.readline()
                     if line.endswith("\n"):
                         if seq >= start:
-                            self.wfile.write(f"event: timeline\ndata: {line.strip()}\n\n".encode())
+                            # a hidden step still takes its place (as an ignored "debug" event): the page
+                            # resumes from the number of events it has, so numbering must not shift
+                            data = HIDDEN_EVENT if person and self._hidden_line(run, line) else line.strip()
+                            self.wfile.write(f"event: timeline\ndata: {data}\n\n".encode())
                             self.wfile.flush()
                         seq += 1
                         continue
@@ -1089,7 +1242,8 @@ class Handler(BaseHTTPRequestHandler):
                     meta = fresh_meta(run)
                     snapshot = (meta["status"], meta.get("session_id"), meta.get("cost_usd"), meta.get("turns"))
                     if snapshot != last_meta:
-                        self.wfile.write(f"event: meta\ndata: {json.dumps(meta)}\n\n".encode())
+                        shown = person_run(meta) if person else meta
+                        self.wfile.write(f"event: meta\ndata: {json.dumps(shown)}\n\n".encode())
                         self.wfile.flush()
                         last_meta = snapshot
                     if time.monotonic() - last_beat > HEARTBEAT_SECONDS:
@@ -1099,6 +1253,13 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(POLL_SECONDS)
         except (BrokenPipeError, ConnectionResetError):
             return
+
+    @staticmethod
+    def _hidden_line(run: Run, line: str) -> bool:
+        try:
+            return hidden_from_person(run.meta(), json.loads(line))
+        except (OSError, ValueError):
+            return True  # unreadable: leave it out of someone's view rather than guess
 
     def _static(self, name: str, content_type: str):
         body = (STATIC / name).read_bytes()

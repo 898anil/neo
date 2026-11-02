@@ -362,20 +362,30 @@ def build(overview: dict, loops_rows: list[dict], cards_by_key: dict, since: flo
     }
 
 
-def home(since: Optional[float] = None, owner_only: bool = False) -> dict:
+def home(since: Optional[float] = None, viewer: Optional[str] = fleet.EVERYONE) -> dict:
     """since: the dashboard pins the start of a visit, so "moved" doesn't empty while you read it.
-    owner_only: the owner's web dashboard, without teammates' runs (fleet.owners)."""
+    viewer: whose home this is (fleet.owns). Follow-ups and mentions are the owner's for now, so a
+    teammate's home has their own tasks only."""
     from . import cards, loops, mentions
+    from .people import is_owner
 
     from .runner import list_runs
 
-    overview = fleet.overview(owner_only=owner_only)
-    since = fleet.seen.get("home") if since is None else since
-    rows, runs = loops.listing(), list_runs(500)
-    if owner_only:
-        runs = fleet.owners(runs)
+    owner = viewer == fleet.EVERYONE or is_owner(viewer)
+    overview = fleet.overview(viewer)
+    since = fleet.seen.get(seen_key(viewer)) if since is None else since
+    rows = loops.listing() if owner else []
+    runs = fleet.mine(list_runs(500), viewer)
     return build(overview, rows, cards.STORE.read(), since=since, now=time.time(), seen=fleet.seen.get,
-                 mentions=mentions.open_items(), traces={**thread_runs(runs=runs), **loop_traces(rows, overview, runs)})
+                 mentions=mentions.open_items() if owner else [],
+                 traces={**thread_runs(runs=runs), **loop_traces(rows, overview, runs)})
+
+
+def seen_key(viewer: Optional[str]) -> str:
+    """When this viewer last looked at their home: the owner's is "home", as before people had their own."""
+    from .people import is_owner
+
+    return "home" if viewer == fleet.EVERYONE or is_owner(viewer) else f"home:{viewer}"
 
 
 def waiting_key(key: str) -> str:
@@ -391,5 +401,5 @@ def close_waiting(key: str) -> dict:
     return {"ok": True}
 
 
-def mark_seen() -> None:
-    fleet.seen.mark({"home": time.time()})
+def mark_seen(viewer: Optional[str] = None) -> None:
+    fleet.seen.mark({seen_key(viewer): time.time()})

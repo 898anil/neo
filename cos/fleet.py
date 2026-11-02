@@ -352,19 +352,32 @@ def agents() -> list[dict]:
     return agents_checked()[0]
 
 
-def owners(runs: list[dict]) -> list[dict]:
-    """The owner's runs only: their Slack and dashboard runs, and the ones nobody started (scheduled jobs,
-    watches, the owner's neo answering others). Teammates see theirs on their own page."""
+EVERYONE = "*"  # a viewer that sees every person's runs: Slack jobs that are about the whole machine
+
+
+def owns(viewer: Optional[str], user: Optional[str]) -> bool:
+    """Whether something that belongs to `user` (a Slack id; None = the owner's, e.g. a scheduled job) is the
+    viewer's. viewer None is the owner, a Slack id is that person, EVERYONE sees everything."""
     from .people import is_owner
 
-    return [m for m in runs if is_owner(m.get("slack_user"))]
+    if viewer == EVERYONE:
+        return True
+    return is_owner(user) if viewer is None or is_owner(viewer) else user == viewer
 
 
-def overview(owner_only: bool = False) -> dict:
-    """owner_only: the owner's web dashboard, which leaves out teammates' runs."""
-    rows = agents()
-    listed = list_runs(60, include_running=True)
-    runs = [{**m, "title": run_title(m)} for m in (owners(listed) if owner_only else listed)
+def mine(runs: list[dict], viewer: Optional[str]) -> list[dict]:
+    """The viewer's runs: each person's neo shows only what that person started (or, for the owner, also
+    what nobody started: scheduled jobs, watches, the owner's neo answering others)."""
+    return [m for m in runs if owns(viewer, m.get("slack_user"))]
+
+
+def overview(viewer: Optional[str] = EVERYONE) -> dict:
+    """viewer: whose dashboard this is (see owns()). Live agents run in the owner's account, so only the
+    owner (or EVERYONE) sees them."""
+    from .people import is_owner
+
+    rows = agents() if viewer == EVERYONE or is_owner(viewer) else []
+    runs = [{**m, "title": run_title(m)} for m in mine(list_runs(60, include_running=True), viewer)
             if m.get("runtime", "headless") == "headless" or m.get("status") != "closed"]
     counts = {}
     for row in rows:

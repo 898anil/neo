@@ -721,11 +721,19 @@ function md(text) {
 
 // ------------------------------------------------------------------ state
 let overview = null, timer = null, stream = null, lastRoute = "";
+// Everyone has their own dashboard; the owner's also has the machine's extras (PRs, memory, usage, live agents).
+const isOwner = () => !(overview && overview.viewer && overview.viewer.owner === false);
+function applyViewer() {
+  const owner = isOwner();
+  document.querySelectorAll('.tab[data-tab="work"], .tab[data-tab="memory"]').forEach((t) => { t.style.display = owner ? "" : "none"; });
+  if (!owner && (currentTab() === "work" || currentTab() === "memory")) location.hash = "#/";
+}
 function stopWork() { clearTimeout(timer); timer = null; if (stream) { stream.close(); stream = null; } }
 function schedule(fn, ms) { clearTimeout(timer); timer = setTimeout(fn, document.hidden ? Math.max(ms, 15000) : ms); }
 
 let workData = null, usageData = null, usageAt = 0;
 async function loadUsage() {
+  if (!isOwner()) return null; // the machine's spend and limits are the owner's
   if (Date.now() - usageAt < 30000) return usageData;
   usageAt = Date.now();
   try { usageData = await api("/api/usage"); } catch { /* keep the last one */ }
@@ -837,6 +845,7 @@ async function loadOverview() {
   const o = await api("/api/overview");
   if (o !== overview) save("overview", o);
   overview = o;
+  applyViewer();
   const n = board(overview).needs.length;
   const badge = document.getElementById("needs-count");
   badge.hidden = !n; badge.textContent = n;
@@ -1367,7 +1376,7 @@ function renderHome(o) {
   const decideHot = decideN > 0;
   const page = h("div", { class: "wrap" },
     h("header", { class: "hero" },
-      h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host, themeButton(),
+      h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.viewer && !o.viewer.owner ? `${o.viewer.name}'s neo` : o.host, themeButton(),
         h("button", { class: "gear", type: "button", "aria-label": "Settings", onclick: settingsSheet }, svg("gear"))),
       h("h1", { class: urgentBits.length ? "" : "calm" }, urgentBits.length ? urgentBits.join(", ") : "Nothing needs you"),
       h("p", { class: "since" }, `${since} · ${c.in_flight} in flight`),
@@ -1490,7 +1499,7 @@ function historyDays(runs) {
 function renderRuns(o) {
   const results = searchQ && searchData ? searchData.results : null;
   const page = h("div", { class: "wrap" },
-    h("header", { class: "hero" }, h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host), h("h1", {}, "History"), usageLine(usageData), searchBox()),
+    h("header", { class: "hero" }, h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host), h("h1", {}, "History"), usageLine(usageData), isOwner() ? searchBox() : null),
     searchBusy ? h("p", { class: "empty" }, `Searching for “${searchQ}”…`) : null,
     results ? [
       h("h2", { class: "section" }, results.length ? `Conversations mentioning “${searchQ}”` : `Nothing found for “${searchQ}”`),
@@ -1793,6 +1802,7 @@ function settingsSheet() {
       try { const r = await api("/api/settings", { method: "POST", body: JSON.stringify({ default_engine: v }) }); if (overview) overview.default_engine = r.default_engine; toast(`${v === "codex" ? "Codex" : "Claude"} is now the default`); }
       catch (err) { engine = before; toast(err.message); }
     }), hint)));
+  if (!isOwner()) return; // pausing neo's posts is the owner's (their channel); yours go to your DM
   const note = () => (overview && overview.notifications) || { paused: false, text: "Notifications are on." };
   const n0 = note();
   let pauseChoice = !n0.paused ? "on" : n0.until === "forever" ? "forever" : "timed"; // a timed pause shows as text only
@@ -2228,7 +2238,9 @@ function openSheet(pre = {}) {
   if (document.querySelector(".sheet")) return;
   const o = overview || { agents: [], runs: [] };
   const recent = [...new Set([...o.agents.map((a) => a.cwd), ...o.runs.map((r) => r.cwd)].filter(Boolean))].slice(0, 5);
-  let engine = o.default_engine || "claude", how = "live", where = pre.where || "folder";
+  // A teammate's tasks always run in the background in their own account (live agents and folders are the owner's).
+  const owner = isOwner();
+  let engine = o.default_engine || "claude", how = owner ? "live" : "headless", where = pre.where || "folder";
   const close = () => { scrim.remove(); sheet.remove(); };
   const scrim = h("div", { class: "scrim", onclick: close });
   const segOf = (opts, get, set) => {
@@ -2243,7 +2255,7 @@ function openSheet(pre = {}) {
     hint.textContent = how === "live" ? "Runs in a terminal you can take over, and asks before risky steps." : "Runs to completion without stopping for approvals.";
     whereHint.textContent = where === "branch" ? "Starts a fresh branch off main in its own worktree, so parallel tasks never collide." : "Works directly in the folder below.";
   };
-  const cwd = h("input", { class: "field", name: "cwd", value: pre.cwd || recent[0] || "", autocomplete: "off", autocapitalize: "off", spellcheck: "false", required: true });
+  const cwd = h("input", { class: "field", name: "cwd", value: pre.cwd || recent[0] || "", autocomplete: "off", autocapitalize: "off", spellcheck: "false", required: owner });
   const task = h("textarea", { class: "field", name: "task", placeholder: "What should the agent do?", required: true }, pre.prompt || "");
   const start = h("button", { class: "btn primary", type: "submit", style: "height:50px;justify-content:center" }, "Start task");
   const form = h("form", { onsubmit: async (e) => {
@@ -2255,9 +2267,9 @@ function openSheet(pre = {}) {
     } catch (err) { toast(err.message); start.disabled = false; start.textContent = "Start task"; }
   } },
     h("label", { class: "lbl" }, "Agent", segOf([["claude", "Claude"], ["codex", "Codex"]], () => engine, (v) => (engine = v))),
-    h("label", { class: "lbl" }, "How it runs", segOf([["live", "Live"], ["headless", "In the background"]], () => how, (v) => (how = v)), hint),
-    h("label", { class: "lbl" }, "Where", segOf([["folder", "In the folder"], ["branch", "On a new branch"]], () => where, (v) => (where = v)), whereHint),
-    h("label", { class: "lbl" }, "Folder", cwd, recent.length > 1 ? h("div", { class: "recent" }, recent.map((c) => h("button", { type: "button", onclick: () => (cwd.value = c) }, c.split("/").filter(Boolean).pop()))) : null),
+    owner ? h("label", { class: "lbl" }, "How it runs", segOf([["live", "Live"], ["headless", "In the background"]], () => how, (v) => (how = v)), hint) : null,
+    owner ? h("label", { class: "lbl" }, "Where", segOf([["folder", "In the folder"], ["branch", "On a new branch"]], () => where, (v) => (where = v)), whereHint) : null,
+    owner ? h("label", { class: "lbl" }, "Folder", cwd, recent.length > 1 ? h("div", { class: "recent" }, recent.map((c) => h("button", { type: "button", onclick: () => (cwd.value = c) }, c.split("/").filter(Boolean).pop()))) : null) : null,
     h("label", { class: "lbl" }, "Task", task),
     start,
   );
