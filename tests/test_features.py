@@ -158,7 +158,9 @@ class BriefQuotaTest(unittest.TestCase):
              patch.object(brief.threading, "Thread") as thread:
             self.assertEqual(brief.start("dashboard"), {"id": "brief"})
         create.assert_called_once()
-        thread.return_value.start.assert_called_once()
+        # Thread is patched process-wide: count the brief's own, not a background scan it may trigger (repo-dirs)
+        briefs = [c for c in thread.call_args_list if str(c.kwargs.get("name", "")).startswith("brief-")]
+        self.assertEqual(len(briefs), 1)
 
 
 class CliQuotaTest(unittest.TestCase):
