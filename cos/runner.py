@@ -287,18 +287,23 @@ class Run:
     ) -> "Run":
         """runtime "headless" runs are executed by this process; "herdr" runs are
         interactive agents in herdr that a watcher records (see cos.interactive). With per-person
-        accounts on, a headless run nobody assigned to an account (scheduled jobs, the dashboard, the
-        owner's) runs in the owner's, never in the service account (cos/accounts.py)."""
-        if runtime != "herdr" and "account" not in (extra or {}):
+        accounts on, a run nobody assigned to an account runs in the owner's, never in the service
+        account (cos/accounts.py): a headless one always (scheduled jobs, the dashboard, the owner's), a
+        live one unless it is for a person with their own account, which it then runs in. extra
+        "account": None keeps a run in the service account on purpose (a checkout only neo has)."""
+        if "account" not in (extra or {}):
             from . import accounts
 
             if accounts.enabled():
-                account = accounts.owner_account()
+                if runtime == "herdr":
+                    account = accounts.for_user((extra or {}).get("slack_user"))
+                else:
+                    account = accounts.owner_account()
                 extra = {**(extra or {}), "account": account}
                 cwd = accounts.cwd_for(account, cwd)
         if runtime == "herdr":
             mode = "interactive"
-            error = validate_request(engine, prompt, cwd, "full")
+            error = validate_request(engine, prompt, cwd, "full", local=not (extra or {}).get("account"))
         else:
             error = validate_request(engine, prompt, cwd, mode, local=not (extra or {}).get("account"))
         if error:

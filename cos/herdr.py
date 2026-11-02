@@ -164,6 +164,33 @@ class Herdr:
                     raise
                 time.sleep(0.5)
 
+    def start_in_pane(self, name: str, kind: str, pane_id: str, command: str, timeout: float = 60) -> dict:
+        """Start an agent with a command line of our own: `agent start` only runs the kind's own
+        executable, and a live agent in a person's account starts through sudo and neo-run
+        (cos/accounts.pane_command). herdr still sees the engine in the pane's foreground job and
+        recognises it. Then as `agent start`: wait until it is ready and name it; raise agent_not_ready
+        when it stops on a question at startup (the folder trust prompt), timeout when it never shows."""
+        proc = self._run(["pane", "run", pane_id, command], timeout=30)
+        if proc.returncode != 0:
+            raise HerdrError("pane_run_failed", (proc.stderr or proc.stdout).strip()[:500])
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                agent = self.get(pane_id)
+            except HerdrError as exc:
+                if exc.code != "agent_not_found":
+                    raise
+                agent = {}
+            if agent.get("agent") == kind:
+                if agent.get("agent_status") in ("idle", "done"):
+                    self.call("agent", "rename", pane_id, name, timeout=15)
+                    return self.get(name)
+                if agent.get("agent_status") == "blocked":
+                    raise HerdrError("agent_not_ready", f"{kind} is waiting for input in pane {pane_id}")
+            if time.monotonic() > deadline:
+                raise HerdrError("timeout", f"{kind} did not start in pane {pane_id} within {timeout:.0f}s")
+            time.sleep(0.5)
+
     def prompt(self, name: str, text: str) -> dict:
         # No --wait: the watcher follows state changes, the bot must not block here.
         # herdr has no "--" separator, so keep text that starts with "-" from reading as an option.

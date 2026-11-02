@@ -17,9 +17,15 @@ spec on that pipe, never on the command line or on disk:
     shared    the owner's logins, used only for what this account has not logged in to itself:
               claude_token, gh_token, openai_key
     git_name, git_email   commit identity when this account has none of its own
+    tty       true for a live agent in a herdr pane (cos/interactive.py): the engine stays in the pane's
+              foreground process group, so it keeps the terminal (keys, resizes) and herdr can see it
+    mirror    {"fd": N, "engine": "claude"|"codex", "session_id": "..."}: copy the engine's own transcript
+              (~/.claude/projects, ~/.codex/sessions, which neo can't read) as it grows onto fd N, a file
+              neo opened for appending, so neo's watcher can follow the session without reading this home
 
-stdin, stdout and stderr pass straight through to the engine (neo's run files). A SIGTERM from neo
-(relayed by sudo) stops the engine's whole process group, with SIGKILL 10 seconds later if needed.
+stdin, stdout and stderr pass straight through to the engine (neo's run files, or the pane's terminal).
+A SIGTERM from neo (relayed by sudo) stops the engine's whole process group, with SIGKILL 10 seconds
+later if needed.
 """
 
 from __future__ import annotations
@@ -33,6 +39,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 ENGINES = ("claude", "codex")
@@ -163,11 +171,48 @@ def git_identity_env(home: Path, name: str, email: str) -> dict:
     return env
 
 
+STALE_SECONDS = 86400  # a folder with no owner recorded is left this long
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # it exists, as someone else
+    return True
+
+
+def sweep(root: Path, now: float) -> None:
+    """Remove turn folders whose neo-run is gone without cleaning up: closing a live agent's herdr pane
+    kills the whole job at once (SIGKILL), so its folder is never removed by the neo-run that made it."""
+    try:
+        folders = list(root.iterdir())
+    except OSError:
+        return
+    for folder in folders:
+        if not folder.is_dir() or folder.is_symlink():
+            continue
+        try:
+            owner = int((folder / ".pid").read_text().strip())
+            gone = not alive(owner)
+        except (OSError, ValueError):
+            try:
+                gone = now - folder.stat().st_mtime > STALE_SECONDS
+            except OSError:
+                gone = False
+        if gone:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 def write_files(home: Path, run_id: str, files: dict) -> tuple[Path, dict]:
     """files into ~/.neo-run/<run id>/ (0700); returns the folder and NAME -> path."""
     safe_id = "".join(c for c in run_id if c.isalnum() or c in "-_") or "run"
+    sweep(home / ".neo-run", time.time())
     folder = home / ".neo-run" / safe_id
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    (folder / ".pid").write_text(str(os.getpid()))  # whose folder this is, for sweep()
     paths = {}
     for name, text in (files or {}).items():
         if "/" in name or name.startswith("."):
@@ -178,6 +223,134 @@ def write_files(home: Path, run_id: str, files: dict) -> tuple[Path, dict]:
             fh.write(str(text))
         paths[name] = str(path)
     return folder, paths
+
+
+TERM_RE = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+MIRROR_SECONDS = 0.5
+
+
+def tty_env() -> dict:
+    """A live agent draws a TUI: it needs the terminal type sudo kept for us."""
+    term = os.environ.get("TERM", "")
+    env = {"TERM": term if TERM_RE.match(term) else "xterm-256color"}
+    if TERM_RE.match(os.environ.get("COLORTERM", "")):
+        env["COLORTERM"] = os.environ["COLORTERM"]
+    return env
+
+
+def merge_json(path: Path, defaults: dict) -> None:
+    """Add the keys of defaults that path's JSON object lacks; leave everything else as it is."""
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError):
+        return  # unreadable or not ours to fix: leave it to the person
+    if not isinstance(data, dict) or all(key in data for key in defaults):
+        return
+    data = {**defaults, **data}
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(f".{path.name}.neo-run.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def prepare_live_claude(home: Path) -> None:
+    """A live Claude in an account that never ran one would sit on its first-run screens (pick a theme;
+    accept bypass-permissions mode), which nobody is there to answer. Answer them once, as neo's
+    installer does for neo (deploy/install-linux.sh); a choice the person already made is kept."""
+    merge_json(home / ".claude.json", {"hasCompletedOnboarding": True, "theme": "dark"})
+    merge_json(home / ".claude" / "settings.json", {"skipDangerousModePermissionPrompt": True})
+
+
+def find_transcript(home: Path, engine: str, session_id: str, cwd: Path, since: float):
+    """The engine's transcript for this session: Claude's by its id; Codex's by its id, else the newest
+    rollout started in this folder since the engine did."""
+    if session_id and not SESSION_RE.match(session_id):
+        return None
+    if engine == "claude" and session_id:
+        found = sorted((home / ".claude" / "projects").glob(f"*/{session_id}.jsonl"))
+        return found[0] if found else None
+    if engine == "codex":
+        rollouts = list((home / ".codex" / "sessions").glob("*/*/*/rollout-*.jsonl"))
+        if session_id:
+            return next((p for p in rollouts if p.name.endswith(f"{session_id}.jsonl")), None)
+        fresh = []
+        for path in rollouts:
+            try:
+                if path.stat().st_mtime >= since - 5:
+                    fresh.append(path)
+            except OSError:
+                continue
+        for path in sorted(fresh, key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                with path.open() as fh:
+                    first = json.loads(fh.readline())
+            except (OSError, ValueError):
+                continue
+            if isinstance(first, dict) and (first.get("payload") or {}).get("cwd") == str(cwd):
+                return path
+    return None
+
+
+def write_all(fd: int, data: bytes) -> bool:
+    while data:
+        try:
+            done = os.write(fd, data)
+        except OSError:
+            return False  # neo closed its end: nothing more to copy to
+        data = data[done:]
+    return True
+
+
+def mirror(fd: int, find, stop: threading.Event, seconds: float = MIRROR_SECONDS) -> None:
+    """Copy the transcript find() names onto fd as it grows, byte for byte (neo's offsets are file
+    offsets), until stop is set; one last copy after that, so the final turn is not lost."""
+    path, offset = None, 0
+    try:
+        while True:
+            last = stop.is_set()
+            if path is None:
+                path = find()
+            if path is not None:
+                try:
+                    with open(path, "rb") as fh:
+                        fh.seek(offset)
+                        chunk = fh.read()
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    if not write_all(fd, chunk):
+                        return
+                    offset += len(chunk)
+            if last:
+                return
+            stop.wait(seconds)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def mirror_spec(spec: dict, spec_fd: int):
+    """(fd, engine, session id) from the spec's mirror, or None; refuses fds neo-run itself uses."""
+    given = spec.get("mirror")
+    if not isinstance(given, dict):
+        return None
+    fd, engine, session_id = given.get("fd"), str(given.get("engine") or ""), str(given.get("session_id") or "")
+    if not isinstance(fd, int) or isinstance(fd, bool) or fd < 3 or fd == spec_fd or engine not in ENGINES:
+        fail("bad mirror in spec")
+    if session_id and not SESSION_RE.match(session_id):
+        fail("bad session id in mirror")
+    try:
+        os.fstat(fd)
+    except OSError:
+        fail(f"mirror fd {fd} is not open")
+    return fd, engine, session_id
 
 
 FILE_RE = re.compile(r"\{file:([A-Za-z0-9_.-]+)\}")
@@ -200,6 +373,8 @@ def main() -> int:
     os.umask(0o077)
     home = account_home()
     spec = read_spec(args.spec_fd)
+    tty = spec.get("tty") is True
+    mirrored = mirror_spec(spec, args.spec_fd)
     (home / "code").mkdir(exist_ok=True, mode=0o700)
     tmp = home / ".cache" / "tmp"  # their own, not the /tmp every account shares
     tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -207,7 +382,7 @@ def main() -> int:
     if not cwd.is_dir():
         fail(f"no such folder: {cwd}")
     env = {"HOME": str(home), "USER": home.name, "LOGNAME": home.name, "PATH": PATH,
-           "LANG": "C.UTF-8", "TMPDIR": str(tmp), **clean_env(spec.get("env"))}
+           "LANG": "C.UTF-8", "TMPDIR": str(tmp), **(tty_env() if tty else {}), **clean_env(spec.get("env"))}
     logins, used = login_env(home, spec.get("shared"))
     env.update(logins)
     env.update(token_env(spec.get("tokens")))
@@ -216,6 +391,8 @@ def main() -> int:
     folder, paths = write_files(home, run_id, spec.get("files"))
     argv = fill(spec["argv"], paths)
     argv[0] = engine_path(os.path.basename(argv[0]), argv[1:])  # neo's path to it may differ; use this machine's
+    if tty and os.path.basename(argv[0]) == "claude":
+        prepare_live_claude(home)
     print(f"neo-run: {home.name} in {cwd}; logins " + " ".join(f"{k}={v}" for k, v in used.items()), file=sys.stderr)
     sys.stderr.flush()
 
@@ -223,30 +400,47 @@ def main() -> int:
     child: list = []
     stopping: list = []
 
+    # tty: the engine shares our process group (the pane's foreground job), so it is signalled by pid.
+    send = (lambda pid, sig: os.kill(pid, sig)) if tty else os.killpg
+
     def stop(signum, _frame=None):
         stopping.append(signum)
         if child:
             try:
-                os.killpg(child[0].pid, signum)
+                send(child[0].pid, signum)
             except ProcessLookupError:
                 pass
             signal.alarm(KILL_AFTER)  # still there by then: SIGKILL (neo can't signal this account itself)
 
     def kill(_signum, _frame):
         try:
-            os.killpg(child[0].pid, signal.SIGKILL)
+            send(child[0].pid, signal.SIGKILL)
         except (ProcessLookupError, IndexError):
             pass
 
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for sig in (signal.SIGTERM, signal.SIGHUP) + (() if tty else (signal.SIGINT,)):
         signal.signal(sig, stop)
+    if tty:
+        # The terminal sends Ctrl-C to the whole foreground group, the engine included, which decides
+        # what it means. A handler, not SIG_IGN: an ignored signal would stay ignored in the engine.
+        signal.signal(signal.SIGINT, lambda _signum, _frame: None)
     signal.signal(signal.SIGALRM, kill)
+    copied, copying = threading.Event(), None
     try:
-        child.append(subprocess.Popen(argv, cwd=str(cwd), env=env, start_new_session=True))
+        started = time.time()
+        child.append(subprocess.Popen(argv, cwd=str(cwd), env=env, start_new_session=not tty))
+        if mirrored:
+            fd, engine, session_id = mirrored
+            copying = threading.Thread(target=mirror, daemon=True,
+                                       args=(fd, lambda: find_transcript(home, engine, session_id, cwd, started), copied))
+            copying.start()
         if stopping:
             stop(stopping[-1])
         code = child[0].wait()
     finally:
+        copied.set()
+        if copying:
+            copying.join(timeout=5)
         shutil.rmtree(folder, ignore_errors=True)
     return code if code >= 0 else 128 - code
 

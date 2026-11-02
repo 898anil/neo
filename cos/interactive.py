@@ -5,6 +5,11 @@ This module adds what herdr does not keep: a structured timeline. A watcher
 thread combines two sources into runs/<run_id>/events.jsonl:
   - herdr agent state (working / blocked / done / idle), polled once a second
   - the engine's own session transcript on disk, tailed for tool calls and text
+
+With per-person accounts on (cos/accounts.py) the engine runs as the person's account, inside the same
+herdr pane: the pane's shell starts it through sudo and neo-run (accounts.pane_command), with the launch
+spec on a FIFO. The transcript is then in that account's home, which neo can't read, so neo-run copies it
+as it grows into runs/<run_id>/transcript.jsonl (its "mirror"), and the watcher tails that copy instead.
 """
 
 from __future__ import annotations
@@ -16,15 +21,16 @@ import os
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import conclusion
+from . import accounts, conclusion
 from .events import TRANSCRIPT_NORMALIZERS
 from .herdr import Herdr, HerdrError, agent_session_id
 from .runner import (
     AUTO_RESTART_DELAYS, AUTO_RESTART_PROMPT, CLAUDE_MODE_FLAGS, MAX_AUTO_RESTARTS_PER_PROMPT, MODES, Run,
-    is_transient_engine_error, write_private,
+    cli_path, engine_env, is_transient_engine_error, write_private,
 )
 
 log = logging.getLogger("cos.interactive")
@@ -83,6 +89,16 @@ def find_transcript(engine: str, session_id: Optional[str], cwd: str, started_at
     return None
 
 
+def resumed_session(engine: str, agent_args) -> Optional[str]:
+    """The session id agent_args resume (cos/memory.resume_args), if any."""
+    args = list(agent_args)
+    if engine == "claude" and "--resume" in args[:-1]:
+        return args[args.index("--resume") + 1]
+    if engine == "codex" and "resume" in args[:-1]:
+        return args[args.index("resume") + 1]
+    return None
+
+
 def engine_error_text(engine: str, raw: dict) -> Optional[str]:
     """The text of an API error the engine wrote to its transcript, or None for other records.
     Claude marks a request it gave up on with isApiErrorMessage; Codex logs an "error" event
@@ -110,6 +126,8 @@ class InteractiveRun:
         self._thread: Optional[threading.Thread] = None
         self._status: Optional[str] = None
         self._transcript: Optional[Path] = Path(meta["transcript_path"]) if meta.get("transcript_path") else None
+        # In a person's account: neo-run's copy of the transcript (the original is in their home)
+        self._mirror: Optional[Path] = self._transcript if meta.get("account") else None
         self._offset = int(meta.get("transcript_offset") or 0)
         self._started_at = time.time()
         # Set when the engine's own transcript says a turn completed (Codex task_complete).
@@ -150,15 +168,22 @@ class InteractiveRun:
             raise ValueError(f"NEO_MODE must be one of {MODES}")
         run = Run.create(engine, prompt, cwd, mode, source=source, runtime="herdr", extra=extra)
         name = agent_name_for(run.id)
+        account = run.meta().get("account")  # a person's own Linux account (cos/accounts.py), else neo's
+        files: dict = {}  # for an account: what neo-run writes into its private folder ({file:NAME} in argv)
+        session_id = None
         if engine == "claude":
             agent_args = (*CLAUDE_MODE_FLAGS[mode], *agent_args)
         if engine == "claude" and system:
             # An agent session (it has the brief): every turn ends with a Status line (cos/conclusion.py). As a
             # file, like the brief below. Without it the agent still starts; it just isn't held to a conclusion.
-            try:
-                agent_args = ("--settings", str(conclusion.write_settings(run.dir / "stop-hook-settings.json")), *agent_args)
-            except OSError as exc:
-                log.warning("stop hook settings not written for %s: %s", run.id, exc)
+            if account:  # the account can't read neo's copy of the hook: it travels in the spec
+                files["conclusion.py"] = Path(conclusion.__file__).read_text()
+                agent_args = ("--settings", conclusion.settings_json("/usr/bin/python3", "{file:conclusion.py}"), *agent_args)
+            else:
+                try:
+                    agent_args = ("--settings", str(conclusion.write_settings(run.dir / "stop-hook-settings.json")), *agent_args)
+                except OSError as exc:
+                    log.warning("stop hook settings not written for %s: %s", run.id, exc)
         if engine == "claude" and os.environ.get("NEO_REMOTE_CONTROL", "1") != "0":
             # Native Remote Control: continue this exact session from the Claude app.
             agent_args = ("--remote-control", name, *agent_args)
@@ -169,17 +194,37 @@ class InteractiveRun:
         if system and engine == "claude":
             # From a file: herdr refuses to pass multi-line text through the pane's shell
             # ("agent arguments cannot be encoded safely"), and the agent would never start.
-            brief = write_private(run.dir / "system-prompt.md", system)
-            agent_args = ("--append-system-prompt-file", str(brief), *agent_args)
+            if account:
+                files["system.md"] = system
+                agent_args = ("--append-system-prompt-file", "{file:system.md}", *agent_args)
+            else:
+                brief = write_private(run.dir / "system-prompt.md", system)
+                agent_args = ("--append-system-prompt-file", str(brief), *agent_args)
+        if account:
+            # herdr can't learn the session from inside the account (its hook can't reach neo's herdr
+            # socket), so neo names a new Claude session itself; neo-run mirrors that one's transcript.
+            session_id = resumed_session(engine, agent_args)
+            if engine == "claude" and not session_id:
+                session_id = str(uuid.uuid4())
+                agent_args = ("--session-id", session_id, *agent_args)
+            mirror = write_private(run.dir / "transcript.jsonl", "")
+            run.update_meta(session_id=session_id, transcript_path=str(mirror), transcript_offset=0)
         cwd_abs = run.meta()["cwd"]
         workspace = None
         try:
-            workspace, pane = herdr.create_workspace(cwd_abs, label)
+            # An account's folder is closed to neo: the pane's shell starts in the run's folder, neo-run
+            # moves the engine into cwd.
+            workspace, pane = herdr.create_workspace(str(run.dir) if account else cwd_abs, label)
             run.update_meta(
                 status="starting", herdr_session=herdr.session, herdr_agent=name,
                 herdr_workspace=workspace, herdr_pane=pane, turns=0,
             )
-            agent = cls._start_past_trust_prompt(herdr, name, engine, pane, agent_args)
+            if account:
+                start = lambda: cls._start_in_account(herdr, run, account, name, engine, pane,  # noqa: E731
+                                                      agent_args, files, session_id)
+            else:
+                start = lambda: herdr.start_agent(name, engine, pane, agent_args)  # noqa: E731
+            agent = cls._start_past_trust_prompt(herdr, name, engine, pane, start)
         except HerdrError as exc:
             screen = ""
             if workspace:
@@ -197,7 +242,7 @@ class InteractiveRun:
             run.append_event({"kind": "error", "title": "herdr failed", "body": detail, "data": {}}, 1)
             run.update_meta(status="failed")
             raise HerdrError(exc.code, detail) from exc
-        run.update_meta(session_id=agent_session_id(agent))
+        run.update_meta(session_id=agent_session_id(agent) or session_id)
         self = cls(run, herdr, on_event)
         self._started_at = time.time() - 2
         if system and engine == "codex":
@@ -214,12 +259,27 @@ class InteractiveRun:
         return self
 
     @staticmethod
-    def _start_past_trust_prompt(herdr: Herdr, name: str, engine: str, pane: str, agent_args) -> dict:
-        """Start the agent. If it stops on the CLI's one-time "do you trust this folder?" screen,
+    def _start_in_account(herdr: Herdr, run: Run, account: str, name: str, engine: str, pane: str,
+                          agent_args, files: dict, session_id: Optional[str]) -> dict:
+        """Start the engine as `account` in the pane: the pane's shell runs sudo + neo-run (no secret on
+        that line), neo-run reads the launch spec (folder, the run's variables, files, lent logins) from a
+        FIFO only neo can open, and appends the engine's transcript to the run's mirror file. The engine
+        keeps the pane's terminal, so it is as interactive as any live agent (keys, Remote Control)."""
+        meta = run.meta()
+        spec = accounts.spec(meta, [cli_path(engine), *agent_args], engine_env(meta), files)
+        spec["tty"] = True
+        spec["mirror"] = {"fd": accounts.MIRROR_FD, "engine": engine, "session_id": session_id or ""}
+        fifo = run.dir / "spec.fifo"
+        accounts.offer_spec(fifo, json.dumps(spec).encode())
+        return herdr.start_in_pane(name, engine, pane, accounts.pane_command(account, str(fifo), meta["transcript_path"]))
+
+    @staticmethod
+    def _start_past_trust_prompt(herdr: Herdr, name: str, engine: str, pane: str, start: Callable[[], dict]) -> dict:
+        """Start the agent (start()). If it stops on the CLI's one-time "do you trust this folder?" screen,
         accept it: an allowed user explicitly asked to run an agent in this folder (headless runs
         skip that screen already). Any other startup blocker is left for a human."""
         try:
-            return herdr.start_agent(name, engine, pane, agent_args)
+            return start()
         except HerdrError as exc:
             if exc.code not in ("agent_not_ready", "timeout"):
                 raise
@@ -310,6 +370,8 @@ class InteractiveRun:
     # ------------------------------------------------------ first-prompt delivery
 
     def _session_transcript(self) -> Optional[Path]:
+        if self._mirror is not None:
+            return self._mirror
         session_id = self.run.meta().get("session_id")
         return find_transcript(self.engine, session_id, self.run.meta()["cwd"], self._started_at) if session_id else None
 

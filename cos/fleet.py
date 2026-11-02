@@ -81,15 +81,21 @@ def _run_index() -> dict[tuple, dict]:
 
 def _agent_row(session: str, agent: dict, runs: dict) -> dict:
     engine = agent.get("agent") or "?"
+    run = runs.get((session, agent.get("name")))
     cwd = agent.get("foreground_cwd") or agent.get("cwd") or ""
     session_id = agent_session_id(agent)
-    transcript = _transcript_for(engine, session_id, cwd) if engine in TRANSCRIPT_NORMALIZERS else None
+    if run and run.get("account") and run.get("transcript_path"):
+        # In a person's account (cos/interactive.py): herdr can't see its folder or session, and the
+        # transcript is neo-run's copy in the run's folder.
+        cwd, session_id = run.get("cwd") or cwd, session_id or run.get("session_id")
+        transcript = Path(run["transcript_path"]) if engine in TRANSCRIPT_NORMALIZERS else None
+    else:
+        transcript = _transcript_for(engine, session_id, cwd) if engine in TRANSCRIPT_NORMALIZERS else None
     last_active = transcript.stat().st_mtime if transcript and transcript.exists() else None
     last_text, turn_done, prompts = _last_text_for(engine, transcript, last_active) if last_active else ("", False, 0)
     status = agent.get("agent_status") or "unknown"
     if status == "unknown" and turn_done:
         status = "done"  # herdr cannot read every screen (Codex); the transcript says the turn ended
-    run = runs.get((session, agent.get("name")))
     default_title = run_title(run) if engine == "codex" and run else ""
     row = {
         "session": session,

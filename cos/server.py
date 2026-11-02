@@ -1136,7 +1136,10 @@ class Handler(BaseHTTPRequestHandler):
 
             try:
                 irun = InteractiveRun.start(engine, prompt, cwd, label="resume", source="dashboard",
-                                            extra={"kind": "resume", "resumed_from": str(path), "title": f"Continued: {info['title']}"},
+                                            # account None: the session is in neo's own home (cos/memory.py),
+                                            # so it continues there; a person's account couldn't find it
+                                            extra={"kind": "resume", "resumed_from": str(path), "title": f"Continued: {info['title']}",
+                                                   "account": None},
                                             agent_args=memory.resume_args(engine, info["session_id"]), system=agent_brief(cwd))
             except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -1170,7 +1173,9 @@ class Handler(BaseHTTPRequestHandler):
                 from .interactive import InteractiveRun
 
                 irun = InteractiveRun.start(default_engine(), work.fix_ci_prompt(pr), cwd, label=f"fix-{pr['repo_name']}-{pr['number']}",
-                                            source="dashboard", extra={"kind": "pr-fix", "pr_url": pr["url"], "title": f"Fix CI: {pr['title']}"}, system=agent_brief(cwd))
+                                            source="dashboard", system=agent_brief(cwd),
+                                            # account None: neo's own checkout, like the review above
+                                            extra={"kind": "pr-fix", "pr_url": pr["url"], "title": f"Fix CI: {pr['title']}", "account": None})
                 LIVE_RUNS.append(irun)
                 meta = irun.run.meta()
                 return self._json({"run_id": meta["id"], "session": meta["herdr_session"], "pane_id": meta["herdr_pane"]}, HTTPStatus.CREATED)

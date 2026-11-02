@@ -713,12 +713,28 @@ class LiveThread:
 
 async def start_live(client, channel: str, thread_ts: str, req, prompt: str, user: Optional[str] = None) -> bool:
     engine = req.engine or people.load(user).get("engine") or default_engine()
-    cwd = req.cwd or WORKDIR
     model = people.load(user).get("model")
+    extra = {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
+             "slack_user": user, "role": "full"}
+    account = None
+    if accounts.enabled():  # the same account a headless run for them uses (run_headless): theirs, or the owner's
+        try:
+            account = await _account_of(client, user)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("could not set up an account for %s", user)
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                          text=f":x: I couldn't set up your workspace on this machine: `{exc}`")
+            return False
+        profile = ((await slack_user(client, user)) or {}).get("profile") or {}
+        extra.update(account=account, git_name=people.load(user).get("name") or profile.get("real_name") or "",
+                     git_email=profile.get("email") or "")
+    cwd = accounts.cwd_for(account, req.cwd) if account else (req.cwd or WORKDIR)
     live = LiveThread(client, channel, thread_ts)
     LIVE[thread_ts] = live
     label = f"slack-{thread_ts.split('.')[0][-6:]}"
     system = await asyncio.to_thread(agent_brief, cwd, user)
+    if account:
+        system = "\n\n".join(filter(None, (system, accounts.brief(account))))
     try:
         live.irun = await asyncio.to_thread(
             InteractiveRun.start,
@@ -727,8 +743,7 @@ async def start_live(client, channel: str, thread_ts: str, req, prompt: str, use
             cwd,
             label,
             "slack",
-            {"slack_channel": channel, "slack_thread": thread_ts, "slack_url": thread_url(channel, thread_ts),
-             "slack_user": user, "role": "full"},
+            extra,
             Herdr(),
             live.on_event,
             ("--model", model) if model else (),
@@ -2528,10 +2543,7 @@ async def handle_mention(event: dict, client) -> None:
             if req.live and restricted:
                 await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                               text=f"_Live agents need the full role (yours: {people.role(user)}); running it headless instead._")
-            elif req.live and accounts.isolated(user):
-                await client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                              text="_Live agents don't run in your own workspace yet; running it headless instead._")
-            if req.live and not restricted and not accounts.isolated(user):
+            if req.live and not restricted:
                 ok = await start_live(client, channel, thread_ts, req, prompt, user=user)
             else:
                 ok = await run_headless(client, channel, thread_ts, entry, req, prompt, spoken=spoken, user=user)

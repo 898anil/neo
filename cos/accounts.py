@@ -4,8 +4,10 @@ On a Linux server with NEO_ACCOUNTS=1, everyone except the owner gets an account
 time they use neo (deploy/linux/neo-account, through sudo). Their runs start in it through
 deploy/linux/neo-run, so they have their own home, their own clones in ~/code, their own Claude, Codex
 and GitHub logins, and can't read neo's files or anyone else's. The owner gets one too (owner_account): the owner's runs
-and neo's scheduled jobs run there, with the owner's cloud logins. The service account keeps the Slack
-tokens, the dashboard and live (herdr) agents, and runs the tool-less model calls (cards, digests).
+and neo's scheduled jobs run there, with the owner's cloud logins. Live (herdr) agents run in the same
+account as a headless run for the same person would (pane_command): herdr and its panes stay neo's, the
+engine inside the pane is the person's. The service account keeps the Slack tokens, the dashboard and the
+herdr server, and runs the tool-less model calls (cards, digests).
 
 Logins: a person who has logged in to a tool in their account uses that login; for anything else neo
 lends the owner's, if the owner set NEO_SHARED_CLAUDE_TOKEN / NEO_SHARED_GH_TOKEN / NEO_SHARED_OPENAI_KEY,
@@ -25,8 +27,11 @@ import json
 import os
 import pwd
 import re
+import shlex
+import stat
 import subprocess
 import threading
+import time
 import unicodedata
 from pathlib import Path
 from typing import Optional
@@ -146,6 +151,17 @@ def owner_account() -> str:
     return ensure(user, owner_name())
 
 
+def for_user(user: Optional[str], name: Optional[str] = None) -> str:
+    """The account a run for this Slack user goes to: their own (created on first use) when they are
+    isolated, else the owner's (the owner, a run nobody asked for, a dashboard or scheduled one).
+    name: how Slack names them, for a new account's name."""
+    from . import people
+
+    if isolated(user):
+        return ensure(user, name or people.load(user).get("name") or user)
+    return owner_account()
+
+
 def cwd_for(account: str, requested: Optional[str]) -> str:
     """Where a run starts: ~/code unless they asked for a folder (~/x, a name under ~/code, or an
     absolute path; neo-run refuses anything outside their home). A folder under neo's own workdir
@@ -208,7 +224,8 @@ def spec(meta: dict, argv: list[str], env: dict, files: dict) -> dict:
         if doppler:
             own_tokens["DOPPLER_TOKEN"] = doppler
     argv = list(argv)
-    if own_tokens.get("SENTRY_AUTH_TOKEN") and argv and os.path.basename(argv[0]) == "claude" and "-p" in argv and "--strict-mcp-config" not in argv:
+    claude_session = "-p" in argv or meta.get("runtime") == "herdr"  # headless, or live in a pane
+    if own_tokens.get("SENTRY_AUTH_TOKEN") and argv and os.path.basename(argv[0]) == "claude" and claude_session and "--strict-mcp-config" not in argv:
         # Claude expands this variable at runtime; the token never appears in argv or a config file.
         skills = "?skills=inspect" if meta.get("role") in ("read-only", "prs-only") or meta.get("mode") == "readonly" else ""
         config = {"mcpServers": {"neo_sentry": {"type": "http", "url": "https://mcp.sentry.dev/mcp" + skills,
@@ -253,9 +270,70 @@ def user_of(account: str) -> str:
     return "-"
 
 
-def command(account: str, spec_fd: int) -> list[str]:
-    """sudo keeps fds below -C open: the spec pipe is the highest one neo-run needs."""
-    return ["sudo", "-n", "-C", str(max(spec_fd + 1, 3)), "-u", account, NEO_RUN, "--spec-fd", str(spec_fd)]
+def command(account: str, spec_fd: int, *more_fds: int) -> list[str]:
+    """sudo keeps fds below -C open: one above the highest fd neo-run needs (the spec pipe, and for a live
+    agent the transcript mirror)."""
+    keep = max((spec_fd, *more_fds)) + 1
+    return ["sudo", "-n", "-C", str(max(keep, 3)), "-u", account, NEO_RUN, "--spec-fd", str(spec_fd)]
+
+
+# A live agent's launch, typed into its herdr pane's shell (cos/interactive.py). The shell opens the spec
+# FIFO on SPEC_FD and the transcript mirror on MIRROR_FD for sudo; neither is ever readable by anyone else.
+SPEC_FD, MIRROR_FD = 3, 4
+SPEC_WAIT_SECONDS = 120.0
+
+
+def pane_command(account: str, spec_fifo: str, mirror: str) -> str:
+    """The line a herdr pane runs to start a live agent as `account`: sudo + neo-run, exactly the sudoers
+    rule's `neo-run --spec-fd *`. Nothing secret is on it (that is all in the spec, read from a FIFO
+    offer_spec feeds). The leading space keeps it out of the shell's history (HISTCONTROL=ignorespace)."""
+    argv = command(account, SPEC_FD, MIRROR_FD)
+    return (" " + shlex.join(argv) + f" {SPEC_FD}<{shlex.quote(spec_fifo)} {MIRROR_FD}>>{shlex.quote(mirror)}")
+
+
+def offer_spec(path: Path, data: bytes, wait: float = SPEC_WAIT_SECONDS) -> threading.Thread:
+    """Hand data to whoever opens the FIFO at path first (the pane's shell, for neo-run), then remove it.
+    A FIFO, not a file: the spec (lent logins, tokens) is never on disk, and it is gone once read. Made
+    0600 and owned by neo, so only neo (or root) can open it; nobody opening it within wait: removed."""
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    os.mkfifo(path, 0o600)
+
+    def feed() -> None:
+        deadline = time.monotonic() + wait
+        fd = None
+        try:
+            while fd is None:
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)  # ENXIO until a reader has it open
+                except OSError:
+                    if time.monotonic() > deadline:
+                        return
+                    time.sleep(0.1)
+            try:
+                path.unlink()  # its reader has it open: nobody else can open it from here on
+            except OSError:
+                pass
+            try:
+                os.set_blocking(fd, True)
+                if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+                    return
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+            except OSError:
+                pass  # the reader went away; its pane says why
+        finally:
+            if fd is not None:
+                os.close(fd)
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=feed, daemon=True, name=f"spec-{path.parent.name}")
+    thread.start()
+    return thread
 
 
 def member_refusal(info: Optional[dict], own_team: Optional[str]) -> Optional[str]:
