@@ -32,7 +32,9 @@ from .runner import Run, claude_available, list_runs
 from .store import JsonStore
 
 log = logging.getLogger("neo")
-STORE = JsonStore("mentions.json")
+STORE = JsonStore("mentions.json")  # the owner's; each person's is mentions-<slack id>.json (store())
+_STORES: dict = {}
+READY_SECONDS = 3600  # how long "their own Claude with its Slack connector is connected" is trusted
 EVERY_MINUTES = int(os.environ.get("NEO_MENTIONS_EVERY", "15"))
 HOURS = (8, 22)  # local time, every day: people tag the owner at weekends too
 FIRST_LOOK_HOURS = 24
@@ -95,12 +97,52 @@ def owner_id() -> str:
     return os.environ.get("NEO_NOTIFY_USER", "")
 
 
-def enabled() -> bool:
-    return bool(owner_id()) and os.environ.get("NEO_MENTIONS", "1") != "0"
+def enabled(who: Optional[str] = None) -> bool:
+    """NEO_MENTIONS=0 turns mentions off for everyone. who: a person's Slack id; None is the owner."""
+    return os.environ.get("NEO_MENTIONS", "1") != "0" and bool(owner_id() if who is None else who)
 
 
-def _read() -> dict:
-    data = STORE.read()
+def store(who: Optional[str] = None) -> JsonStore:
+    """Whose mentions: the owner's (mentions.json, as before people had their own), or a person's."""
+    if who is None:
+        return STORE
+    from .people import valid_user
+
+    if not valid_user(who):
+        raise ValueError("not a Slack user id")
+    return _STORES.setdefault(who, JsonStore(f"mentions-{who}.json"))
+
+
+def _whose(who: Optional[str]) -> tuple[str, dict]:
+    """(Slack id, prompt fields) of the person whose mentions these are."""
+    if who is None:
+        return owner_id(), owner_fields()
+    from .me import _name
+
+    name = _name(who)
+    return who, {"owner": name, "Owner": name[:1].upper() + name[1:], "owner_intro": name}
+
+
+_ready: dict = {}
+
+
+def ready(who: str) -> Optional[str]:
+    """A person's account when their check can run: it searches Slack as them, so it needs their own
+    Claude login with its Slack connector (nothing of the owner's is lent). Checked at most hourly."""
+    from . import accounts, logins
+
+    at, account = _ready.get(who, (0.0, None))
+    if time.time() - at < READY_SECONDS:
+        return account
+    account = accounts.everyone().get(who)
+    if account and not (logins.signed_in(account, "claude") and logins.connector_status(account, "slack") == "connected"):
+        account = None
+    _ready[who] = (time.time(), account)
+    return account
+
+
+def _read(who: Optional[str] = None) -> dict:
+    data = store(who).read()
     data.setdefault("state", {})
     data.setdefault("items", {})
     return data
@@ -109,17 +151,17 @@ def _read() -> dict:
 # ------------------------------------------------------------------ the check
 
 
-def due(now: Optional[datetime] = None) -> bool:
+def due(now: Optional[datetime] = None, who: Optional[str] = None) -> bool:
     now = now or datetime.now()
-    if not enabled() or not HOURS[0] <= now.hour < HOURS[1] or running():
+    if not enabled(who) or not HOURS[0] <= now.hour < HOURS[1] or running(who):
         return False
-    last = _read()["state"].get("last_started_at")
+    last = _read(who)["state"].get("last_started_at")
     return not last or now - datetime.fromisoformat(last) >= timedelta(minutes=EVERY_MINUTES)
 
 
-def running() -> Optional[dict]:
+def running(who: Optional[str] = None) -> Optional[dict]:
     for meta in list_runs(60):
-        if meta.get("kind") == "mentions" and meta["status"] in ("queued", "running"):
+        if meta.get("kind") == "mentions" and meta["status"] in ("queued", "running") and (meta.get("slack_user") or None) == who:
             return meta
     return None
 
@@ -132,16 +174,15 @@ def _since(state: dict, now: datetime) -> datetime:
         return now - timedelta(hours=FIRST_LOOK_HOURS)
 
 
-def prompt(now: Optional[datetime] = None) -> str:
+def prompt(now: Optional[datetime] = None, who: Optional[str] = None) -> str:
     now = now or datetime.now()
-    data = _read()
+    data = _read(who)
     since = _since(data["state"], now)
     known = sorted(data["items"].values(), key=lambda i: -i.get("found_at", 0))[:KNOWN_SHOWN]
-    me = owner_id()
-    o = owner_fields()
-    profile = f", {owner_profile()}" if owner_profile() else ""
-    # Extra rules for the check, one per line (a literal backslash-n also separates them in a .env file).
-    rules = [r.strip() for r in re.split(r"\\n|\n", os.environ.get("NEO_MENTIONS_RULES", "")) if r.strip()]
+    me, o = _whose(who)
+    profile = f", {owner_profile()}" if owner_profile() and who is None else ""
+    # Extra rules for the owner's check, one per line (a literal backslash-n also separates them in a .env file).
+    rules = [r.strip() for r in re.split(r"\\n|\n", os.environ.get("NEO_MENTIONS_RULES", "")) if r.strip()] if who is None else []
     return "\n".join([
         f"You work for {o['owner']} (Slack user <@{me}>){profile}. Find the Slack messages that tag them and work out, "
         "for each, what they should reply and whether you (an engineering agent with their repos, Sentry, gh, gcloud and logs) "
@@ -182,18 +223,28 @@ def cli_args() -> tuple[list[str], list[str]]:
 _lock = threading.Lock()
 
 
-def start(source: str = "schedule") -> Optional[dict]:
+def start(source: str = "schedule", who: Optional[str] = None) -> Optional[dict]:
+    """Start a check. who: a person's own (in their account, as them); None if they can't yet (ready())."""
     with _lock:
-        current = running()
+        current = running(who)
         if current:
             return current
-        if source == "schedule" and not claude_available()[0]:
+        if who is None and source == "schedule" and not claude_available()[0]:
             return None
         every_turn, first_turn = cli_args()
-        run = Run.create("claude", prompt(), workdir(), "readonly", source=source,
-                         extra={"kind": "mentions", "title": f"Mentions of {owner_fields()['owner']}", "cli_args": every_turn,
-                                "first_turn_args": first_turn})
-        STORE.update(lambda d: d.setdefault("state", {}).update(
+        extra = {"kind": "mentions", "title": f"Mentions of {_whose(who)[1]['owner']}", "cli_args": every_turn,
+                 "first_turn_args": first_turn}
+        cwd = workdir()
+        if who is not None:
+            from . import accounts, people
+
+            account = ready(who)
+            if not account:
+                return None
+            extra.update(account=account, slack_user=who, role=people.role(who), lend=False)
+            cwd = accounts.cwd_for(account, None)
+        run = Run.create("claude", prompt(who=who), cwd, "readonly", source=source, extra=extra)
+        store(who).update(lambda d: d.setdefault("state", {}).update(
             last_started_at=datetime.now().isoformat(timespec="seconds"), last_run_id=run.id))
 
     def work():
@@ -229,7 +280,7 @@ def parse_result(run: Run) -> Optional[dict]:
     return answer if isinstance(answer, dict) and isinstance(answer.get("mentions"), list) else None
 
 
-def merge(answer: dict, run_id: str, now: Optional[float] = None) -> list[dict]:
+def merge(answer: dict, run_id: str, now: Optional[float] = None, who: Optional[str] = None) -> list[dict]:
     """Add the check's mentions; known ones are left as they are. Returns the new ones needing the owner."""
     now = time.time() if now is None else now
     new = []
@@ -255,24 +306,25 @@ def merge(answer: dict, run_id: str, now: Optional[float] = None) -> list[dict]:
         if len(items) > 1000:
             for old in sorted(items, key=lambda k: items[k]["found_at"])[: len(items) - 800]:
                 del items[old]
-    STORE.update(write)
+    store(who).update(write)
     return new
 
 
 def finish(run: Run) -> list[dict]:
     meta = run.meta()
+    who = meta.get("slack_user") or None  # a person's own check; the owner's has none
     if meta["status"] != "done":
         return []
     answer = parse_result(run)
     if answer is None:
         run.update_meta(watch_summary="The mentions check did not answer in the expected shape; open the run.")
         return []
-    new = merge(answer, run.id)
+    new = merge(answer, run.id, who=who)
     try:  # the next check looks from when this one started
         started = datetime.fromisoformat(meta["created_at"]).astimezone().replace(tzinfo=None)
     except ValueError:
         started = datetime.now()
-    STORE.update(lambda d: d.setdefault("state", {}).update(last_ok_at=started.isoformat(timespec="seconds")))
+    store(who).update(lambda d: d.setdefault("state", {}).update(last_ok_at=started.isoformat(timespec="seconds")))
     run.update_meta(watch_summary=str(answer.get("summary") or "")[:2000], watch_found=len(answer["mentions"]),
                     watch_new=len(new))
     return new
@@ -281,15 +333,17 @@ def finish(run: Run) -> list[dict]:
 # ------------------------------------------------------------------ the owner's decisions
 
 
-def get(mid: str) -> Optional[dict]:
-    return _read()["items"].get(mid)
+def get(mid: str, who: Optional[str] = None) -> Optional[dict]:
+    return _read(who)["items"].get(mid)
 
 
-def open_items() -> list[dict]:
-    return sorted((i for i in _read()["items"].values() if i["status"] in OPEN), key=lambda i: i["found_at"])
+def open_items(who: Optional[str] = None) -> list[dict]:
+    if who is not None and not enabled(who):
+        return []
+    return sorted((i for i in _read(who)["items"].values() if i["status"] in OPEN), key=lambda i: i["found_at"])
 
 
-def _set(mid: str, **fields) -> dict:
+def _set(mid: str, who: Optional[str] = None, **fields) -> dict:
     def write(data: dict) -> dict:
         item = data.setdefault("items", {}).get(mid)
         if not item:
@@ -298,11 +352,11 @@ def _set(mid: str, **fields) -> dict:
         item.update(fields)
         item.setdefault("history", []).append({"at": time.time(), "status": item["status"], "note": note[:300]})
         return item
-    return STORE.update(write)
+    return store(who).update(write)
 
 
-def dismiss(mid: str) -> dict:
-    return _set(mid, status="dismissed")
+def dismiss(mid: str, who: Optional[str] = None) -> dict:
+    return _set(mid, who, status="dismissed")
 
 
 SEND_PROMPT = """Post one Slack message for {owner}, then stop. Use the {tool} tool exactly once with:
@@ -350,22 +404,33 @@ def sent_ok(run: Run, item: dict, text: str) -> tuple[bool, str]:
     return True, "sent"
 
 
-def send(mid: str, text: str) -> dict:
-    """Post text in the mention's thread as the owner, in the background. Returns the send run."""
+def send(mid: str, text: str, who: Optional[str] = None) -> dict:
+    """Post text in the mention's thread as its owner (who: a person, through their own Slack connector, in
+    their account; None the owner), in the background. Returns the send run."""
     text = text.strip()
     if not text:
         raise ValueError("nothing to send")
-    item = get(mid)
+    item = get(mid, who)
     if not item:
         raise LookupError("no such mention")
     if item["status"] in ("sending", "sent"):
         raise ValueError(f"already {item['status']}")
-    run = Run.create("claude", SEND_PROMPT.format(**owner_fields(), tool=SEND_TOOL, channel=item["channel_id"], thread=item["thread_ts"], text=text),
-                     workdir(), "readonly", source="dashboard",
-                     extra={"kind": "mention-send", "title": f"Reply to {item['from']} as {owner_fields()['owner']}",
-                            "cli_args": ["--allowedTools", f"{SEND_TOOL},ToolSearch", "--disallowedTools",
-                                         ",".join(t for t in SLACK_WRITE if t != SEND_TOOL) + ",Bash,Edit,Write"]})
-    _set(mid, status="sending", sent_text=text, send_run=run.id, note=f"{owner_fields()['owner']} approved")
+    o = _whose(who)[1]
+    extra = {"kind": "mention-send", "title": f"Reply to {item['from']} as {o['owner']}",
+             "cli_args": ["--allowedTools", f"{SEND_TOOL},ToolSearch", "--disallowedTools",
+                          ",".join(t for t in SLACK_WRITE if t != SEND_TOOL) + ",Bash,Edit,Write"]}
+    cwd = workdir()
+    if who is not None:
+        from . import accounts, people
+
+        account = accounts.everyone().get(who)
+        if not account:
+            raise ValueError("your neo has no workspace yet")
+        extra.update(account=account, slack_user=who, role=people.role(who), lend=False)
+        cwd = accounts.cwd_for(account, None)
+    run = Run.create("claude", SEND_PROMPT.format(**o, tool=SEND_TOOL, channel=item["channel_id"], thread=item["thread_ts"], text=text),
+                     cwd, "readonly", source="dashboard", extra=extra)
+    _set(mid, who, status="sending", sent_text=text, send_run=run.id, note=f"{o['owner']} approved")
 
     def work():
         try:
@@ -373,25 +438,31 @@ def send(mid: str, text: str) -> dict:
             ok, why = sent_ok(run, item, text)
         except Exception as exc:  # noqa: BLE001
             ok, why = False, repr(exc)[:200]
-        _set(mid, status="sent" if ok else "send_failed", send_error="" if ok else why, note=why)
+        _set(mid, who, status="sent" if ok else "send_failed", send_error="" if ok else why, note=why)
         log.info("mention %s: %s (%s)", mid, "sent" if ok else "send failed", why)
 
     threading.Thread(target=work, daemon=True, name=f"mention-send-{mid}").start()
     return run.meta()
 
 
-def hand_to_neo(mid: str) -> dict:
-    """Start a full neo run on the mention's neo_task; it should post its result in the thread itself."""
-    item = get(mid)
+def hand_to_neo(mid: str, who: Optional[str] = None) -> Run:
+    """Start a full neo run on the mention's neo_task; it should post its result in the thread itself.
+    who: a person's, which becomes a task in their own account with their role (me.start)."""
+    item = get(mid, who)
     if not item or not item.get("neo_task"):
         raise LookupError("nothing for neo to do here")
-    o = owner_fields()
+    o = _whose(who)[1]
     task = (f"{item['from']} tagged {o['owner']} in Slack ({item['permalink'] or item['channel_id']}): {item['asked']}\n"
             f"{o['Owner']} asked you to take it on:\n{item['neo_task']}\n"
             "When done, reply in that Slack thread with what you did and the links (channel "
             f"{item['channel_id']}, thread_ts {item['thread_ts']}). Ask {o['owner']} before anything irreversible "
             "(a prod deploy, an admin merge, deleting data).")
-    run = Run.create("claude", task, workdir(), "full", source="dashboard",
-                     extra={"kind": "mention-task", "title": f"For {item['from']}: {item['asked'][:80]}"})
-    _set(mid, status="working", task_run=run.id, note="handed to neo")
+    if who is None:
+        run = Run.create("claude", task, workdir(), "full", source="dashboard",
+                         extra={"kind": "mention-task", "title": f"For {item['from']}: {item['asked'][:80]}"})
+    else:
+        from . import me
+
+        run = me.start(who, task)
+    _set(mid, who, status="working", task_run=run.id, note="handed to neo")
     return run

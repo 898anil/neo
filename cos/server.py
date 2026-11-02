@@ -901,6 +901,25 @@ class Handler(BaseHTTPRequestHandler):
             if not found or watches.finding_owner(found) != user:
                 return self._error(HTTPStatus.NOT_FOUND, "no such finding")
             return self._json(watches.set_status(parts[2], "dismissed" if parts[3] == "dismiss" else "new"))
+        if parts == ["api", "mentions", "check"]:
+            meta = mentions.start("dashboard", who=user)
+            if not meta:
+                return self._error(HTTPStatus.CONFLICT, "Your neo reads Slack with your own Claude and its Slack "
+                                                        "connector: say *connect my claude* and *connect my slack* to neo.")
+            return self._json(meta, HTTPStatus.ACCEPTED)
+        if len(parts) == 4 and parts[:2] == ["api", "mentions"] and parts[3] in ("send", "neo", "dismiss"):
+            try:  # their own mentions only: each person's are in their own store
+                if parts[3] == "send":
+                    return self._json(mentions.send(parts[2], str(body.get("text", "")), who=user), HTTPStatus.ACCEPTED)
+                if parts[3] == "neo":
+                    run = mentions.hand_to_neo(parts[2], who=user)
+                    start_turn(run, None)
+                    return self._json(person_run(run.meta()), HTTPStatus.CREATED)
+                return self._json(mentions.dismiss(parts[2], who=user))
+            except LookupError as exc:
+                return self._error(HTTPStatus.NOT_FOUND, str(exc))
+            except (ValueError, PermissionError) as exc:
+                return self._error(HTTPStatus.CONFLICT, str(exc))
         if len(parts) == 3 and parts[:2] == ["api", "work"] and parts[2] in ("review", "fix", "merge"):
             listing = work.prs(who=user)
             pr = next((x for x in listing["mine"] if x["repo"] == body.get("repo") and x["number"] == body.get("number")), None)

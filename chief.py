@@ -106,20 +106,22 @@ async def loop_scheduler() -> None:
 
 
 async def mention_scheduler() -> None:
-    """Look for new Slack mentions of the owner every few minutes (see cos/mentions.py)."""
-    if not mentions.enabled():
-        log.info("mentions watch off (no NEO_NOTIFY_USER, or NEO_MENTIONS=0)")
+    """Look for new Slack mentions every few minutes (see cos/mentions.py): the owner's, and each person's
+    own, searched as them with their own Claude Slack connector."""
+    if os.environ.get("NEO_MENTIONS", "1") == "0":
+        log.info("mentions watch off (NEO_MENTIONS=0)")
         return
     while True:
-        try:
-            if await asyncio.to_thread(mentions.due):
-                meta = await asyncio.to_thread(mentions.start)
-                if meta:
-                    log.info("mentions check started: %s", meta["id"])
-                else:
-                    log.info("mentions check skipped: Claude quota unavailable")
-        except Exception:  # noqa: BLE001
-            log.exception("mentions check failed to start")
+        for viewer in [None] + [r[0] for r in recipients(None, "") if r[0]]:
+            try:
+                if await asyncio.to_thread(mentions.due, None, viewer):
+                    meta = await asyncio.to_thread(mentions.start, "schedule", viewer)
+                    if meta:
+                        log.info("mentions check started for %s: %s", viewer or "owner", meta["id"])
+                    elif viewer is None:
+                        log.info("mentions check skipped: Claude quota unavailable")
+            except Exception:  # noqa: BLE001 - one person's check must not stop everyone else's
+                log.exception("mentions check failed to start for %s", viewer or "owner")
         await asyncio.sleep(60)
 
 

@@ -120,7 +120,7 @@ class DashboardTest(Scoped):
     def test_the_owners_extras_stay_the_owners(self):
         for path in ("/api/memory", "/api/usage", "/api/sessions", "/api/agents/s/p"):
             self.assertEqual(self.get(path)[0], 403, path)
-        for path in ("/api/live", "/api/mentions/check", "/api/memory/apply", "/api/system-watches/x/run"):
+        for path in ("/api/live", "/api/memory/apply", "/api/system-watches/x/run"):
             self.assertEqual(self.post(path)[0], 403, path)
 
     def test_their_stream_leaves_out_another_persons_words(self):
@@ -282,6 +282,74 @@ class PullRequestsTest(Scoped):
         self.assertEqual(loops.listing(viewer=None), [])
         loops.sync_prs([], None)  # the owner's (empty) list doesn't mark Ajay's PR closed
         self.assertTrue(loops.STORE.read()[loops._id("pr:acme/backie#12")]["pr_open"])
+
+
+def hit(ts, **kw):
+    return {"channel_id": "C1", "ts": ts, "thread_ts": ts, "permalink": "https://x.slack.com/p1", "channel_name": "eng",
+            "from": "Yosh", "asked": "can you look at the login bug?", "why": "asked directly", "needs_owner": True,
+            "draft_reply": "On it.", "neo_task": "fix the login bug", "evidence": "", **kw}
+
+
+class MentionsTest(Scoped):
+    """Each person's mentions: found as them (their own Claude Slack connector), kept in their own store."""
+
+    def setUp(self):
+        super().setUp()
+        from cos import mentions
+        self.m = mentions
+        mentions._ready.clear()
+        os.environ["NEO_NOTIFY_USER"] = OWNER
+
+    def test_each_person_has_their_own_mentions(self):
+        self.m.merge({"mentions": [hit("1.1")]}, "r1", who=AJAY)
+        self.m.merge({"mentions": [hit("2.2", asked="the owner's thing")]}, "r2")
+        self.assertEqual([i["ts"] for i in self.m.open_items(AJAY)], ["1.1"])
+        self.assertEqual([i["ts"] for i in self.m.open_items()], ["2.2"])
+        home = json.dumps(self.get("/api/home")[1])
+        self.assertIn("login bug", home)
+        self.assertNotIn("the owner's thing", home)
+        owners = self.m.open_items()[0]["id"]
+        self.assertEqual(self.post(f"/api/mentions/{owners}/dismiss")[0], 404)  # not in their store
+        self.assertEqual(self.post(f"/api/mentions/{owners}/send", {"text": "hi"})[0], 404)
+        with self.assertRaises(ValueError):
+            self.m.store("../../etc")
+
+    def test_their_check_runs_as_them_or_not_at_all(self):
+        self.assertIsNone(self.m.start("dashboard", who=AJAY))  # no account login checked yet: not ready
+        self.assertEqual(self.post("/api/mentions/check")[0], 409)
+        with patch.object(self.m, "ready", return_value="neo-ajay"), patch.object(self.m.threading, "Thread"):
+            meta = self.m.start("schedule", who=AJAY)
+        self.assertEqual((meta["account"], meta["slack_user"], meta["lend"], meta["kind"]), ("neo-ajay", AJAY, False, "mentions"))
+        self.assertIn(f"<@{AJAY}>", meta["prompt"])
+        self.assertNotIn(f"<@{OWNER}>", meta["prompt"])
+
+    def test_owners_rules_stay_the_owners(self):
+        with patch.dict(os.environ, {"NEO_MENTIONS_RULES": "Anil does not review PRs."}):
+            self.assertIn("does not review PRs", self.m.prompt(who=None))
+            self.assertNotIn("does not review PRs", self.m.prompt(who=AJAY))
+
+    def test_ready_needs_their_own_claude_and_slack_connector(self):
+        from cos import logins
+        with patch.object(logins, "signed_in", return_value=True), patch.object(logins, "connector_status", return_value="missing"):
+            self.assertIsNone(self.m.ready(AJAY))
+        self.m._ready.clear()
+        with patch.object(logins, "signed_in", return_value=True), patch.object(logins, "connector_status", return_value="connected"):
+            self.assertEqual(self.m.ready(AJAY), "neo-ajay")
+
+    def test_off_for_everyone_with_the_switch(self):
+        self.m.merge({"mentions": [hit("1.1")]}, "r1", who=AJAY)
+        with patch.dict(os.environ, {"NEO_MENTIONS": "0"}):
+            self.assertEqual(self.m.open_items(AJAY), [])
+            self.assertFalse(self.m.due(who=AJAY))
+
+    def test_handing_off_is_a_task_in_their_account(self):
+        from cos import me
+        self.m.merge({"mentions": [hit("1.1")]}, "r1", who=AJAY)
+        mid = self.m.open_items(AJAY)[0]["id"]
+        with patch.object(me, "start", return_value=self.mine) as start, patch.object(server, "start_turn"):
+            self.assertEqual(self.post(f"/api/mentions/{mid}/neo")[0], 201)
+        self.assertEqual(start.call_args.args[0], AJAY)
+        self.assertEqual(self.m.get(mid, AJAY)["status"], "working")
 
 
 if __name__ == "__main__":
