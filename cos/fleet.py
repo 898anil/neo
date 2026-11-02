@@ -90,6 +90,7 @@ def _agent_row(session: str, agent: dict, runs: dict) -> dict:
     if status == "unknown" and turn_done:
         status = "done"  # herdr cannot read every screen (Codex); the transcript says the turn ended
     run = runs.get((session, agent.get("name")))
+    default_title = run_title(run) if engine == "codex" and run else ""
     row = {
         "session": session,
         "pane_id": agent.get("pane_id"),
@@ -97,7 +98,7 @@ def _agent_row(session: str, agent: dict, runs: dict) -> dict:
         "engine": engine,
         "status": status,
         "seq": agent.get("state_change_seq"),  # bumps on every state change, even ones we did not see
-        "title": agent.get("terminal_title_stripped") or agent.get("name") or engine,
+        "title": default_title or agent.get("terminal_title_stripped") or agent.get("name") or engine,
         "cwd": cwd,
         "repo": os.path.basename(cwd.rstrip("/")) or cwd,
         "session_id": session_id,

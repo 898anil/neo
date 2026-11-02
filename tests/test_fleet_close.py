@@ -61,6 +61,13 @@ class RenameActionTest(unittest.TestCase):
         self.assertEqual(self.row()["title"], "claude")
         self.assertEqual(fleet.titles.read(), {})
 
+    def test_codex_agent_uses_its_run_prompt_instead_of_injected_brief_title(self):
+        agent = {"name": "neo-abc", "pane_id": "w1:p1", "agent": "codex",
+                 "terminal_title_stripped": "Analyze alerts with evidence"}
+        run = {"id": "r1", "prompt": "Investigate Opus cost", "created_at": None}
+        row = fleet._agent_row("neo", agent, {("neo", "neo-abc"): run})
+        self.assertEqual(row["title"], "Investigate Opus cost")
+
     def test_a_name_given_before_the_session_id_moves_to_it(self):
         fleet.act("neo", "w1:p1", "rename", "Early name")
         self.assertEqual(self.row()["title"], "Early name")
