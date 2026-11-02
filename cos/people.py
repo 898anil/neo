@@ -110,22 +110,48 @@ def _path(user: str) -> Path:
     return people_dir() / f"{user}.json"
 
 
+def _legacy_load(user: str) -> dict:
+    try:
+        data = json.loads(_path(user).read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        if os.environ.get("NEO_PRIVATE_STATE") == "1":
+            raise  # trusted role policy must not silently become full access
+        return {}
+    if not isinstance(data, dict):
+        if os.environ.get("NEO_PRIVATE_STATE") == "1":
+            raise ValueError("invalid trusted role policy")
+        return {}
+    return {k: v for k, v in data.items() if k in FIELDS}
+
+
 def load(user: Optional[str]) -> dict:
     """This person's settings ({} when they have none, or for the owner's non-Slack runs)."""
     if not valid_user(user):
         return {}
-    try:
-        data = json.loads(_path(user).read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return {k: v for k, v in data.items() if k in FIELDS} if isinstance(data, dict) else {}
+    policy = _legacy_load(user)
+    if os.environ.get("NEO_PRIVATE_STATE") != "1":
+        return policy
+    from . import private_state
+    value = private_state.read(user, "settings")["value"]
+    if value is not None and not isinstance(value, dict):
+        raise ValueError("invalid private settings")
+    data = {k: v for k, v in (value or {}).items() if k in FIELDS and k != "role"}
+    if "role" in policy:
+        data["role"] = policy["role"]
+    return data
 
 
 def role(user: Optional[str]) -> str:
     """full for the owner and for anyone without a role set (what everyone had before roles)."""
     if is_owner(user):
         return "full"
-    value = load(user).get("role")
+    if not valid_user(user):
+        return "blocked" if os.environ.get("NEO_PRIVATE_STATE") == "1" else "full"
+    value = _legacy_load(user).get("role")
+    if value is not None and value not in ROLES and os.environ.get("NEO_PRIVATE_STATE") == "1":
+        raise ValueError("invalid trusted role policy")
     return value if value in ROLES else "full"
 
 
@@ -204,6 +230,33 @@ def save(user: str, by: Optional[str], **changes) -> dict:
     if by != user and not (by and by == owner_id()):
         raise PermissionError("you can only change your own settings")
     clean = {field: _check(field, value) for field, value in changes.items()}
+    if os.environ.get("NEO_PRIVATE_STATE") == "1":
+        from . import private_state
+        if "role" in clean:
+            if len(clean) != 1:
+                raise ValueError("change a role separately from personal settings")
+            with _lock:
+                people_dir().mkdir(parents=True, exist_ok=True)
+                path = _path(user)
+                tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+                tmp.write_text(json.dumps({"role": clean["role"]}, indent=2) + "\n")
+                os.chmod(tmp, 0o600)
+                tmp.replace(path)
+            return {"role": clean["role"]} if clean["role"] == "blocked" else load(user)
+        for _ in range(5):
+            state = private_state.read(user, "settings")
+            value = state["value"]
+            if value is not None and not isinstance(value, dict):
+                raise ValueError("invalid private settings")
+            data = {k: v for k, v in {**(value or {}), **clean}.items()
+                    if k in FIELDS and k != "role" and v not in ("", [])}
+            try:
+                private_state.write(user, "settings", data, state["revision"])
+                policy = _legacy_load(user)
+                return {**data, **({"role": policy["role"]} if "role" in policy else {})}
+            except private_state.Conflict:
+                continue
+        raise private_state.StateError("private settings changed repeatedly; retry")
     with _lock:
         people_dir().mkdir(parents=True, exist_ok=True)
         data = {**load(user), **clean}
@@ -272,7 +325,11 @@ def describe(user: str) -> str:
 def everyone() -> list[str]:
     """Slack ids that have a settings file."""
     try:
-        return sorted(p.stem for p in people_dir().glob("*.json") if valid_user(p.stem))
+        users = {p.stem for p in people_dir().glob("*.json") if valid_user(p.stem)}
+        if os.environ.get("NEO_PRIVATE_STATE") == "1":
+            from . import accounts
+            users.update(user for user in accounts.everyone() if valid_user(user))
+        return sorted(users)
     except OSError:
         return []
 

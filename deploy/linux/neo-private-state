@@ -1,0 +1,129 @@
+#!/usr/bin/python3 -I
+"""Minimal user-owned state worker; invoked as the account that owns the state."""
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+NAMES = frozenset({'memory', 'settings', 'tokens', 'watches', 'findings'})
+MAX_BYTES = 1024 * 1024
+
+class Conflict(Exception):
+    pass
+
+class PrivateState:
+    def __init__(self, home):
+        self.home = Path(home)
+
+    @contextlib.contextmanager
+    def directory(self):
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        home = os.open(self.home, flags)
+        try:
+            try:
+                os.mkdir('.neo-private', 0o700, dir_fd=home)
+            except FileExistsError:
+                pass
+            directory = os.open('.neo-private', flags, dir_fd=home)
+            try:
+                info = os.fstat(directory)
+                if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                    raise PermissionError('private state directory is not private and user-owned')
+                yield directory
+            finally:
+                os.close(directory)
+        finally:
+            os.close(home)
+
+    @contextlib.contextmanager
+    def locked(self):
+        with self.directory() as directory:
+            fd = os.open('.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise ValueError('invalid lock file')
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield directory
+            finally:
+                os.close(fd)
+
+    @staticmethod
+    def _name(name):
+        if name not in NAMES:
+            raise ValueError('unknown private state document')
+        return name + '.json'
+
+    def _read(self, directory, name):
+        try:
+            fd = os.open(self._name(name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return {'value': None, 'revision': 'missing'}
+        with os.fdopen(fd, 'rb') as file:
+            if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+                raise ValueError('invalid state file')
+            data = file.read(MAX_BYTES + 1)
+        if len(data) > MAX_BYTES:
+            raise ValueError('state file exceeds size limit')
+        try:
+            value = json.loads(data)
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError('invalid state JSON') from exc
+        return {'value': value, 'revision': hashlib.sha256(data).hexdigest()}
+
+    def read(self, name):
+        self._name(name)
+        with self.locked() as directory:
+            return self._read(directory, name)
+
+    def write(self, name, value, revision):
+        target = self._name(name)
+        data = json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
+        if len(data) > MAX_BYTES:
+            raise ValueError('state exceeds size limit')
+        with self.locked() as directory:
+            if self._read(directory, name)['revision'] != revision:
+                raise Conflict('state changed; read again')
+            tmp = '.write-' + secrets.token_hex(16)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            try:
+                with os.fdopen(fd, 'wb') as file:
+                    file.write(data)
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(tmp, target, src_dir_fd=directory, dst_dir_fd=directory)
+                os.fsync(directory)
+            finally:
+                try:
+                    os.unlink(tmp, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+            return {'value': value, 'revision': hashlib.sha256(data).hexdigest()}
+
+def main():
+    user = pwd.getpwuid(os.geteuid())
+    if os.geteuid() == 0 or not user.pw_name.startswith('neo-'):
+        raise PermissionError('worker must run as a neo user account')
+    request = json.loads(sys.stdin.buffer.read(MAX_BYTES + 1))
+    if not isinstance(request, dict):
+        raise ValueError('invalid request')
+    store = PrivateState(user.pw_dir)
+    if request.get('op') == 'read':
+        result = store.read(request.get('document'))
+    elif request.get('op') == 'write':
+        result = store.write(request.get('document'), request.get('value'), request.get('revision'))
+    else:
+        raise ValueError('unknown operation')
+    print(json.dumps(result, ensure_ascii=False))
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, Conflict) as error:
+        print(json.dumps({'error': type(error).__name__, 'message': str(error)}), file=sys.stderr)
+        sys.exit(1)

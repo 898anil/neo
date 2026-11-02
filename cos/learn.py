@@ -110,8 +110,38 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
+def _private_user(path: Path) -> Optional[str]:
+    if os.environ.get("NEO_PRIVATE_STATE") != "1":
+        return None
+    from . import people
+    if path == memory_dir() / ME:
+        user = people.owner_id()
+        if not people.valid_user(user):
+            raise ValueError("owner identity is required for private memory")
+        return user
+    if path.parent == memory_dir() / PEOPLE and path.suffix == ".md" and people.valid_user(path.stem):
+        return path.stem
+    return None
+
+
+def _private_entries(value: object) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, dict) or not isinstance(value.get("entries"), list):
+        raise ValueError("invalid private memory")
+    rows = value["entries"]
+    if not all(isinstance(row, dict) and isinstance(row.get("text"), str)
+               and isinstance(row.get("meta"), str) for row in rows):
+        raise ValueError("invalid private memory entry")
+    return rows
+
+
 def entries(path: Path) -> list[dict]:
     """The bullets in one memory file, oldest first: {text, meta}."""
+    user = _private_user(path)
+    if user:
+        from . import private_state
+        return _private_entries(private_state.read(user, "memory")["value"])
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
@@ -144,6 +174,20 @@ def add(text: str, kind: str, repo: Optional[str] = None, source: str = "",
         target = str(path.relative_to(memory_dir()))
         meta = f"{date.today().isoformat()} {kind} for:{target} by:{user} {_clean(source)[:80]}".strip()
         path = memory_dir() / PENDING
+    personal = _private_user(path)
+    if personal:
+        from . import private_state
+        for _ in range(5):
+            state = private_state.read(personal, "memory")
+            rows = _private_entries(state["value"])
+            if any(_norm(e["text"]) == _norm(text) for e in rows):
+                return None
+            try:
+                private_state.write(personal, "memory", {"entries": rows + [{"text": text, "meta": meta}]}, state["revision"])
+                return str(path.relative_to(memory_dir()))
+            except private_state.Conflict:
+                continue
+        raise private_state.StateError("private memory changed repeatedly; retry")
     with _locked():
         if any(_norm(e["text"]) == _norm(text) or (kind == "lesson" and adds_little(text, e["text"])) for e in entries(path)):
             return None
@@ -377,7 +421,8 @@ def all_files(user: Optional[str] = None, everyone: bool = True) -> list[dict]:
     else:
         own = [root / TEAM] + ([rules_file(user)] if user is None or _valid(user) else [])
     paths = own + [root / LESSONS] + sorted((root / "repos").glob("*.md"))
-    return [{"name": str(p.relative_to(root)), "path": str(p), "entries": entries(p)} for p in paths if p.exists()]
+    return [{"name": str(p.relative_to(root)), "path": str(p), "entries": entries(p)}
+            for p in paths if p.exists() or _private_user(p)]
 
 
 def _valid(user: str) -> bool:

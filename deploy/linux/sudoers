@@ -6,3 +6,4 @@
 Defaults:SVC_USER !use_pty, closefrom_override
 SVC_USER ALL=(root) NOPASSWD: /usr/local/sbin/neo-account ensure *
 SVC_USER ALL=(%neo-people) NOPASSWD: /usr/local/bin/neo-run --spec-fd *
+SVC_USER ALL=(%neo-people) NOPASSWD: /usr/local/bin/neo-private-state ""

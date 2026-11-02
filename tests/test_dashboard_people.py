@@ -129,7 +129,7 @@ class PersonViewTest(Base):
             h = self.handler("/api/overview", cookie=cookie)
             h.do_GET()
         self.assertEqual([r["id"] for r in h.out[-1][1]["runs"]], [mine.id])
-        for path in ("/api/memory", "/api/usage", "/api/sessions"):  # the owner's extras
+        for path in ("/api/usage", "/api/sessions"):  # the owner's extras
             h = self.handler(path, cookie=cookie)
             h.do_GET()
             self.assertEqual(h.out[-1][0], 403, path)

@@ -619,7 +619,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({**info, "events": events})
         if parts == ["api", "memory"]:
             from . import autonomy, learn
-            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files(), "review": autonomy.view()})
+            return self._json({"dir": str(learn.memory_dir()), "files": learn.all_files(everyone=False), "review": autonomy.view()})
         if parts == ["api", "usage"]:
             from .runner import usage_summary
 
@@ -716,15 +716,13 @@ class Handler(BaseHTTPRequestHandler):
         return {"default_engine": load(viewer).get("engine") or default_engine(), "notifications": None}
 
     def _viewers_run(self, viewer: str | None, run_id: str) -> Run | None:
-        """The run, if the viewer may open it: a person only their own (anything else is "not found", so
-        they can't tell it exists); the owner any, so a link someone sends them still opens."""
-        from .people import is_owner
+        """Only the viewer's run; other people's run IDs are indistinguishable from missing ones."""
 
         run = self._run_or_404(run_id)
-        if not run or is_owner(viewer):
+        if not run:
             return run
         try:
-            mine = run.meta().get("slack_user") == viewer
+            mine = fleet.owns(viewer, run.meta().get("slack_user"))
         except (OSError, ValueError):
             mine = False
         if not mine:
@@ -737,8 +735,6 @@ class Handler(BaseHTTPRequestHandler):
         """A card or digest key (run:<id>, or a live agent's) the viewer owns. Live agents are the owner's."""
         from .people import is_owner
 
-        if is_owner(viewer):
-            return True  # the owner's: any run's, as before people had dashboards (a link still opens)
         if key.startswith("run:"):
             run_id = key[4:]
             if not valid_run_id(run_id):
@@ -748,8 +744,8 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 return False
             # a card or digest of a run their neo did for someone else is written from that person's words
-            return meta.get("slack_user") == viewer and not is_a2a(meta)
-        return False
+            return fleet.owns(viewer, meta.get("slack_user")) and (is_owner(viewer) or not is_a2a(meta))
+        return is_owner(viewer)
 
     def _a2a_ask(self):
         """neo-ask: one CoS asks another (cos/broker.py). Its own auth: the asking run's token, from the
@@ -829,6 +825,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if self._scoped_get(user, parts):
             return
+        if parts == ["api", "memory"]:
+            from . import learn
+
+            files = learn.all_files(user=user, everyone=False)
+            return self._json({"files": [
+                {"name": "personal" if f["name"].startswith("people/") else f["name"],
+                 "scope": "personal" if f["name"].startswith("people/") else "shared",
+                 "entries": [{"text": entry["text"]} for entry in f["entries"]]}
+                for f in files
+            ]})
         if parts == ["api", "work"]:
             return self._json(work.prs(who=user))  # their own pull requests, with their own GitHub login
         if parts == ["api", "me"]:
@@ -1060,15 +1066,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.CONFLICT, str(exc))
         if parts == ["api", "digest", "refresh"]:
             key = str((body or {}).get("key", ""))
-            if not digest.valid_key(key):
+            if not digest.valid_key(key) or not self._key_is_mine(None, key):
                 return self._error(HTTPStatus.BAD_REQUEST, "bad key")
             return self._json(digest.refresh(key, fleet.overview()), HTTPStatus.ACCEPTED)
         if parts == ["api", "home", "close"]:
+            if not self._key_is_mine(None, str((body or {}).get("key", ""))):
+                return self._error(HTTPStatus.NOT_FOUND, "not on your dashboard")
             try:
                 return self._json(home.close_waiting(str((body or {}).get("key", ""))))
             except ValueError as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
         if parts == ["api", "home", "do"]:
+            if not self._key_is_mine(None, str((body or {}).get("key", ""))):
+                return self._error(HTTPStatus.NOT_FOUND, "not on your dashboard")
             try:
                 return self._json(do_recommendation(str((body or {}).get("key", ""))), HTTPStatus.ACCEPTED)
             except LookupError as exc:
@@ -1076,6 +1086,9 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.CONFLICT, str(exc))
         if len(parts) == 4 and parts[:2] == ["api", "loops"] and parts[3] in LOOP_ACTIONS:
+            loop = loops.STORE.read().get(parts[2])
+            if not loop or not fleet.owns(None, loop.get("owner")):
+                return self._error(HTTPStatus.NOT_FOUND, "no such loop")
             try:
                 return self._json(loops.set_status(parts[2], LOOP_ACTIONS[parts[3]]))
             except ValueError as exc:
@@ -1095,12 +1108,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return self._json({"default_engine": default_engine(), "notifications": pause.state()})
         if parts == ["api", "watches"]:
+            watch_id = (body or {}).get("id")
+            if watch_id and (not watches.get(str(watch_id)) or not fleet.owns(None, watches.watch_owner(str(watch_id)))):
+                return self._error(HTTPStatus.NOT_FOUND, "no such watch")
+            if (body or {}).get("owner") and not fleet.owns(None, (body or {}).get("owner")):
+                return self._error(HTTPStatus.FORBIDDEN, "cannot create another person's watch")
             try:
                 return self._json(watches.save(body or {}), HTTPStatus.CREATED)
             except ValueError as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
         if len(parts) == 4 and parts[:2] == ["api", "watches"] and parts[3] in ("run", "delete"):
-            if not watches.get(parts[2]):
+            if not watches.get(parts[2]) or not fleet.owns(None, watches.watch_owner(parts[2])):
                 return self._error(HTTPStatus.NOT_FOUND, "no such watch")
             if parts[3] == "delete":
                 watches.delete(parts[2])
@@ -1117,6 +1135,9 @@ class Handler(BaseHTTPRequestHandler):
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 return self._error(HTTPStatus.BAD_GATEWAY, str(exc))
         if len(parts) == 4 and parts[:2] == ["api", "findings"] and parts[3] in ("dismiss", "reopen"):
+            found = watches.get_finding(parts[2])
+            if not found or not fleet.owns(None, watches.finding_owner(found)):
+                return self._error(HTTPStatus.NOT_FOUND, "no such finding")
             try:
                 return self._json(watches.set_status(parts[2], "dismissed" if parts[3] == "dismiss" else "new"))
             except ValueError as exc:
@@ -1224,7 +1245,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(run.meta(), HTTPStatus.CREATED)
 
         if len(parts) == 4 and parts[:2] == ["api", "runs"]:
-            run = self._run_or_404(parts[2])
+            run = self._viewers_run(None, parts[2])
             if not run:
                 return
             return self._run_action(run, parts[3], body)

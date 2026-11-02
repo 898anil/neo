@@ -32,22 +32,68 @@ def save(user: str, tool: str, token: str) -> None:
         raise ValueError("not a Slack user")
     if not _TOKEN.match(token):
         raise ValueError(f"that doesn't look like a {TOOLS[tool][0]} token")
+    if os.environ.get("NEO_PRIVATE_STATE") == "1":
+        _update_private(user, tool, token)
+        return
     STORE.update(lambda d: d.setdefault(user, {}).update({tool: token}))
     _private()
 
 
 def remove(user: str, tool: str) -> bool:
+    if os.environ.get("NEO_PRIVATE_STATE") == "1":
+        return _update_private(user, tool, None)
     return bool(STORE.update(lambda d: (d.get(user) or {}).pop(tool, None)))
 
 
 def connected(user: Optional[str]) -> set[str]:
+    if os.environ.get("NEO_PRIVATE_STATE") == "1":
+        return set(_private_tokens(user)) if user else set()
     return set((STORE.read().get(user) or {}).keys()) & set(TOOLS) if user else set()
 
 
 def env_for(user: Optional[str]) -> dict:
     """{VARIABLE: token} for this person's own runs."""
-    mine = STORE.read().get(user) or {} if user else {}
+    mine = (_private_tokens(user) if os.environ.get("NEO_PRIVATE_STATE") == "1" else STORE.read().get(user) or {}) if user else {}
     return {TOOLS[tool][1]: token for tool, token in mine.items() if tool in TOOLS and token}
+
+
+def _private_tokens(user: str) -> dict:
+    from . import private_state
+    value = private_state.read(user, "tokens")["value"]
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or any(k not in TOOLS or not isinstance(v, str) or not _TOKEN.fullmatch(v)
+                                          for k, v in value.items()):
+        raise ValueError("invalid private tool tokens")
+    return value
+
+
+def _update_private(user: str, tool: str, token: Optional[str]) -> bool:
+    from . import private_state
+    if tool not in TOOLS:
+        return False
+    for _ in range(5):
+        state = private_state.read(user, "tokens")
+        value = state["value"]
+        if value is None:
+            value = {}
+        if not isinstance(value, dict) or any(k not in TOOLS or not isinstance(v, str) or not _TOKEN.fullmatch(v)
+                                              for k, v in value.items()):
+            raise ValueError("invalid private tool tokens")
+        data = dict(value)
+        existed = tool in data
+        if token is None:
+            data.pop(tool, None)
+            if not existed:
+                return False
+        else:
+            data[tool] = token
+        try:
+            private_state.write(user, "tokens", data, state["revision"])
+            return existed
+        except private_state.Conflict:
+            continue
+    raise private_state.StateError("private tokens changed repeatedly; retry")
 
 
 def _private() -> None:

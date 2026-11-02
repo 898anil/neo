@@ -7,7 +7,7 @@ import unittest
 import unittest.mock
 from unittest.mock import patch
 
-from cos import dashlink, fleet, home, people, server, watches
+from cos import dashlink, fleet, home, learn, people, server, watches
 from cos.runner import Run
 from tests.test_dashboard_people import AJAY, OWNER, YOSH, Base
 
@@ -81,7 +81,17 @@ class DashboardTest(Scoped):
         self.assertEqual(len(data["agents"]), 1)
         self.assertTrue(data["viewer"]["owner"])
         self.assertIsNotNone(data["notifications"])
-        self.assertEqual(self.get(f"/api/runs/{self.theirs.id}", user=OWNER)[0], 200)  # a link someone sends still opens
+        self.assertEqual(self.get(f"/api/runs/{self.theirs.id}", user=OWNER)[0], 404)
+
+    def test_owner_cannot_read_or_mutate_other_users_runs_by_direct_id(self):
+        for path in (f"/api/runs/{self.theirs.id}", f"/api/runs/{self.theirs.id}/stream"):
+            self.assertEqual(self.get(path, user=OWNER)[0], 404)
+        for action in ("rename", "cancel", "message"):
+            self.assertEqual(self.post(f"/api/runs/{self.theirs.id}/{action}", {"title": "x", "prompt": "x"}, user=OWNER)[0], 404)
+        self.assertEqual(self.post('/api/home/close', {'key': f'run:{self.theirs.id}'}, user=OWNER)[0], 404)
+        self.assertEqual(self.post('/api/digest/refresh', {'key': f'run:{self.theirs.id}'}, user=OWNER)[0], 400)
+        with patch('cos.server.do_recommendation', side_effect=AssertionError('must not touch another run')):
+            self.assertEqual(self.post('/api/home/do', {'key': f'run:{self.theirs.id}'}, user=OWNER)[0], 404)
 
     def test_someone_elses_run_doesnt_exist_for_them(self):
         for path in (f"/api/runs/{self.theirs.id}", f"/api/runs/{self.theirs.id}/stream"):
@@ -116,6 +126,20 @@ class DashboardTest(Scoped):
             self.assertEqual(self.get("/api/findings/f1")[0], 404)
             self.assertEqual(self.post("/api/findings/f1/dismiss")[0], 404)
 
+    def test_owner_cannot_modify_another_users_watches_and_findings(self):
+        watch = watches.save({"name": "yosh ci", "instructions": "check CI", "every": 60, "owner": YOSH})
+        with patch('cos.watches.start', side_effect=AssertionError('must not start another user watch')):
+            for action in ('run', 'delete'):
+                self.assertEqual(self.post(f"/api/watches/{watch['id']}/{action}", user=OWNER)[0], 404)
+        self.assertEqual(self.post('/api/watches', {'id': watch['id'], 'name': 'x', 'instructions': 'x', 'every': 60}, user=OWNER)[0], 404)
+        with patch.object(watches, "get_finding", return_value={"id": "f1", "watch_id": watch['id'], "status": "new"}):
+            self.assertEqual(self.post("/api/findings/f1/dismiss", user=OWNER)[0], 404)
+
+    def test_owner_cannot_change_another_users_loop(self):
+        from cos import loops
+        loop = loops.open_loop('watch', 'private-loop', 'private', {}, owner=YOSH)
+        self.assertEqual(self.post(f"/api/loops/{loop['id']}/close", user=OWNER)[0], 404)
+
     def test_settings_are_theirs(self):
         status, data = self.post("/api/settings", {"default_engine": "codex", "notifications": "forever"})
         self.assertEqual((status, data["default_engine"], data["notifications"]), (200, "codex", None))
@@ -123,10 +147,39 @@ class DashboardTest(Scoped):
         self.assertEqual(self.post("/api/settings", {"default_engine": "gpt"})[0], 400)
 
     def test_the_owners_extras_stay_the_owners(self):
-        for path in ("/api/memory", "/api/usage", "/api/sessions", "/api/agents/s/p"):
+        for path in ("/api/usage", "/api/sessions", "/api/agents/s/p"):
             self.assertEqual(self.get(path)[0], 403, path)
         for path in ("/api/live", "/api/memory/apply", "/api/system-watches/x/run"):
             self.assertEqual(self.post(path)[0], 403, path)
+
+    def test_memory_is_personal_with_shared_notes_and_no_owner_metadata(self):
+        learn.add("Owner private preference", "rule", user=OWNER)
+        learn.add("Ajay private preference", "rule", user=AJAY)
+        learn.add("Yosh private preference", "rule", user=YOSH)
+        learn.add("Shared team guidance", "rule", team=True, user=OWNER)
+        learn.add("Shared lesson", "lesson", user=OWNER)
+        learn.add("Shared repo guidance", "rule", repo="backend", user=OWNER)
+        for user, own, other in ((AJAY, "Ajay private preference", "Yosh private preference"),
+                                 (YOSH, "Yosh private preference", "Ajay private preference")):
+            status, data = self.get("/api/memory", user=user)
+            self.assertEqual(status, 200)
+            text = json.dumps(data)
+            self.assertIn(own, text)
+            self.assertIn("Shared team guidance", text)
+            self.assertIn("Shared lesson", text)
+            self.assertIn("Shared repo guidance", text)
+            self.assertNotIn(other, text)
+            self.assertNotIn("Owner private preference", text)
+            self.assertNotIn(str(self.dir), text)
+            self.assertNotIn("review", data)
+
+    def test_owner_dashboard_memory_does_not_show_other_personal_rules(self):
+        learn.add("Owner personal rule", "rule", user=OWNER)
+        learn.add("Ajay personal rule", "rule", user=AJAY)
+        status, data = self.get("/api/memory", user=OWNER)
+        self.assertEqual(status, 200)
+        self.assertIn("Owner personal rule", json.dumps(data))
+        self.assertNotIn("Ajay personal rule", json.dumps(data))
 
     def test_their_stream_leaves_out_another_persons_words(self):
         answer = Run.create("claude", "a question from Yosh's neo", str(self.dir), "readonly", source="a2a",
@@ -176,8 +229,8 @@ class ReviewFixesTest(Scoped):
         self.assertNotIn("private plan", json.dumps(self.get("/api/home")[1]))
         self.assertNotIn("private plan", json.dumps(self.get("/api/overview")[1]))
 
-    def test_the_owner_still_opens_any_digest(self):
-        self.assertTrue(server.Handler._key_is_mine(None, f"run:{self.theirs.id}"))
+    def test_the_owner_does_not_open_another_users_digest(self):
+        self.assertFalse(server.Handler._key_is_mine(None, f"run:{self.theirs.id}"))
 
     def test_a_deleted_watch_takes_its_findings(self):
         owner_watch = watches.save({"name": "prod errors", "instructions": "check prod", "every": 60})

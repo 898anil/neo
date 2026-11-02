@@ -724,9 +724,7 @@ let overview = null, timer = null, stream = null, lastRoute = "";
 // Everyone has their own dashboard; the owner's also has the machine's extras (PRs, memory, usage, live agents).
 const isOwner = () => !(overview && overview.viewer && overview.viewer.owner === false);
 function applyViewer() {
-  const owner = isOwner();
-  document.querySelectorAll('.tab[data-tab="memory"]').forEach((t) => { t.style.display = owner ? "" : "none"; });
-  if (!owner && currentTab() === "memory") location.hash = "#/";
+  // All viewers have a Memory tab; the server scopes its contents to the signed-in person.
 }
 function stopWork() { clearTimeout(timer); timer = null; if (stream) { stream.close(); stream = null; } }
 function schedule(fn, ms) { clearTimeout(timer); timer = setTimeout(fn, document.hidden ? Math.max(ms, 15000) : ms); }
@@ -783,22 +781,21 @@ function reviewSection(rv) {
       h("button", { class: "btn", onclick: (e) => applyProposals(rv, open.map((p) => p.n), e.currentTarget) }, `Apply all ${open.length}`)) : null,
   ];
 }
-// What neo learned from mistakes and from what you told it (cos/learn.py). Read-only here:
-// the files are plain Markdown on the Mac, edit or delete lines there.
+// What neo learned from mistakes and from what you told it (cos/learn.py).
 function renderMemory(o) {
   const m = memoryData;
   const count = m ? m.files.reduce((n, f) => n + f.entries.length, 0) : 0;
-  const label = { "me.md": "What you told me", "lessons.md": "Lessons from mistakes" };
+  const label = { "me.md": "What you told me", "personal": "Your personal memory", "team.md": "Shared team rules", "lessons.md": "Shared lessons from mistakes" };
   const page = h("div", { class: "wrap" },
     h("header", { class: "hero" }, h("div", { class: "host" }, h("span", { class: "live", id: "live" }), o.host), h("h1", {}, "Memory"),
       m ? h("p", { class: "sub" }, count ? `${count} things neo remembers, newest first.` : "Nothing yet.") : null),
     m ? reviewSection(m.review) : null,
     !m ? h("p", { class: "empty" }, memoryErr ? `Couldn't load memory: ${memoryErr}` : "Loading…")
       : count ? m.files.filter((f) => f.entries.length).map((f) => [
-        h("h2", { class: "section" }, label[f.name] || `In ${f.name.replace(/^repos\//, "").replace(/\.md$/, "")}`),
+        h("h2", { class: "section" }, label[f.name] || (f.name.startsWith("repos/") ? `Shared notes: ${f.name.replace(/^repos\//, "").replace(/\.md$/, "")}` : `In ${f.name.replace(/\.md$/, "")}`)),
         h("ul", { class: "memory-list" }, f.entries.slice().reverse().map((e) => h("li", {}, e.text))),
       ]) : h("p", { class: "empty" }, "neo learns from mistakes in sessions you run and from what you tell it (@neo remember …)."),
-    m ? h("p", { class: "empty" }, `Stored as Markdown in ${m.dir}`) : null,
+    m && m.dir ? h("p", { class: "empty" }, `Stored as Markdown in ${m.dir}`) : null,
   );
   paint(page, "memory:" + o.host + memoryErr + JSON.stringify(memoryData));
 }
@@ -829,21 +826,11 @@ function board(o) {
     idle: items.filter((x) => x.att === "idle"),
   };
 }
-const saved = (k) => { try { return JSON.parse(localStorage.getItem("snap:" + k) || "null"); } catch { return null; } };
-// The snapshot only paints the first screen on the next launch, so writing it (a synchronous
-// stringify of ~100 KB) on every 3 s poll stalls the phone for nothing. Keep the latest in memory
-// and write it at most every 30 s, and when the page is hidden.
-const pendingSnaps = new Map(); let snapAt = 0;
-function flushSnaps() {
-  for (const [k, v] of pendingSnaps) { try { localStorage.setItem("snap:" + k, JSON.stringify(v)); } catch { /* full or blocked */ } }
-  pendingSnaps.clear(); snapAt = Date.now();
-}
-const save = (k, v) => { pendingSnaps.set(k, v); if (Date.now() - snapAt > 30000) flushSnaps(); };
-addEventListener("pagehide", flushSnaps);
-document.addEventListener("visibilitychange", () => { if (document.hidden) flushSnaps(); });
+// Old dashboard snapshots were shared between accounts on the same browser. Never restore or
+// persist private dashboard data there, and clear snapshots left by older versions.
+try { for (const key of ["snap:overview", "snap:home"]) localStorage.removeItem(key); } catch { /* storage blocked */ }
 async function loadOverview() {
   const o = await api("/api/overview");
-  if (o !== overview) save("overview", o);
   overview = o;
   applyViewer();
   const n = board(overview).needs.length;
@@ -1002,12 +989,10 @@ function boardGroups(o) {
 // (cos/home.py); "since" is pinned for the visit so the list doesn't empty while you read it.
 let homeData = null, homeSince = null, homeSeenTimer = null, moreMoved = false, askDraft = "";
 // Last session's board, drawn at once on open and replaced by the first fetch.
-overview = saved("overview"); homeData = saved("home");
 const fold = (k, d) => { try { const v = localStorage.getItem("fold:" + k); return v === null ? d : v === "1"; } catch { return d; } };
 const setFold = (k, v) => { try { localStorage.setItem("fold:" + k, v ? "1" : "0"); } catch { /* storage blocked */ } };
 async function loadHome() {
   const d = await api(`/api/home${homeSince === null ? "" : `?since=${homeSince}`}`);
-  if (d !== homeData) save("home", d);
   homeData = d;
   if (homeSince === null) {
     homeSince = homeData.since;

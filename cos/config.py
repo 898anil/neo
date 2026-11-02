@@ -72,6 +72,8 @@ def agent_brief(cwd: Optional[str] = None, user: Optional[str] = None) -> Option
     try:
         remembered = learn.brief(cwd, user=user)
     except Exception:  # noqa: BLE001 - memory is a bonus, the task is what matters
+        if os.environ.get("NEO_PRIVATE_STATE") == "1":
+            raise  # a missing private worker must never silently omit someone's memory
         remembered = ""
     parts = [p for p in (_base_brief(), who, remembered) if p]
     return "\n\n".join(parts) or None
