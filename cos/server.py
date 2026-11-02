@@ -829,6 +829,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if self._scoped_get(user, parts):
             return
+        if parts == ["api", "work"]:
+            return self._json(work.prs(who=user))  # their own pull requests, with their own GitHub login
         if parts == ["api", "me"]:
             return self._json(me.overview(user))
         if len(parts) == 4 and parts[:3] == ["api", "me", "runs"]:
@@ -899,6 +901,26 @@ class Handler(BaseHTTPRequestHandler):
             if not found or watches.finding_owner(found) != user:
                 return self._error(HTTPStatus.NOT_FOUND, "no such finding")
             return self._json(watches.set_status(parts[2], "dismissed" if parts[3] == "dismiss" else "new"))
+        if len(parts) == 3 and parts[:2] == ["api", "work"] and parts[2] in ("review", "fix", "merge"):
+            listing = work.prs(who=user)
+            pr = next((x for x in listing["mine"] if x["repo"] == body.get("repo") and x["number"] == body.get("number")), None)
+            if not pr:
+                return self._error(HTTPStatus.NOT_FOUND, "pull request not in your list; refresh and try again")
+            if parts[2] == "merge":
+                if people.role(user) != "full":
+                    return self._error(HTTPStatus.FORBIDDEN, f"your role ({people.role(user)}) doesn't merge; ask a reviewer")
+                try:
+                    return self._json({"ok": True, "message": work.merge(pr, who=user)})
+                except ValueError as exc:
+                    return self._error(HTTPStatus.CONFLICT, str(exc))
+            prompt = work.review_prompt(pr) if parts[2] == "review" else work.fix_ci_prompt(pr)
+            try:
+                me.check_rate(user)
+                run = me.start(user, prompt)  # a task in their own account, like Slack (live agents are the owner's)
+            except (ValueError, PermissionError) as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            start_turn(run, None)
+            return self._json({"run_id": run.id}, HTTPStatus.CREATED)
         if len(parts) == 4 and parts[:2] == ["api", "loops"] and parts[3] in LOOP_ACTIONS:
             loop = loops.STORE.read().get(parts[2])
             if not loop or loop.get("owner") != user:

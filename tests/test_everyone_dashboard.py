@@ -118,9 +118,9 @@ class DashboardTest(Scoped):
         self.assertEqual(self.post("/api/settings", {"default_engine": "gpt"})[0], 400)
 
     def test_the_owners_extras_stay_the_owners(self):
-        for path in ("/api/memory", "/api/usage", "/api/work", "/api/sessions", "/api/agents/s/p"):
+        for path in ("/api/memory", "/api/usage", "/api/sessions", "/api/agents/s/p"):
             self.assertEqual(self.get(path)[0], 403, path)
-        for path in ("/api/live", "/api/mentions/check", "/api/work/merge", "/api/memory/apply", "/api/system-watches/x/run"):
+        for path in ("/api/live", "/api/mentions/check", "/api/memory/apply", "/api/system-watches/x/run"):
             self.assertEqual(self.post(path)[0], 403, path)
 
     def test_their_stream_leaves_out_another_persons_words(self):
@@ -218,6 +218,70 @@ class FollowUpsTest(Scoped):
         self.assertEqual(self.post(f"/api/loops/{mine}/mute")[0], 200)
         self.assertEqual(loops.STORE.read()[mine]["status"], "muted")
         self.assertNotIn("Prod 500s", json.dumps(self.get("/api/home")[1]))
+
+
+PR_JSON = json.dumps({"data": {"mine": {"nodes": [{
+    "number": 12, "title": "Fix login", "url": "https://github.com/acme/backie/pull/12", "isDraft": False,
+    "updatedAt": "2026-11-02T08:00:00Z", "reviewDecision": "APPROVED", "headRefName": "fix-login",
+    "author": {"login": "ajay"}, "repository": {"nameWithOwner": "acme/backie", "name": "backie"},
+    "additions": 3, "deletions": 1, "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}]}}})
+
+
+class PullRequestsTest(Scoped):
+    """Each person's PR queue is theirs: their own gh login, in their own account, within their role."""
+
+    def setUp(self):
+        super().setUp()
+        from cos import work
+        self.work = work
+        work._people.clear()
+        self.calls = []
+        self.out = (0, "neo-run: starting\n" + PR_JSON)
+        self.gh = patch("cos.logins.run_argv", side_effect=lambda account, argv, timeout=60: self.calls.append((account, argv)) or self.out)
+        self.gh.start()
+
+    def tearDown(self):
+        self.gh.stop()
+        super().tearDown()
+
+    def test_their_list_comes_from_their_own_login(self):
+        status, data = self.get("/api/work")
+        self.assertEqual((status, [p["number"] for p in data["mine"]], data["error"]), (200, [12], None))
+        self.assertEqual(self.calls[0][0], "neo-ajay")
+        self.assertEqual(self.calls[0][1][:3], ["gh", "api", "graphql"])
+        self.assertIsNone(self.work._state["data"])  # the owner's list is untouched
+
+    def test_not_connected_says_what_to_do(self):
+        self.out = (1, "To get started with GitHub CLI, please run:  gh auth login")
+        self.assertIn("connect my github", self.get("/api/work")[1]["error"])
+
+    def test_merge_only_with_a_role_that_merges(self):
+        people.save(AJAY, OWNER, role="prs-only")
+        self.assertEqual(self.post("/api/work/merge", {"repo": "acme/backie", "number": 12})[0], 403)
+        self.assertFalse([c for c in self.calls if c[1][1:3] == ["pr", "merge"]])
+        people.save(AJAY, OWNER, role="full")
+        self.assertEqual(self.post("/api/work/merge", {"repo": "acme/backie", "number": 12})[0], 200)
+        merged = [c for c in self.calls if c[1][1:3] == ["pr", "merge"]]
+        self.assertEqual(merged, [("neo-ajay", ["gh", "pr", "merge", "12", "-R", "acme/backie", "--squash", "--delete-branch"])])
+
+    def test_review_and_fix_are_tasks_in_their_account(self):
+        from cos import me
+        started = []
+        with patch.object(me, "start", side_effect=lambda user, prompt, engine=None: started.append((user, prompt)) or self.mine), \
+                patch.object(server, "start_turn"):
+            self.assertEqual(self.post("/api/work/review", {"repo": "acme/backie", "number": 12})[0], 201)
+            self.assertEqual(self.post("/api/work/fix", {"repo": "acme/backie", "number": 12})[0], 201)
+            self.assertEqual(self.post("/api/work/review", {"repo": "acme/deskie", "number": 9})[0], 404)  # not theirs
+        self.assertEqual([u for u, _ in started], [AJAY, AJAY])
+        self.assertIn("Review pull request", started[0][1])
+
+    def test_their_open_prs_are_followed_up_for_them(self):
+        from cos import loops
+        loops.sync_prs(self.work.prs(who=AJAY)["mine"], AJAY)
+        self.assertEqual([l["owner"] for l in loops.listing(viewer=AJAY)], [AJAY])
+        self.assertEqual(loops.listing(viewer=None), [])
+        loops.sync_prs([], None)  # the owner's (empty) list doesn't mark Ajay's PR closed
+        self.assertTrue(loops.STORE.read()[loops._id("pr:acme/backie#12")]["pr_open"])
 
 
 if __name__ == "__main__":

@@ -187,7 +187,12 @@ def begin(user: str, account: str, tool: str) -> Login:
 
 def run(account: str, tool: str, action: str, timeout: float = 60) -> tuple[int, str]:
     """A quick logout/status command in the account: (exit code, output)."""
-    proc = start(account, ARGV[(tool, action)], stdin=subprocess.DEVNULL)
+    return run_argv(account, ARGV[(tool, action)], timeout)
+
+
+def run_argv(account: str, argv: list[str], timeout: float = 60) -> tuple[int, str]:
+    """A command neo built (never one a person typed) in the account, nothing lent: (exit code, output)."""
+    proc = start(account, argv, stdin=subprocess.DEVNULL)
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

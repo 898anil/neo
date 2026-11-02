@@ -725,8 +725,8 @@ let overview = null, timer = null, stream = null, lastRoute = "";
 const isOwner = () => !(overview && overview.viewer && overview.viewer.owner === false);
 function applyViewer() {
   const owner = isOwner();
-  document.querySelectorAll('.tab[data-tab="work"], .tab[data-tab="memory"]').forEach((t) => { t.style.display = owner ? "" : "none"; });
-  if (!owner && (currentTab() === "work" || currentTab() === "memory")) location.hash = "#/";
+  document.querySelectorAll('.tab[data-tab="memory"]').forEach((t) => { t.style.display = owner ? "" : "none"; });
+  if (!owner && currentTab() === "memory") location.hash = "#/";
 }
 function stopWork() { clearTimeout(timer); timer = null; if (stream) { stream.close(); stream = null; } }
 function schedule(fn, ms) { clearTimeout(timer); timer = setTimeout(fn, document.hidden ? Math.max(ms, 15000) : ms); }
@@ -1583,8 +1583,9 @@ function prSheet(pr, mine) {
   } }, label); return b; };
   const acts = [];
   const who = engineName();
-  if (mine && (pr.ci === "FAILURE" || pr.ci === "ERROR")) acts.push(go(`Fix CI with ${who}`, async () => { const r = await api("/api/work/fix", { method: "POST", body: JSON.stringify({ repo: pr.repo, number: pr.number }) }); location.hash = `#/agent/${enc(r.session)}/${enc(r.pane_id)}`; }));
-  if (mine && pr.review === "APPROVED" && pr.ci === "SUCCESS" && !pr.draft) {
+  if (mine && (pr.ci === "FAILURE" || pr.ci === "ERROR")) acts.push(go(`Fix CI with ${who}`, async () => { const r = await api("/api/work/fix", { method: "POST", body: JSON.stringify({ repo: pr.repo, number: pr.number }) }); location.hash = r.session ? `#/agent/${enc(r.session)}/${enc(r.pane_id)}` : `#/run/${r.run_id}`; }));
+  const mayMerge = !overview || !overview.viewer || overview.viewer.role === "full";
+  if (mine && mayMerge && pr.review === "APPROVED" && pr.ci === "SUCCESS" && !pr.draft) {
     let armed = false;
     const m = h("button", { class: "btn go", onclick: async () => {
       if (!armed) { armed = true; m.textContent = "Tap again to squash-merge"; setTimeout(() => { armed = false; m.textContent = "Merge"; }, 4000); return; }

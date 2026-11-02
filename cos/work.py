@@ -1,7 +1,8 @@
 """Your GitHub work: your own open pull requests.
 
 One GraphQL query through the logged-in `gh` CLI (no tokens of our own). The result is
-cached and refreshed in the background, because the query takes a few seconds.
+cached and refreshed in the background, because the query takes a few seconds. Each person's
+list comes from their own `gh` login, run in their own account (cos/logins.run_argv).
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -33,7 +35,9 @@ fragment pr on PullRequest {
 FRESH_SECONDS = 120
 
 _lock = threading.Lock()
-_state: dict = {"data": None, "fetched_at": 0.0, "error": None, "refreshing": False}
+_state: dict = {"data": None, "fetched_at": 0.0, "error": None, "refreshing": False}  # the owner's
+_people: dict = {}  # Slack id -> the same, for each person's own list
+NOT_SIGNED_IN = "GitHub isn't connected for your neo: say *connect my github* to neo."
 REPO_DIRS_SECONDS = 600
 _repo_dirs: dict = {"map": {}, "names": {}, "at": 0.0, "scanning": False}
 
@@ -60,44 +64,71 @@ def _pr(node: dict) -> dict:
     }
 
 
-def _fetch() -> None:
-    try:
+def _query(who: Optional[str]) -> str:
+    """The query's JSON: the owner's through neo's own gh, a person's through theirs, in their account."""
+    if who is None:
         proc = subprocess.run(
             [_gh(), "api", "graphql", "-f", f"query={QUERY}"],
             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or proc.stdout).strip()[:300] or "gh failed")
-        data = json.loads(proc.stdout)["data"]
+        return proc.stdout
+    from . import accounts, logins
+
+    account = accounts.everyone().get(who)
+    if not account:
+        raise RuntimeError(NOT_SIGNED_IN)
+    code, out = logins.run_argv(account, ["gh", "api", "graphql", "-f", f"query={QUERY}"], timeout=60)
+    if code != 0:
+        raise RuntimeError(NOT_SIGNED_IN if "auth login" in out or "not logged" in out.lower() else out.strip()[-300:] or "gh failed")
+    return out[out.find("{"):]  # neo-run may print a line of its own first
+
+
+def _state_of(who: Optional[str]) -> dict:
+    if who is None:
+        return _state
+    return _people.setdefault(who, {"data": None, "fetched_at": 0.0, "error": None, "refreshing": False})
+
+
+def _fetch(who: Optional[str] = None) -> None:
+    state = _state_of(who)
+    try:
+        data = json.loads(_query(who))["data"]
         result = {
             "mine": [_pr(n) for n in data["mine"]["nodes"] if n],
         }
         with _lock:
-            _state.update(data=result, fetched_at=time.time(), error=None)
+            state.update(data=result, fetched_at=time.time(), error=None)
     except Exception as exc:  # noqa: BLE001 - report it on the page instead
         with _lock:
-            _state.update(error=str(exc))
+            state.update(error=str(exc))
     finally:
         with _lock:
-            _state["refreshing"] = False
+            state["refreshing"] = False
 
 
-def prs(force: bool = False) -> dict:
-    """Cached lists; starts a background refresh when stale. The first call waits for data."""
+def prs(force: bool = False, who: Optional[str] = None) -> dict:
+    """Cached lists; starts a background refresh when stale. The first call waits for data.
+    who: a person's Slack id for their own pull requests (their gh login); None is the owner's."""
+    from .people import is_owner
+
+    who = None if is_owner(who) else who
+    state = _state_of(who)
     with _lock:
-        stale = force or time.time() - _state["fetched_at"] > FRESH_SECONDS
-        start = stale and not _state["refreshing"]
+        stale = force or time.time() - state["fetched_at"] > FRESH_SECONDS
+        start = stale and not state["refreshing"]
         if start:
-            _state["refreshing"] = True
-        have = _state["data"] is not None
+            state["refreshing"] = True
+        have = state["data"] is not None
     if start:
         if have:
-            threading.Thread(target=_fetch, daemon=True).start()
+            threading.Thread(target=_fetch, args=(who,), daemon=True).start()
         else:
-            _fetch()
+            _fetch(who)
     with _lock:
-        return {**(_state["data"] or {"mine": []}), "fetched_at": _state["fetched_at"],
-                "error": _state["error"], "refreshing": _state["refreshing"]}
+        return {**(state["data"] or {"mine": []}), "fetched_at": state["fetched_at"],
+                "error": state["error"], "refreshing": state["refreshing"]}
 
 
 def _scan_repo_dirs() -> None:
@@ -142,16 +173,28 @@ def repo_dir(name_with_owner: str, by_name: bool = True) -> Optional[str]:
     return found
 
 
-def merge(pr: dict) -> str:
-    """Squash-merge one of your pull requests. Only allowed when it is approved and CI passed."""
+def merge(pr: dict, who: Optional[str] = None) -> str:
+    """Squash-merge one of your pull requests. Only allowed when it is approved and CI passed. who: a
+    person merging their own, with their gh login in their account (the caller checked their role)."""
     if pr.get("review") != "APPROVED" or pr.get("ci") != "SUCCESS" or pr.get("draft"):
         raise ValueError("only approved pull requests with passing CI can be merged from here")
-    proc = subprocess.run([_gh(), "pr", "merge", str(pr["number"]), "-R", pr["repo"], "--squash", "--delete-branch"],
-                          capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
-    if proc.returncode != 0:
-        raise ValueError((proc.stderr or proc.stdout).strip()[:300] or "merge failed")
-    prs(force=True)
-    return (proc.stdout or "merged").strip()[:300]
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", str(pr.get("repo") or "")) or not isinstance(pr.get("number"), int):
+        raise ValueError("not a pull request")
+    argv = ["pr", "merge", str(pr["number"]), "-R", pr["repo"], "--squash", "--delete-branch"]
+    if who is None:
+        proc = subprocess.run([_gh(), *argv], capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        code, out = proc.returncode, (proc.stderr or proc.stdout)
+    else:
+        from . import accounts, logins
+
+        account = accounts.everyone().get(who)
+        if not account:
+            raise ValueError(NOT_SIGNED_IN)
+        code, out = logins.run_argv(account, ["gh", *argv], timeout=120)
+    if code != 0:
+        raise ValueError(out.strip()[-300:] or "merge failed")
+    prs(force=True, who=who)
+    return (out or "merged").strip()[-300:]
 
 
 def review_prompt(pr: dict) -> str:

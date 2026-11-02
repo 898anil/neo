@@ -70,16 +70,20 @@ def open_loop(kind: str, key: str, title: str, links: dict, now: Optional[float]
     return STORE.update(write)
 
 
-def sync_prs(mine: list[dict]) -> list[dict]:
-    """A loop for each of the owner's own open PRs (from work.prs()["mine"]; pass it only from a successful
-    fetch). A PR still on that list is marked pr_open and not checked: it can't have merged yet."""
-    rows = [open_loop("pr", f"pr:{p['repo']}#{p['number']}", p["title"], {"prs": [p["url"]]}, stage="fix_pr")
+def sync_prs(mine: list[dict], owner: Optional[str] = None) -> list[dict]:
+    """A loop for each of someone's own open PRs (from work.prs()["mine"]; pass it only from a successful
+    fetch). A PR still on that list is marked pr_open and not checked: it can't have merged yet. owner: whose
+    list it is (a Slack id; None the owner's); only their loops are marked."""
+    from .people import is_owner
+
+    owner = None if is_owner(owner) else owner
+    rows = [open_loop("pr", f"pr:{p['repo']}#{p['number']}", p["title"], {"prs": [p["url"]]}, stage="fix_pr", owner=owner)
             for p in mine if not p.get("draft")]
     still_open = {r["id"] for r in rows}
 
     def mark(data: dict) -> None:
         for loop in data.values():
-            if loop["kind"] == "pr":
+            if loop["kind"] == "pr" and loop.get("owner") == owner:
                 loop["pr_open"] = loop["id"] in still_open
     STORE.update(mark)
     return rows

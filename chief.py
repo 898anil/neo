@@ -93,9 +93,10 @@ async def loop_scheduler() -> None:
     loops.on_checked = checked
     while True:
         try:
-            prs = await asyncio.to_thread(work.prs)
-            if not prs.get("error"):  # an empty list from a failed fetch would look like every PR merged
-                await asyncio.to_thread(loops.sync_prs, prs.get("mine") or [])
+            for viewer, _, _ in [(None, "", "")] + [r for r in recipients(None, "") if r[0]]:
+                prs = await asyncio.to_thread(work.prs, False, viewer)  # theirs, with their own gh login
+                if not prs.get("error"):  # an empty list from a failed fetch would look like every PR merged
+                    await asyncio.to_thread(loops.sync_prs, prs.get("mine") or [], viewer)
             started = await asyncio.to_thread(loops.start_check)
             if started:
                 log.info("loop follow-up started: %s", started["id"])
