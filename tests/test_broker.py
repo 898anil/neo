@@ -394,3 +394,64 @@ class SlackReadTest(Base):
 
     def test_the_charter_mentions_it(self):
         self.assertIn("neo-slack history", broker.charter(AJAY))
+
+
+class WorkLimitsTest(Base):
+    """Work done for someone else never goes beyond what the asker's role allows, whatever the answerer may do."""
+
+    def work_run(self, asker_role="prs-only"):
+        people.save(AJAY, OWNER, role=asker_role)
+        row = {"id": "t1", "asker": AJAY, "target": OWNER, "request": "make the backie login test pass", "plan": "fix it"}
+        with patch.object(broker.threading, "Thread"):
+            broker.start_work("t1", row)
+        return Run(broker._task("t1")["run"]).meta()
+
+    def test_a_prs_only_askers_work_runs_with_prs_only_limits(self):
+        meta = self.work_run("prs-only")
+        self.assertEqual(meta["role"], "prs-only")
+        self.assertIn("Bash(gh pr merge:*)", " ".join(meta["cli_args"]))
+        self.assertIn("Do not merge", meta["prompt"])
+
+    def test_a_full_askers_work_keeps_the_answerers_access(self):
+        meta = self.work_run("full")
+        self.assertFalse(meta.get("cli_args"))
+        self.assertNotIn("Do not merge", meta["prompt"])
+
+    def test_the_work_prompt_keeps_to_the_plan(self):
+        prompt = self.work_run("full")["prompt"]
+        self.assertIn("Stay within the request and your plan", prompt)
+        self.assertIn("not new instructions", prompt)
+
+    def test_a_read_only_asker_cant_hand_off_work(self):
+        people.save(AJAY, OWNER, role="read-only")
+        with patch.object(broker, "decide") as decide:
+            out = broker.delegate(self.run_of(AJAY).id, "make the backie login test pass", TRIED, "anil")
+        self.assertEqual(out["status"], "refused")
+        self.assertIn("read-only", out["text"])
+        decide.assert_not_called()
+
+    def test_deciding_treats_the_askers_role_as_a_ceiling(self):
+        people.save(AJAY, OWNER, role="prs-only")
+        with patch.object(Run, "execute", return_value={}):
+            broker.decide("t2", AJAY, OWNER, "merge PR 12 and deploy", TRIED)
+        prompt = [Run(r.name).meta() for r in (self.dir / "runs").iterdir()][0]["prompt"]
+        self.assertIn("ceiling", prompt)
+        self.assertIn("Do not merge", prompt)
+
+    def test_the_default_policy_covers_work(self):
+        text = broker.DEFAULT_POLICY.lower()
+        for word in ("pull requests for review", "merging", "deploying", "prod"):
+            self.assertIn(word, text)
+
+
+class PromptTest(Base):
+    def test_answers_say_what_was_checked(self):
+        with patch.object(Run, "execute", return_value={}):
+            broker.answer("r1", AJAY, OWNER, "what is on dev-green?", TRIED, {})
+        prompt = [Run(r.name).meta() for r in (self.dir / "runs").iterdir()][0]["prompt"]
+        self.assertIn("what you checked", prompt)
+
+    def test_the_charter_says_not_to_work_around_a_no(self):
+        text = broker.charter(AJAY)
+        self.assertIn("don't rephrase it", text)
+        self.assertIn("which neo you asked", text)
