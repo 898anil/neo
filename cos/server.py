@@ -1196,7 +1196,9 @@ class Handler(BaseHTTPRequestHandler):
                 irun = InteractiveRun.start(
                     engine, str(body.get("prompt", "")), cwd,
                     label="dash", source="dashboard", system=agent_brief(cwd),
-                    extra={"branch": branch} if branch else None,
+                    # account None for a new branch: work.new_worktree makes it in neo's own home
+                    # (~/.neo/worktrees), which the owner's account can't enter; it runs where it is.
+                    extra={"branch": branch, "account": None} if branch else None,
                 )
             except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))

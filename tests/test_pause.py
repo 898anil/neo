@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import io
 import json
 import os
 import sys
@@ -61,11 +63,18 @@ class PauseStateTest(unittest.TestCase):
             pause.apply("later")
 
     def test_cli_paused_exit_code_for_jobs(self):
-        self.assertEqual(cli.main(["paused", "--quiet"]), 1)
-        self.assertEqual(cli.main(["pause", "2h"]), 0)
-        self.assertEqual(cli.main(["paused", "--quiet"]), 0)
-        self.assertEqual(cli.main(["resume"]), 0)
-        self.assertEqual(cli.main(["paused", "--quiet"]), 1)
+        # The state is this test's own (COS_HOME is a temp folder), and what the CLI prints is checked
+        # here rather than left on the test run's output, where it read like the real bot's state.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["paused", "--quiet"]), 1)
+            self.assertEqual(cli.main(["pause", "2h"]), 0)
+            self.assertEqual(cli.main(["paused", "--quiet"]), 0)
+            self.assertEqual(cli.main(["resume"]), 0)
+            self.assertEqual(cli.main(["paused", "--quiet"]), 1)
+        self.assertIn("Notifications are paused until", out.getvalue())
+        self.assertIn("Notifications are on.", out.getvalue())
+        self.assertEqual(Path(os.environ["COS_HOME"]), Path(self.home))
 
 
 class HeldMessagesTest(unittest.TestCase):

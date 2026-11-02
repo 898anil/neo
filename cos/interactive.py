@@ -50,6 +50,10 @@ STARTUP_SETTLE_SECONDS = 20.0
 PROMPT_CONFIRM_SECONDS = 10.0
 PROMPT_RETRIES = 2
 # herdr state -> run status shown in meta / dashboard / Slack
+# At most this much of a transcript is read per poll: in a person's account the agent writes the file.
+TAIL_CHUNK = 4 << 20
+# A pane whose foreground job includes one of these is at a shell prompt, not in the agent.
+SHELLS = frozenset({"sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "ash", "busybox"})
 STATUS_MAP = {"working": "running", "blocked": "blocked", "done": "waiting", "idle": "waiting", "unknown": "running"}
 
 
@@ -87,6 +91,25 @@ def find_transcript(engine: str, session_id: Optional[str], cwd: str, started_at
             if isinstance(first, dict) and (first.get("payload") or {}).get("cwd") == cwd:
                 return Path(path)
     return None
+
+
+def _read_tail(path: Path, limit: int) -> str:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(max(0, path.stat().st_size - limit))
+            return fh.read(limit).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def check_foreground(herdr: Herdr, pane: str) -> None:
+    """Refuse to type into a person's-account pane unless the agent is what holds its terminal. The pane
+    line is `exec`ed, so no shell of neo's should ever be there; this is the second lock on that door: a
+    prompt typed into a shell would run as the service account."""
+    names = herdr.foreground(pane)
+    if not names or SHELLS.intersection(names):
+        raise HerdrError("agent_not_foreground",
+                         f"the agent is not the pane's foreground job ({', '.join(names) or 'nothing'}); not typing into it")
 
 
 def resumed_session(engine: str, agent_args) -> Optional[str]:
@@ -173,17 +196,25 @@ class InteractiveRun:
         session_id = None
         if engine == "claude":
             agent_args = (*CLAUDE_MODE_FLAGS[mode], *agent_args)
-        if engine == "claude" and system:
+        if engine == "claude" and account:
+            # This run's own settings, never the person's: the Stop hook (the account can't read neo's copy,
+            # so it travels in the spec), and in full mode the answer to bypass-permissions mode's warning,
+            # which would otherwise hold the start.
+            settings: dict = {}
+            if system:
+                files["conclusion.py"] = Path(conclusion.__file__).read_text()
+                settings = json.loads(conclusion.settings_json("/usr/bin/python3", "{file:conclusion.py}"))
+            if mode == "full":
+                settings["skipDangerousModePermissionPrompt"] = True
+            if settings:
+                agent_args = ("--settings", json.dumps(settings), *agent_args)
+        elif engine == "claude" and system:
             # An agent session (it has the brief): every turn ends with a Status line (cos/conclusion.py). As a
             # file, like the brief below. Without it the agent still starts; it just isn't held to a conclusion.
-            if account:  # the account can't read neo's copy of the hook: it travels in the spec
-                files["conclusion.py"] = Path(conclusion.__file__).read_text()
-                agent_args = ("--settings", conclusion.settings_json("/usr/bin/python3", "{file:conclusion.py}"), *agent_args)
-            else:
-                try:
-                    agent_args = ("--settings", str(conclusion.write_settings(run.dir / "stop-hook-settings.json")), *agent_args)
-                except OSError as exc:
-                    log.warning("stop hook settings not written for %s: %s", run.id, exc)
+            try:
+                agent_args = ("--settings", str(conclusion.write_settings(run.dir / "stop-hook-settings.json")), *agent_args)
+            except OSError as exc:
+                log.warning("stop hook settings not written for %s: %s", run.id, exc)
         if engine == "claude" and os.environ.get("NEO_REMOTE_CONTROL", "1") != "0":
             # Native Remote Control: continue this exact session from the Claude app.
             agent_args = ("--remote-control", name, *agent_args)
@@ -224,7 +255,8 @@ class InteractiveRun:
                                                       agent_args, files, session_id)
             else:
                 start = lambda: herdr.start_agent(name, engine, pane, agent_args)  # noqa: E731
-            agent = cls._start_past_trust_prompt(herdr, name, engine, pane, start)
+            guard = (lambda: check_foreground(herdr, pane)) if account else None
+            agent = cls._start_past_trust_prompt(herdr, name, engine, pane, start, guard)
         except HerdrError as exc:
             screen = ""
             if workspace:
@@ -239,6 +271,9 @@ class InteractiveRun:
                 except HerdrError:
                     pass
             detail = f"{exc}\n\nThe agent's screen when it gave up:\n{screen}" if screen else str(exc)
+            said = _read_tail(run.dir / "neo-run.log", 1500) if account else ""
+            if said.strip():  # the pane may already be gone (it closes with neo-run): what neo-run said
+                detail += f"\n\nneo-run said:\n{said.strip()}"
             run.append_event({"kind": "error", "title": "herdr failed", "body": detail, "data": {}}, 1)
             run.update_meta(status="failed")
             raise HerdrError(exc.code, detail) from exc
@@ -269,15 +304,21 @@ class InteractiveRun:
         spec = accounts.spec(meta, [cli_path(engine), *agent_args], engine_env(meta), files)
         spec["tty"] = True
         spec["mirror"] = {"fd": accounts.MIRROR_FD, "engine": engine, "session_id": session_id or ""}
+        spec["log_fd"] = accounts.LOG_FD
         fifo = run.dir / "spec.fifo"
+        launch_log = write_private(run.dir / "neo-run.log", "")
         accounts.offer_spec(fifo, json.dumps(spec).encode())
-        return herdr.start_in_pane(name, engine, pane, accounts.pane_command(account, str(fifo), meta["transcript_path"]))
+        line = accounts.pane_command(account, str(fifo), meta["transcript_path"], str(launch_log))
+        return herdr.start_in_pane(name, engine, pane, line)
 
     @staticmethod
-    def _start_past_trust_prompt(herdr: Herdr, name: str, engine: str, pane: str, start: Callable[[], dict]) -> dict:
+    def _start_past_trust_prompt(herdr: Herdr, name: str, engine: str, pane: str, start: Callable[[], dict],
+                                 guard: Optional[Callable[[], None]] = None) -> dict:
         """Start the agent (start()). If it stops on the CLI's one-time "do you trust this folder?" screen,
         accept it: an allowed user explicitly asked to run an agent in this folder (headless runs
-        skip that screen already). Any other startup blocker is left for a human."""
+        skip that screen already). Any other startup blocker is left for a human. guard(): raises unless
+        keys sent to the pane reach the agent (a person's account: check_foreground)."""
+        guard = guard or (lambda: None)
         try:
             return start()
         except HerdrError as exc:
@@ -288,11 +329,13 @@ class InteractiveRun:
                 raise
             # The highlighted default is "No, exit": move to "Yes, I trust this folder" first, and
             # confirm only when the screen shows that option selected.
+            guard()
             herdr._run(["pane", "send-keys", pane, "down"], timeout=15)
             time.sleep(0.5)
             screen = herdr._run(["pane", "read", pane, "--source", "visible", "--lines", "40"], timeout=10).stdout
             if not re.search(r"❯\s*Yes,? I trust", screen):
                 raise
+            guard()
             herdr._run(["pane", "send-keys", pane, "enter"], timeout=15)
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
@@ -313,6 +356,21 @@ class InteractiveRun:
         meta = run.meta()
         herdr = herdr or Herdr(meta.get("herdr_session"))
         self = cls(run, herdr, on_event)
+        fifo = run.dir / "spec.fifo"
+        if fifo.exists() or fifo.is_symlink():
+            fifo.unlink()  # its feeder died with the bot that started the run; nothing will read it now
+        if meta.get("status") == "starting":
+            # The bot stopped mid-start: nobody sent the task or confirmed the agent. Don't leave a pane
+            # (perhaps a shell, perhaps an agent with no task) behind.
+            if meta.get("herdr_workspace"):
+                try:
+                    herdr.close_workspace(meta["herdr_workspace"])
+                except HerdrError:
+                    pass
+            run.update_meta(status="closed")
+            self._emit({"kind": "error", "title": "Never started",
+                        "body": "neo restarted while this live agent was starting; start it again.", "data": {}})
+            return self
         self.watch()
         return self
 
@@ -362,6 +420,7 @@ class InteractiveRun:
         self._sent_prompts.append(text.strip())
         self._emit({"kind": "prompt", "title": "You", "body": text, "data": {"via": via}})
         try:
+            self._guard()
             self.herdr.prompt(self.name, text)
         except HerdrError as exc:
             self._emit({"kind": "error", "title": "Prompt not delivered", "body": str(exc), "data": {}})
@@ -418,7 +477,7 @@ class InteractiveRun:
         try:
             with path.open("rb") as fh:
                 fh.seek(before)
-                chunk = fh.read()
+                chunk = fh.read(TAIL_CHUNK)
         except OSError:
             return False
         normalize = TRANSCRIPT_NORMALIZERS[self.engine]
@@ -447,24 +506,36 @@ class InteractiveRun:
             screen = self.herdr.read(self.name, lines=30, source="visible")
             if "[Pasted text" in screen or (head and head in screen):
                 log.warning("run %s: prompt is waiting in the input box; pressing Enter", self.run.id)
+                self._guard()
                 self.herdr.send_keys(self.name, "enter")
             else:
                 log.warning("run %s: prompt was dropped by the agent; sending it again (%d)", self.run.id, attempt + 1)
+                self._guard()
                 self.herdr.prompt(self.name, text)
         message = f"the agent did not receive its task after {PROMPT_RETRIES + 1} tries"
         self._emit({"kind": "error", "title": "Prompt not delivered", "body": message, "data": {}})
         raise HerdrError("prompt_not_delivered", message)
 
+    def _guard(self) -> None:
+        """In a person's account, type nothing unless the agent holds the pane's terminal (check_foreground)."""
+        meta = self.run.meta()
+        if meta.get("account") and meta.get("herdr_pane"):
+            check_foreground(self.herdr, meta["herdr_pane"])
+
     def approve(self) -> None:
+        self._guard()
         self.herdr.send_keys(self.name, "enter")
 
     def deny(self) -> None:
+        self._guard()
         self.herdr.send_keys(self.name, "esc")
 
     def interrupt(self) -> None:
+        self._guard()
         self.herdr.send_keys(self.name, "esc")
 
     def keys(self, *keys: str) -> None:
+        self._guard()
         self.herdr.send_keys(self.name, *keys)
 
     def remote_url(self, wait_seconds: float = 0) -> Optional[str]:
@@ -529,11 +600,14 @@ class InteractiveRun:
         try:
             with self._transcript.open("rb") as fh:
                 fh.seek(self._offset)
-                chunk = fh.read()
+                chunk = fh.read(TAIL_CHUNK)
         except OSError:
             return
         end = chunk.rfind(b"\n")
         if end < 0:
+            if len(chunk) == TAIL_CHUNK:  # one line longer than we read at a time: skip past it
+                self._offset += len(chunk)
+                self.run.update_meta(transcript_offset=self._offset)
             return
         complete, self._offset = chunk[: end + 1], self._offset + end + 1
         for line in complete.decode("utf-8", errors="replace").splitlines():

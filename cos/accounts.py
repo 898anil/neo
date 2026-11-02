@@ -278,17 +278,21 @@ def command(account: str, spec_fd: int, *more_fds: int) -> list[str]:
 
 
 # A live agent's launch, typed into its herdr pane's shell (cos/interactive.py). The shell opens the spec
-# FIFO on SPEC_FD and the transcript mirror on MIRROR_FD for sudo; neither is ever readable by anyone else.
-SPEC_FD, MIRROR_FD = 3, 4
+# FIFO on SPEC_FD, the transcript mirror on MIRROR_FD and neo-run's own log on LOG_FD for sudo; none of them
+# is readable by anyone else.
+SPEC_FD, MIRROR_FD, LOG_FD = 3, 4, 5
 SPEC_WAIT_SECONDS = 120.0
 
 
-def pane_command(account: str, spec_fifo: str, mirror: str) -> str:
+def pane_command(account: str, spec_fifo: str, mirror: str, log: str) -> str:
     """The line a herdr pane runs to start a live agent as `account`: sudo + neo-run, exactly the sudoers
-    rule's `neo-run --spec-fd *`. Nothing secret is on it (that is all in the spec, read from a FIFO
-    offer_spec feeds). The leading space keeps it out of the shell's history (HISTCONTROL=ignorespace)."""
-    argv = command(account, SPEC_FD, MIRROR_FD)
-    return (" " + shlex.join(argv) + f" {SPEC_FD}<{shlex.quote(spec_fifo)} {MIRROR_FD}>>{shlex.quote(mirror)}")
+    rule's `neo-run --spec-fd *`. `exec`: the pane's shell (neo's, with neo's rights) is replaced, so
+    nothing of neo's is left in the pane for keys meant for the agent to reach, even if the engine is
+    stopped or exits; the pane closes with it. Nothing secret is on the line (that is all in the spec, read
+    from a FIFO offer_spec feeds). The leading space keeps it out of the shell's history."""
+    argv = command(account, SPEC_FD, MIRROR_FD, LOG_FD)
+    return (" exec " + shlex.join(argv) + f" {SPEC_FD}<{shlex.quote(spec_fifo)} {MIRROR_FD}>>{shlex.quote(mirror)}"
+            f" {LOG_FD}>>{shlex.quote(log)}")
 
 
 def offer_spec(path: Path, data: bytes, wait: float = SPEC_WAIT_SECONDS) -> threading.Thread:

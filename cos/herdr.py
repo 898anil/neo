@@ -178,6 +178,9 @@ class Herdr:
             try:
                 agent = self.get(pane_id)
             except HerdrError as exc:
+                if exc.code in ("pane_not_found", "workspace_not_found"):
+                    # `exec`: the pane closes with its command, so a launch refused at once leaves no pane
+                    raise HerdrError("agent_exited", f"{kind} exited as it started in pane {pane_id}") from exc
                 if exc.code != "agent_not_found":
                     raise
                 agent = {}
@@ -190,6 +193,12 @@ class Herdr:
             if time.monotonic() > deadline:
                 raise HerdrError("timeout", f"{kind} did not start in pane {pane_id} within {timeout:.0f}s")
             time.sleep(0.5)
+
+    def foreground(self, pane_id: str) -> list[str]:
+        """Names of the processes in the pane's foreground job (what keys typed into it reach)."""
+        result = self.call("pane", "process-info", "--pane", pane_id, timeout=15)
+        info = result.get("process_info") or {}
+        return [os.path.basename(str(p.get("name") or "")).lstrip("-") for p in info.get("foreground_processes") or []]
 
     def prompt(self, name: str, text: str) -> dict:
         # No --wait: the watcher follows state changes, the bot must not block here.
