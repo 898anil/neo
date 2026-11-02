@@ -134,18 +134,55 @@ def person_run(meta: dict) -> dict:
     and, for a run where their neo answered or worked for someone else, without that person's words
     (cos/me.py does the same): their neo's answer is what is theirs."""
     row = {k: v for k, v in meta.items() if k not in RUN_HEAVY_KEYS}
-    if str(row.get("kind") or "").startswith("a2a"):
+    if is_a2a(row):
         row["prompt"] = row.get("title") or ""
     return row
 
 
 HIDDEN_EVENT = json.dumps({"kind": "debug", "title": "", "body": ""})
+PERSON_WATCH_CHECKS_PER_HOUR = 6  # "Check now" on their own watches; they also run on their schedule
+
+
+def is_a2a(meta: dict) -> bool:
+    """A run where someone's neo answered or worked for another person (cos/broker.py)."""
+    return str(meta.get("kind") or "").startswith("a2a")
 
 
 def hidden_from_person(meta: dict, event: dict) -> bool:
-    """A step a person's dashboard leaves out: another person's words and raw tool output in a run where
-    their neo answered or worked for someone else (as cos/me.py does)."""
-    return str(meta.get("kind") or "").startswith("a2a") and event.get("kind") in ("prompt", "tool_result")
+    """A step a person's dashboard leaves out (as cos/me.py does): the engine's own bookkeeping, and, in a
+    run where their neo answered or worked for someone else, that person's words and raw tool output."""
+    if event.get("kind") in ("debug", "usage", "session"):
+        return True
+    return is_a2a(meta) and event.get("kind") in ("prompt", "tool_result")
+
+
+def continue_refusal(user: str, meta: dict) -> str:
+    """Why a person may not send a follow-up to this run of theirs ("" when they may): it has to run in
+    their own account, and a run their neo did for someone else holds that person's words."""
+    from . import accounts
+
+    if is_a2a(meta):
+        return "This one was your neo working for someone else; ask them to follow up."
+    account = accounts.everyone().get(user)
+    if not account or meta.get("account") != account:
+        return "This task ran before you had your own workspace; start a new one instead."
+    return ""
+
+
+def watch_checks_this_hour(user: str) -> int:
+    """How many of this person's watch checks started in the last hour (scheduled ones included)."""
+    from datetime import datetime
+
+    hour_ago = time.time() - 3600
+    count = 0
+    for m in list_runs(300):
+        if m.get("kind") != "watch" or m.get("slack_user") != user:
+            continue
+        try:
+            count += datetime.fromisoformat(m["created_at"]).timestamp() >= hour_ago
+        except (KeyError, ValueError):
+            pass
+    return count
 
 
 def viewer_info(viewer: str | None) -> dict:
@@ -625,7 +662,8 @@ class Handler(BaseHTTPRequestHandler):
             self._static("index.html", "text/html; charset=utf-8")
         elif parts == ["api", "overview"]:
             # Each agent and task carries needs / result (home.annotate), so its row can say Idle, Partly done, Needs you.
-            data = home.annotate(fleet.overview(viewer), cards.STORE.read(), fleet.seen.get)
+            listed = fleet.overview(viewer)
+            data = home.annotate(listed, home.cards_for(viewer, listed), fleet.seen.get)
             if not owner:
                 data = {**data, "runs": [person_run(r) for r in data["runs"]], "tasks": [person_run(r) for r in data["tasks"]]}
             self._json({**board_overview(data), **self._settings_for(viewer), "viewer": viewer_info(viewer),
@@ -665,7 +703,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._stream(run, person=not owner)
             else:
                 meta = fresh_meta(run)
-                self._json({**(meta if owner else person_run(meta)), "card": cards.get(f"run:{run.id}")})
+                card = None if not owner and is_a2a(meta) else cards.get(f"run:{run.id}")
+                self._json({**(meta if owner else person_run(meta)), "card": card})
         else:
             return False
         return True
@@ -700,15 +739,19 @@ class Handler(BaseHTTPRequestHandler):
         """A card or digest key (run:<id>, or a live agent's) the viewer owns. Live agents are the owner's."""
         from .people import is_owner
 
+        if is_owner(viewer):
+            return True  # the owner's: any run's, as before people had dashboards (a link still opens)
         if key.startswith("run:"):
             run_id = key[4:]
             if not valid_run_id(run_id):
                 return False
             try:
-                return fleet.owns(viewer, Run(run_id).meta().get("slack_user"))
+                meta = Run(run_id).meta()
             except (OSError, ValueError):
                 return False
-        return is_owner(viewer)
+            # a card or digest of a run their neo did for someone else is written from that person's words
+            return meta.get("slack_user") == viewer and not is_a2a(meta)
+        return False
 
     def _a2a_ask(self):
         """neo-ask: one CoS asks another (cos/broker.py). Its own auth: the asking run's token, from the
@@ -836,6 +879,14 @@ class Handler(BaseHTTPRequestHandler):
             run = self._viewers_run(user, parts[2])
             if not run:
                 return
+            if parts[3] == "message":
+                why = continue_refusal(user, run.meta())
+                if why:
+                    return self._error(HTTPStatus.FORBIDDEN, why)
+                try:
+                    me.check_rate(user)
+                except ValueError as exc:
+                    return self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return self._run_action(run, parts[3], body)
         if parts == ["api", "home", "seen"]:
             home.mark_seen(user)
@@ -863,6 +914,8 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] == "delete":
                 watches.delete(parts[2])
                 return self._json({"ok": True})
+            if watch_checks_this_hour(user) >= PERSON_WATCH_CHECKS_PER_HOUR:
+                return self._error(HTTPStatus.TOO_MANY_REQUESTS, "That's a lot of checks this hour; it runs on its schedule meanwhile.")
             return self._json(watches.start(parts[2], "dashboard"), HTTPStatus.ACCEPTED)
         if len(parts) == 4 and parts[:2] == ["api", "findings"] and parts[3] in ("dismiss", "reopen"):
             found = watches.get_finding(parts[2])
@@ -1209,6 +1262,7 @@ class Handler(BaseHTTPRequestHandler):
         """person: a teammate's own dashboard, which gets their run without neo's instructions or another
         person's words (person_run, hidden_from_person); event numbering stays the same either way."""
         fleet.mark_run_seen(run.id)  # you opened it: it no longer needs reading on the board
+        stream_meta = run.meta() if person else {}  # its kind decides what a person's view leaves out
         query = parse_qs(urlparse(self.path).query)
         try:
             start = max(0, int((query.get("from") or ["0"])[0]))
@@ -1232,7 +1286,7 @@ class Handler(BaseHTTPRequestHandler):
                         if seq >= start:
                             # a hidden step still takes its place (as an ignored "debug" event): the page
                             # resumes from the number of events it has, so numbering must not shift
-                            data = HIDDEN_EVENT if person and self._hidden_line(run, line) else line.strip()
+                            data = HIDDEN_EVENT if person and self._hidden_line(stream_meta, line) else line.strip()
                             self.wfile.write(f"event: timeline\ndata: {data}\n\n".encode())
                             self.wfile.flush()
                         seq += 1
@@ -1255,10 +1309,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     @staticmethod
-    def _hidden_line(run: Run, line: str) -> bool:
+    def _hidden_line(meta: dict, line: str) -> bool:
         try:
-            return hidden_from_person(run.meta(), json.loads(line))
-        except (OSError, ValueError):
+            return hidden_from_person(meta, json.loads(line))
+        except ValueError:
             return True  # unreadable: leave it out of someone's view rather than guess
 
     def _static(self, name: str, content_type: str):

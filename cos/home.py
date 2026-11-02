@@ -376,9 +376,22 @@ def home(since: Optional[float] = None, viewer: Optional[str] = fleet.EVERYONE) 
     since = fleet.seen.get(seen_key(viewer)) if since is None else since
     rows = loops.listing() if owner else []
     runs = fleet.mine(list_runs(500), viewer)
-    return build(overview, rows, cards.STORE.read(), since=since, now=time.time(), seen=fleet.seen.get,
+    return build(overview, rows, cards_for(viewer, overview), since=since, now=time.time(), seen=fleet.seen.get,
                  mentions=mentions.open_items() if owner else [],
                  traces={**thread_runs(runs=runs), **loop_traces(rows, overview, runs)})
+
+
+def cards_for(viewer: Optional[str], overview: dict) -> dict:
+    """The cards this viewer's home may show. A card is written from a run's whole timeline, so a person
+    doesn't get the card of a run where their neo answered or worked for someone else (that person's words)."""
+    from . import cards
+    from .people import is_owner
+
+    store = cards.STORE.read()
+    if viewer == fleet.EVERYONE or is_owner(viewer):
+        return store
+    theirs = {f"run:{t['id']}" for t in overview.get("tasks", []) if str(t.get("kind") or "").startswith("a2a")}
+    return {k: v for k, v in store.items() if k not in theirs}
 
 
 def seen_key(viewer: Optional[str]) -> str:

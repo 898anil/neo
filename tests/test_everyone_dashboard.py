@@ -31,7 +31,7 @@ class OwnsTest(unittest.TestCase):
         self.assertEqual(self.ids(fleet.EVERYONE), ["a", "b", "c"])  # Slack-side jobs about the whole machine
 
 
-class DashboardTest(Base):
+class Scoped(Base):
     def setUp(self):
         super().setUp()
         self.agents = patch("cos.fleet.agents", return_value=[{"session": "s", "pane_id": "p", "status": "idle", "asks": []}])
@@ -54,6 +54,8 @@ class DashboardTest(Base):
         h.do_POST()
         return h.out[-1]
 
+
+class DashboardTest(Scoped):
     def test_overview_and_home_are_theirs(self):
         status, data = self.get("/api/overview")
         self.assertEqual(status, 200)
@@ -139,6 +141,66 @@ class DashboardTest(Base):
         self.assertIn("the answer", out)
         self.assertEqual(out.count("event: timeline"), 2)  # the hidden step keeps its place, so resuming works
         self.assertNotIn("a question from Yosh", out)  # the run's prompt is their neo's title, not Yosh's text
+
+
+class ReviewFixesTest(Scoped):
+    """Found in review: ways a person could reach past what is theirs."""
+
+    def test_a_follow_up_only_in_their_own_account(self):
+        from cos import accounts
+        self.mine.update_meta(status="done", session_id="s1")  # made before accounts: no account on the run
+        self.assertEqual(self.post(f"/api/runs/{self.mine.id}/message", {"prompt": "go on"})[0], 403)
+        work = Run.create("claude", "do this for Yosh", str(self.dir), "full", source="a2a",
+                          extra={"slack_user": AJAY, "kind": "a2a-work", "account": accounts.everyone()[AJAY]})
+        work.update_meta(status="done", session_id="s2")
+        self.assertEqual(self.post(f"/api/runs/{work.id}/message", {"prompt": "quote their request"})[0], 403)
+        own = Run.create("claude", "mine", str(self.dir), "full", source="slack",
+                         extra={"slack_user": AJAY, "account": accounts.everyone()[AJAY]})
+        own.update_meta(status="done", session_id="s3")
+        with patch.object(server, "start_turn") as start:
+            self.assertEqual(self.post(f"/api/runs/{own.id}/message", {"prompt": "go on"})[0], 202)
+        start.assert_called_once()
+
+    def test_no_card_or_digest_of_their_neo_working_for_someone_else(self):
+        from cos import cards
+        work = Run.create("claude", "Yosh's request", str(self.dir), "full", source="a2a",
+                          extra={"slack_user": AJAY, "kind": "a2a-work", "title": "For Yosh"})
+        cards.STORE.update(lambda d: d.update({f"run:{work.id}": {"did": "Yosh's private plan", "result": "worked"}}))
+        status, data = self.get(f"/api/runs/{work.id}")
+        self.assertEqual((status, data["card"]), (200, None))
+        self.assertEqual(self.get(f"/api/digest?key=run:{work.id}")[0], 400)
+        self.assertNotIn("private plan", json.dumps(self.get("/api/home")[1]))
+        self.assertNotIn("private plan", json.dumps(self.get("/api/overview")[1]))
+
+    def test_the_owner_still_opens_any_digest(self):
+        self.assertTrue(server.Handler._key_is_mine(None, f"run:{self.theirs.id}"))
+
+    def test_a_deleted_watch_takes_its_findings(self):
+        owner_watch = watches.save({"name": "prod errors", "instructions": "check prod", "every": 60})
+        store = {"f1": {"id": "f1", "watch_id": owner_watch["id"], "status": "new", "severity": "high"}}
+        watches._write("findings.json", store)
+        watches.delete(owner_watch["id"])
+        reused = self.post("/api/watches", {"name": "prod errors", "instructions": "mine", "every": 60})[1]
+        self.assertEqual(reused["id"], owner_watch["id"])  # the same id again
+        self.assertEqual(self.get("/api/findings/f1")[0], 404)  # but not the owner's old findings
+
+    def test_check_now_is_limited(self):
+        w = self.post("/api/watches", {"name": "my ci", "instructions": "check backie CI", "every": 60})[1]
+        with patch.object(server, "watch_checks_this_hour", return_value=server.PERSON_WATCH_CHECKS_PER_HOUR), \
+                patch.object(watches, "start") as start:
+            self.assertEqual(self.post(f"/api/watches/{w['id']}/run")[0], 429)
+        start.assert_not_called()
+
+    def test_their_stream_leaves_out_engine_bookkeeping(self):
+        run = Run.create("claude", "mine", str(self.dir), "full", source="slack", extra={"slack_user": AJAY})
+        (run.dir / "events.jsonl").write_text(json.dumps({"kind": "debug", "body": "raw cli /home/neo secret-ish"}) + "\n")
+        run.update_meta(status="done")
+        h = self.handler(f"/api/runs/{run.id}/stream", cookie=dashlink.session_value(AJAY))
+        h.send_response = h.send_header = lambda *a: None
+        h.end_headers = lambda: None
+        with patch.object(server.time, "sleep", side_effect=BrokenPipeError):
+            h.do_GET()
+        self.assertNotIn("raw cli", h.wfile.getvalue().decode())
 
 
 if __name__ == "__main__":

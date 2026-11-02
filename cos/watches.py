@@ -233,8 +233,14 @@ def restore(watch: dict) -> None:
 
 
 def delete(watch_id: str) -> None:
+    """Its findings go too: a new watch can reuse the id (it comes from the name), and must not inherit
+    another person's findings."""
     with _lock:
         _write("watches.json", [w for w in load() if w["id"] != watch_id])
+        store = _findings()
+        kept = {fid: f for fid, f in store.items() if f.get("watch_id") != watch_id}
+        if len(kept) != len(store):
+            _write("findings.json", kept)
 
 
 def in_hours(watch: dict, now: datetime) -> bool:
