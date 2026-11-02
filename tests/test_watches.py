@@ -109,6 +109,12 @@ class WatchesTest(WatchTestCase):
         self.assertEqual([w["id"] for w in self.watches.due(monday_10)], ["prod-logs"])
         self.assertEqual({w["id"] for w in self.watches.due(datetime(2026, 9, 28, 11, 1))}, {"sentry", "prod-logs"})
 
+    def test_watch_work_hours_respect_the_watch_timezone(self):
+        from datetime import timezone
+        watch = {"hours": "work", "timezone": "Asia/Kolkata"}
+        self.assertTrue(self.watches.in_hours(watch, datetime(2026, 11, 2, 3, 0, tzinfo=timezone.utc)))
+        self.assertFalse(self.watches.in_hours(watch, datetime(2026, 11, 2, 16, 0, tzinfo=timezone.utc)))
+
     def test_check_records_findings_once_and_tells_the_bot(self):
         told = []
         self.watches.on_checked = lambda watch, meta, new: told.append((watch["id"], meta["status"], [f["key"] for f in new]))

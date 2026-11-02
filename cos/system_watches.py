@@ -16,6 +16,7 @@ import os
 import plistlib
 import re
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -142,6 +143,8 @@ NEVER = {"com.anil.neo-slack-bot", "com.anil.neo-viewer"}  # neo itself: never s
 
 def collect() -> list[dict]:
     """One row per ~/.neo folder; several jobs on one folder (e.g. hourly + daily) share a row."""
+    if sys.platform == "linux":
+        return collect_linux()
     status = launchctl_status()
     running = launchctl_running()
     rows: dict[str, dict] = {}
@@ -171,6 +174,66 @@ def collect() -> list[dict]:
         same["last_exit"] = same["last_exit"] or row["last_exit"]  # a failure on either job shows
         same["last_run"] = max(filter(None, [same["last_run"], row["last_run"]]), default=None)
     return list(rows.values())
+
+
+def linux_manifest() -> Path:
+    return Path("/etc/neo/system-watches.json")
+
+
+def _systemd_properties(unit: str) -> Optional[dict[str, str]]:
+    try:
+        result = subprocess.run(["systemctl", "show", unit, "--property=ActiveState,Result,ExecMainStatus"],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode:
+        return None
+    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def collect_linux() -> list[dict]:
+    try:
+        entries = json.loads(linux_manifest().read_text())
+    except FileNotFoundError:
+        return []
+    if not isinstance(entries, list):
+        raise ValueError("invalid system watch manifest")
+    rows = []
+    for entry in entries:
+        name = entry.get("name", "") if isinstance(entry, dict) else ""
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+            continue
+        folder = neo_dir() / name
+        if not folder.is_dir():
+            continue
+        timer = _systemd_properties(f"neo-watch-{name}.timer")
+        service = _systemd_properties(f"neo-watch-{name}.service")
+        breaches = open_breaches(folder)
+        exit_status = None
+        if service and service.get("Result") not in (None, "", "success"):
+            try:
+                exit_status = int(service.get("ExecMainStatus", "1")) or 1
+            except ValueError:
+                exit_status = 1
+        label = PREFIX + name
+        rows.append({"id": label, "labels": [label], "plists": [], "linux_names": [name],
+                     "kind": "check", "running": bool(service and service.get("ActiveState") == "activating"),
+                     "summary": "", "name": name.replace("-", " ").capitalize(), "folder": str(folder),
+                     "about": describe(folder), "schedule": entry.get("schedule", "Scheduled"),
+                     "loaded": None if timer is None else timer.get("ActiveState") == "active",
+                     "last_exit": exit_status, "last_run": None, "open": len(breaches),
+                     "breaches": breaches[:MAX_OPEN], "complete": len(breaches) <= MAX_OPEN})
+    return rows
+
+
+def _linux_control(action: str, name: str) -> None:
+    try:
+        result = subprocess.run(["sudo", "-n", "/usr/local/sbin/neo-watch-control", action, name],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"system watch control unavailable: {exc}") from None
+    if result.returncode:
+        raise RuntimeError(f"system watch control failed: {(result.stderr or result.stdout).strip()[:200]}")
 
 
 def _row(plist: Path, status: Optional[dict[str, Optional[int]]], running: frozenset | set = frozenset()) -> Optional[dict]:
@@ -254,6 +317,13 @@ def _launchctl(*args: str) -> None:
 def run(watch_id: str) -> dict:
     """Check now: start the job's run (launchd does nothing if it is already running)."""
     row = _find(watch_id)
+    if sys.platform == "linux":
+        if row["loaded"] is not True:
+            raise ValueError("this watch is off or its status is unavailable")
+        for name in row["linux_names"]:
+            _linux_control("run", name)
+        _cache["at"] = 0.0
+        return {"ok": True}
     status = _loaded()
     loaded = [label for label in row["labels"] if label in status]
     if not loaded:
@@ -268,6 +338,11 @@ def set_on(watch_id: str, on: bool) -> dict:
     """Turn a watch on (enable + load its LaunchAgent) or off (disable + unload; disabled survives a reboot,
     which a plain unload would not). Its files stay."""
     row = _find(watch_id)
+    if sys.platform == "linux":
+        for name in row["linux_names"]:
+            _linux_control("on" if on else "off", name)
+        _cache["at"] = 0.0
+        return {"ok": True}
     loaded = _loaded()
     for label, plist in zip(row["labels"], row["plists"]):
         target = f"gui/{os.getuid()}/{label}"

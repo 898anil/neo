@@ -20,6 +20,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import system_watches
 from .config import workdir
@@ -248,6 +249,11 @@ def delete(watch_id: str) -> None:
 def in_hours(watch: dict, now: datetime) -> bool:
     if watch.get("hours") == "always":
         return True
+    if watch.get("timezone"):
+        try:
+            now = now.astimezone(ZoneInfo(watch["timezone"]))
+        except (ZoneInfoNotFoundError, ValueError):
+            return False
     return now.weekday() < 5 and 8 <= now.hour < 20
 
 
@@ -284,7 +290,13 @@ def _since(watch: dict) -> str:
         minutes = int((datetime.now() - datetime.fromisoformat(last)).total_seconds() // 60) + 5
     except ValueError:
         return "unknown: look at the last 24 hours"
-    return f"{last[:16].replace('T', ' ')} local time, about {minutes} minutes ago (use a window of {minutes}m)"
+    last_time = datetime.fromisoformat(last)
+    if watch.get("timezone"):
+        try:
+            last_time = last_time.astimezone(ZoneInfo(watch["timezone"]))
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return f"{last_time.strftime('%Y-%m-%d %H:%M')} local time, about {minutes} minutes ago (use a window of {minutes}m)"
 
 
 def prompt(watch: dict) -> str:
@@ -292,13 +304,19 @@ def prompt(watch: dict) -> str:
     known.sort(key=lambda f: f["last_seen"], reverse=True)
     lines = [f"- {f['key']}: {f['title']} ({'dismissed by me' if f['status'] == 'dismissed' else 'already reported'})"
              for f in known[:40]]
+    now = datetime.now()
+    if watch.get("timezone"):
+        try:
+            now = now.astimezone(ZoneInfo(watch["timezone"]))
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
     return "\n".join([
         f'You are my "{watch["name"]}" watch. Check the following and report what needs an engineer.',
         "",
         "What to watch:",
         watch["instructions"],
         "",
-        f"Now: {datetime.now().strftime('%Y-%m-%d %H:%M')} local time. Last check: {_since(watch)}.",
+        f"Now: {now.strftime('%Y-%m-%d %H:%M')} local time. Last check: {_since(watch)}.",
         "",
         "Problems already known (reuse the exact key when you see the same problem again; report a dismissed "
         "one only if it got clearly worse, and say so):" if lines else "No problems are known yet.",

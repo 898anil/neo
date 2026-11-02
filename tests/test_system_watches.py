@@ -32,6 +32,9 @@ class SystemWatchesTest(unittest.TestCase):
         running = patch.object(system_watches, "launchctl_running", return_value=set())
         self.running = running.start()
         self.addCleanup(running.stop)
+        mac = patch.object(system_watches.sys, "platform", "darwin")  # launchd's path, on any host (spark is Linux)
+        mac.start()
+        self.addCleanup(mac.stop)
         system_watches._cache.update(at=0.0, rows=[])
 
     def job(self, name, program, **extra):
@@ -264,3 +267,37 @@ class SyncFindingsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LinuxSystemWatchesTest(unittest.TestCase):
+    def test_linux_watches_are_discovered_with_live_status_and_breaches(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            folder = root / '.neo' / 'feed-watch'
+            folder.mkdir(parents=True)
+            (folder / 'check.py').write_text('"""Feed health."""\n')
+            (folder / 'state.json').write_text(json.dumps({'open': {'missing': {'posted_at': 1, 'detail': '404'}}}))
+            manifest = root / 'watches.json'
+            manifest.write_text(json.dumps([{'name': 'feed-watch', 'schedule': 'Every 30 minutes'}]))
+            result = system_watches.subprocess.CompletedProcess([], 0, 'ActiveState=active\nResult=success\nExecMainStatus=0\n', '')
+            with patch.object(system_watches, 'linux_manifest', return_value=manifest), \
+                 patch.object(Path, 'home', return_value=root), \
+                 patch.object(system_watches.subprocess, 'run', return_value=result):
+                (row,) = system_watches.collect_linux()
+            self.assertEqual(row['id'], 'com.anil.neo-feed-watch')
+            self.assertTrue(row['loaded'])
+            self.assertEqual(row['kind'], 'check')
+            self.assertEqual(row['open'], 1)
+            self.assertEqual(row['schedule'], 'Every 30 minutes')
+
+    def test_linux_controls_use_narrow_privileged_helper(self):
+        row = {'id': 'com.anil.neo-feed-watch', 'labels': ['com.anil.neo-feed-watch'],
+               'kind': 'check', 'loaded': True, 'linux_names': ['feed-watch']}
+        with patch.object(system_watches, '_find', return_value=row), \
+             patch.object(system_watches, '_linux_control') as control, \
+             patch.object(system_watches.sys, 'platform', 'linux'):
+            system_watches.run(row['id'])
+            control.assert_called_once_with('run', 'feed-watch')
+            control.reset_mock()
+            system_watches.set_on(row['id'], False)
+            control.assert_called_once_with('off', 'feed-watch')
