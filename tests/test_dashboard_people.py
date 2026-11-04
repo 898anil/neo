@@ -202,6 +202,41 @@ class PersonViewTest(Base):
 
 
 class SlackSideTest(Base):
+    def test_startup_waits_for_herdr_agent_to_reappear(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock, MagicMock
+        live = {'id': 'old-live', 'runtime': 'herdr', 'status': 'waiting', 'herdr_session': 'neo',
+                'herdr_agent': 'neo-old', 'session_id': 'session-1'}
+        h = MagicMock()
+        h.call.side_effect = [{'agents': []}, {'agents': [
+            {'name': 'neo-old', 'agent_session': {'kind': 'id', 'value': 'session-1'}}]}]
+        with patch.object(app, 'list_runs', return_value=[live]), patch.object(app, 'Herdr', return_value=h), \
+             patch.object(app.InteractiveRun, 'attach', return_value=object()) as attach, \
+             patch.object(app.asyncio, 'sleep', AsyncMock()) as sleep:
+            asyncio.run(app.resume_live_runs(AsyncMock()))
+        attach.assert_called_once_with('old-live')
+        sleep.assert_awaited_once()
+
+    def test_startup_reattaches_old_live_runs_only_when_their_agent_is_restored(self):
+        import asyncio
+        import app
+        from unittest.mock import AsyncMock, MagicMock
+        restored = {'id': 'old-live', 'runtime': 'herdr', 'status': 'waiting', 'herdr_session': 'neo',
+                    'herdr_agent': 'neo-old', 'session_id': 'session-1'}
+        missing = {**restored, 'id': 'missing', 'herdr_agent': 'neo-missing'}
+        foreign = {**restored, 'id': 'different-session', 'session_id': 'session-2'}
+        agents = {'agents': [{'name': 'neo-old', 'agent_session': {'kind': 'id', 'value': 'session-1'}}]}
+        h = MagicMock()
+        h.call.return_value = agents
+        with patch.object(app, 'list_runs', return_value=[restored, missing, foreign]) as rows, \
+             patch.object(app, 'Herdr', return_value=h), \
+             patch.object(app.InteractiveRun, 'attach', return_value=object()) as attach, \
+             patch.object(app.asyncio, 'sleep', AsyncMock()):
+            asyncio.run(app.resume_live_runs(AsyncMock()))
+        rows.assert_called_once_with(200, include_live=True)
+        attach.assert_called_once_with('old-live')
+
     def test_home_tab_button_and_plain_words(self):
         from cos import home_tab, intent
         self.assertIn("home_dashboard", str(home_tab.view("Ajay", {}, None, None, [], [])))

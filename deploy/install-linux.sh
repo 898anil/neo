@@ -135,11 +135,36 @@ echo "  NEO_ACCOUNTS=$(env_get NEO_ACCOUNTS)"
 
 say "systemd unit $UNIT.service"
 install -d -o "$SVC_USER" -g "$SVC_USER" -m 700 "$LOG_DIR"
+HERDR_SESSION="$(env_get NEO_HERDR_SESSION)"; HERDR_SESSION="${HERDR_SESSION:-neo}"
+[[ "$HERDR_SESSION" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Invalid NEO_HERDR_SESSION"; exit 1; }
+cat > "/etc/systemd/system/$UNIT-herdr.service" <<UNIT_EOF
+[Unit]
+Description=Restore $UNIT herdr session
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=$SVC_USER
+Group=$SVC_USER
+WorkingDirectory=$ROOT
+Environment=HOME=$SVC_HOME
+Environment=PATH=$SVC_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NEO_HERDR_SESSION=$HERDR_SESSION
+ExecStart=$PY -c 'from cos.herdr import Herdr; Herdr().ensure_server(wait_seconds=30)'
+RemainAfterExit=yes
+KillMode=process
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
 cat > "/etc/systemd/system/$UNIT.service" <<UNIT_EOF
 [Unit]
 Description=neo Slack bot ($SVC_USER)
-After=network-online.target tailscaled.service
-Wants=network-online.target
+After=network-online.target tailscaled.service $UNIT-herdr.service
+Wants=network-online.target $UNIT-herdr.service
 
 [Service]
 User=$SVC_USER
@@ -162,6 +187,11 @@ WantedBy=multi-user.target
 UNIT_EOF
 systemctl daemon-reload
 if [ "$START" = 1 ]; then
+  # The old dashboard-only service conflicts with the bot and can win at boot.
+  if [ "$UNIT" = neo ] && systemctl is-enabled -q neo-web.service; then
+    systemctl disable -q neo-web.service
+  fi
+  systemctl enable -q "$UNIT-herdr"
   systemctl enable -q "$UNIT"
   systemctl restart "$UNIT"
   sleep 5

@@ -292,6 +292,17 @@ class SlackRunsOnBoardTest(unittest.TestCase):
         tasks = {t["id"]: t["attention"] for t in self.fleet._task_rows(runner.list_runs(2, include_running=True))}
         self.assertEqual(tasks[old_id], "working")
 
+    def test_startup_can_find_old_waiting_live_runs(self):
+        from cos import runner
+        old_id = '20200101-000000-bbbbbb'
+        (runner.runs_dir() / old_id).mkdir(parents=True)
+        (runner.runs_dir() / old_id / 'meta.json').write_text(json.dumps(
+            {'id': old_id, 'status': 'waiting', 'runtime': 'herdr'}))
+        for _ in range(3):
+            runner.Run.create('claude', 'hi', str(self.home), 'readonly').update_meta(status='done')
+        self.assertNotIn(old_id, [m['id'] for m in runner.list_runs(2)])
+        self.assertIn(old_id, [m['id'] for m in runner.list_runs(2, include_live=True)])
+
     def test_old_and_scheduled_runs_stay_off_the_board(self):
         self.assertIsNone(self.fleet.run_attention(self.meta(updated_at="2026-01-01T00:00:00+00:00")))
         self.assertIsNone(self.fleet.run_attention(self.meta(source="schedule")))

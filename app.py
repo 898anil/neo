@@ -2607,18 +2607,42 @@ async def handle_mention(event: dict, client) -> None:
 
 
 async def resume_live_runs(client) -> None:
-    """After a restart, keep recording every live run that is still open in herdr."""
-    for meta in list_runs(200):
-        if meta.get("runtime") != "herdr" or meta.get("status") in ("closed", "failed"):
-            continue
-        try:
-            if meta.get("slack_thread") and meta.get("slack_channel"):
-                entry = {"run_id": meta["id"], "runtime": "herdr"}
-                await live_for(client, meta["slack_channel"], meta["slack_thread"], entry)
-            else:
-                RESUMED.append(await asyncio.to_thread(InteractiveRun.attach, meta["id"]))
-        except Exception:  # noqa: BLE001 - one broken run must not stop the bot
-            log.exception("could not resume live run %s", meta["id"])
+    """Watch restored agents, including old runs; never close records for absent panes."""
+    pending = [m for m in await asyncio.to_thread(list_runs, 200, include_live=True)
+               if m.get("runtime") == "herdr" and m.get("status") in ("running", "waiting", "blocked")
+               and m.get("herdr_agent")]
+    for attempt in range(40):  # agents may take time to resume after the herdr server starts
+        if not pending:
+            return
+        sessions = {m.get("herdr_session") or "neo" for m in pending}
+        available = {}
+        for session in sessions:
+            try:
+                result = await asyncio.to_thread(Herdr(session).call, "agent", "list", timeout=15)
+                available[session] = {a.get("name"): a for a in result.get("agents", []) if a.get("name")}
+            except (HerdrError, OSError):
+                continue
+        remaining = []
+        for meta in pending:
+            agent = available.get(meta.get("herdr_session") or "neo", {}).get(meta["herdr_agent"])
+            expected = meta.get("session_id")
+            actual = (agent or {}).get("agent_session") or {}
+            if not agent or (expected and (actual.get("kind") != "id" or actual.get("value") != expected)):
+                remaining.append(meta)
+                continue
+            try:
+                if meta.get("slack_thread") and meta.get("slack_channel"):
+                    entry = {"run_id": meta["id"], "runtime": "herdr"}
+                    await live_for(client, meta["slack_channel"], meta["slack_thread"], entry)
+                else:
+                    RESUMED.append(await asyncio.to_thread(InteractiveRun.attach, meta["id"]))
+            except Exception:  # noqa: BLE001 - one broken run must not stop the bot
+                log.exception("could not resume live run %s", meta["id"])
+        pending = remaining
+        if pending and attempt < 39:
+            await asyncio.sleep(3)
+    if pending:
+        log.warning("%d saved live runs were not restored by herdr; leaving their records unchanged", len(pending))
 
 
 def _age_hours(iso: Optional[str]) -> float:
@@ -2750,7 +2774,7 @@ async def main() -> None:
         log.info("stopped %d sign-in(s) left from before the restart", stale)
     chief_jobs = chief.start(app.client, NOTIFY_CHANNEL, NOTIFY_USER, DASHBOARD_URL)  # noqa: F841
     RESUMED.extend(await finish_adopted_slack_runs(app.client))  # hold the tasks so they are not collected
-    await resume_live_runs(app.client)
+    RESUMED.append(asyncio.create_task(resume_live_runs(app.client)))
     SPEAKER.set(None)  # events start as neo; each handler names whose CoS it is working for
     handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
     await handler.start_async()

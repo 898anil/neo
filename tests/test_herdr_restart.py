@@ -3,6 +3,9 @@
 import tempfile
 import threading
 import unittest
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,10 +18,48 @@ from cos.herdr import Herdr, HerdrError
 class EnsureServerTest(unittest.TestCase):
     def setUp(self):
         herdr_mod._START_FAILED_AT.clear()
+        self.lock_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.lock_dir.cleanup)
+        env = patch.dict(os.environ, {'NEO_HERDR_LOCK_DIR': self.lock_dir.name})
+        env.start()
+        self.addCleanup(env.stop)
         self.herdr = Herdr(session="neo-test", binary="/nonexistent/herdr")
 
     def tearDown(self):
         herdr_mod._START_FAILED_AT.clear()
+
+    def test_start_does_not_kill_an_existing_tmux_session(self):
+        with patch.object(Herdr, 'running', return_value=False), \
+             patch.object(herdr_mod.shutil, 'which', return_value='/usr/bin/tmux'), \
+             patch.object(herdr_mod.subprocess, 'run', return_value=SimpleNamespace(returncode=1)) as tmux:
+            with self.assertRaises(HerdrError):
+                self.herdr._start_server(wait_seconds=0)
+        self.assertTrue(tmux.called)
+        self.assertFalse(any('kill-session' in call.args[0] for call in tmux.call_args_list))
+
+    def test_separate_processes_only_start_one_server(self):
+        script = r'''
+import os, time
+from pathlib import Path
+from cos.herdr import Herdr
+root = Path(os.environ['NEO_HERDR_TEST_DIR'])
+h = Herdr('neo-race')
+h.running = lambda timeout=15: (root / 'running').exists()
+def start(wait):
+    with (root / 'starts').open('a') as f: f.write('started\n')
+    time.sleep(0.4)
+    (root / 'running').touch()
+h._start_server = start
+h.ensure_server()
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, 'NEO_HERDR_TEST_DIR': tmp, 'NEO_HERDR_LOCK_DIR': tmp}
+            ps = [subprocess.Popen([sys.executable, '-c', script], env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE) for _ in range(2)]
+            for p in ps:
+                _, err = p.communicate(timeout=15)
+                self.assertEqual(p.returncode, 0, err.decode())
+            self.assertEqual((Path(tmp) / 'starts').read_text().splitlines(), ['started'])
 
     def test_many_watchers_start_the_server_once(self):
         started = threading.Event()

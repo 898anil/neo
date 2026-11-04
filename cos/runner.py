@@ -714,13 +714,13 @@ def usage_summary() -> dict:
             "week_by_kind": {k: round(v, 2) for k, v in sorted(by_kind.items(), key=lambda kv: -kv[1])}, "claude_limits": limits}
 
 
-def list_runs(limit: int = 100, include_running: bool = False) -> list[dict]:
+def list_runs(limit: int = 100, include_running: bool = False, include_live: bool = False) -> list[dict]:
     """The newest `limit` runs by creation. include_running also keeps every older run that is still
     running: a Slack thread resumes its first run for each follow-up, so a live turn can belong to a
-    run created days and hundreds of runs ago."""
+    run created days and hundreds of runs ago. include_live also keeps older open herdr runs."""
     runs = []
     for path in sorted(runs_dir().iterdir(), reverse=True):
-        if len(runs) >= limit and not include_running:
+        if len(runs) >= limit and not (include_running or include_live):
             break
         if not (path / "meta.json").exists() or not valid_run_id(path.name):
             continue
@@ -728,6 +728,8 @@ def list_runs(limit: int = 100, include_running: bool = False) -> list[dict]:
             meta = json.loads((path / "meta.json").read_text())
         except json.JSONDecodeError:
             continue
-        if len(runs) < limit or meta.get("status") == "running":
+        if (len(runs) < limit or (include_running and meta.get("status") == "running")
+                or (include_live and meta.get("runtime") == "herdr"
+                    and meta.get("status") in ("starting", "running", "waiting", "blocked"))):
             runs.append(meta)
     return runs

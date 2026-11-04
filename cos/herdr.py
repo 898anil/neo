@@ -8,12 +8,17 @@ you run in your default herdr session. Attach to watch or take over:
 from __future__ import annotations
 
 import json
+import fcntl
+import hashlib
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Optional
 
 AGENT_NAME_MAX = 32
@@ -29,6 +34,28 @@ class HerdrError(RuntimeError):
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+
+
+@contextmanager
+def _startup_lock(session: str, timeout: float):
+    """Serialize starts across the bot and boot service, not just threads in one process."""
+    directory = Path(os.environ.get("NEO_HERDR_LOCK_DIR") or Path.home() / ".config" / "herdr")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    name = hashlib.sha256(session.encode()).hexdigest()[:24] + ".neo-start.lock"
+    fd = os.open(directory / name, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise HerdrError("server_start_locked", f"another process is starting herdr session '{session}'") from None
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)
 
 
 class Herdr:
@@ -100,7 +127,7 @@ class Herdr:
         """
         if self.running():
             return
-        with _START_LOCK:
+        with _START_LOCK, _startup_lock(self.session, wait_seconds + 20):
             if self.running(timeout=5):
                 return  # another watcher started it while we waited
             failed_at = _START_FAILED_AT.get(self.session)
@@ -117,11 +144,11 @@ class Herdr:
         tmux = shutil.which("tmux")
         if not tmux:
             raise HerdrError("no_tmux", f"herdr session '{self.session}' is not running and tmux is not installed; run `herdr session attach {self.session}` once")
-        name = f"herdr-{self.session}"
-        # A stale tmux session from an earlier start would make new-session fail.
-        # Timeouts: callers hold _START_LOCK, so a hung tmux must not block every watcher.
+        # A fresh bootstrap client leaves any stale or user-owned tmux session untouched.
+        name = f"herdr-{self.session}-{secrets.token_hex(4)}"
+        # A second process may be starting the same session. tmux creates names atomically;
+        # never kill an existing session just because the server is slow to answer.
         try:
-            subprocess.run([tmux, "kill-session", "-t", name], check=False, capture_output=True, timeout=10)
             subprocess.run(
                 [tmux, "new-session", "-d", "-s", name, "-x", "200", "-y", "50",
                  f"{shlex.quote(self.binary)} --session {shlex.quote(self.session)}"],
