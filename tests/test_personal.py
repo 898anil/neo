@@ -358,6 +358,16 @@ class SharedNotesTest(Base):
 class ToolsTest(Base):
     """gcloud and Doppler sign in from Slack; Sentry connects with a token typed into a form."""
 
+    def test_github_login_requests_workflow_scope_and_launcher_accepts_it(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        from test_accounts import load_script
+        launcher = load_script('neo-run')
+        argv = logins.ARGV[('gh', 'login')]
+        self.assertEqual(argv[-2:], ['--scopes', 'workflow'])
+        self.assertIn(tuple(argv[1:]), launcher.SIGN_INS['gh'])
+        with self.assertRaises(SystemExit):
+            launcher.engine_path('gh', [*argv[1:], '--insecure-storage'])
+
     def test_neo_run_allows_exactly_the_sign_ins_neo_sends(self):
         sys.path.insert(0, str(ROOT / "tests"))
         from test_accounts import load_script

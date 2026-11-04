@@ -51,6 +51,7 @@ from pathlib import Path
 ENGINES = ("claude", "codex")
 SIGN_INS = {  # other tools only sign the account in or out, exactly as neo asks (cos/logins.py ARGV)
     "gh": (("auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"),
+           ("auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web", "--scopes", "workflow"),
            ("auth", "status", "--hostname", "github.com"),
            ("auth", "logout", "--hostname", "github.com")),
     "gcloud": (("auth", "login", "--no-launch-browser", "--update-adc"),
