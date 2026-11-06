@@ -47,7 +47,7 @@ import sessions  # noqa: E402
 from commands import Progress, clip, code_block  # noqa: E402
 from cos import brief as morning, fleet, pause, settings, watches  # noqa: E402
 from cos.alerts import AlertGate  # noqa: E402
-from cos import accounts, autonomy, broker, dashlink, home_tab, intent, learn, logins, onboarding, people, tokens, voice  # noqa: E402
+from cos import accounts, autonomy, broker, dashlink, home_tab, intent, learn, logins, onboarding, people, robot_avatar, tokens, voice  # noqa: E402
 from cos.config import OWNER_MESSAGE_MARK, THREAD_CONTEXT_HEAD, agent_brief, default_engine, exit_with_parent, owner_name, workdir  # noqa: E402
 from cos.herdr import Herdr, HerdrError  # noqa: E402
 from cos.interactive import InteractiveRun  # noqa: E402
@@ -103,7 +103,7 @@ app = AsyncApp(token=os.environ.pop("SLACK_BOT_TOKEN"))
 # Whose chief of staff is speaking: set where neo starts working for someone (their message, their brief,
 # their watch, a broker note for them). Messages for nobody in particular (alert RCAs) post as neo.
 SPEAKER: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("neo_speaker", default=None)
-_COS_ICONS: dict[str, tuple[float, str]] = {}
+_COS_ICONS: dict[str, tuple[float, Optional[str], str]] = {}
 
 
 def cos_name(user: str, info: Optional[dict] = None) -> str:
@@ -120,14 +120,24 @@ def cos_name(user: str, info: Optional[dict] = None) -> str:
 
 
 async def _identity(user: str) -> dict:
-    """Personalized name and robot icon for this person's CoS (chat:write.customize)."""
+    """Personalized name and robotic profile photo for this person's CoS."""
     hit = _COS_ICONS.get(user)
     if not hit or time.monotonic() > hit[0]:
         info = await slack_user(app.client, user)
-        hit = (time.monotonic() + 3600, cos_name(user, info))
+        profile = (info or {}).get("profile") or {}
+        photo = profile.get("image_192") or profile.get("image_72") or ""
+        icon = photo if str(photo).startswith("https://") else None
+        retry = 3600
+        if icon:
+            try:
+                icon = await asyncio.to_thread(robot_avatar.url_for, user, icon) or icon
+            except Exception as exc:  # noqa: BLE001 - preserve a recognizable photo if generation fails
+                log.warning("could not create robot avatar for %s: %s", user, type(exc).__name__)
+                retry = 60
+        hit = (time.monotonic() + retry, icon, cos_name(user, info))
         _COS_ICONS[user] = hit
-    name = people.load(user).get("cos_name") or hit[1]  # a name they chose wins at once; else the cached default
-    return {"username": name[:80], "icon_emoji": ":robot_face:"}
+    name = people.load(user).get("cos_name") or hit[2]  # a name they chose wins at once; else the cached default
+    return {"username": name[:80], **({"icon_url": hit[1]} if hit[1] else {"icon_emoji": ":robot_face:"})}
 
 
 _slack_post = AsyncWebClient.chat_postMessage
@@ -157,6 +167,7 @@ async def _post_as_cos(self, **kwargs):
     if named:
         try:
             kwargs.pop("icon_url", None)
+            kwargs.pop("icon_emoji", None)
             kwargs.update(await _identity(who))
         except Exception:  # noqa: BLE001 - post as neo rather than not at all
             log.exception("could not name the CoS for %s", who)

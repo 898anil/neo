@@ -244,6 +244,45 @@ class SlackSideTest(Base):
         self.assertTrue(intent.likely("give me the neo dashboard"))
 
 
+class RobotAvatarRouteTest(Base):
+    def test_avatar_url_serves_only_an_existing_opaque_image_without_dashboard_login(self):
+        from cos import robot_avatar
+        token = 'a' * 64
+        h = self.handler('/neo-avatar/' + token + '.png')
+        responses, headers = [], []
+        h.send_response = responses.append
+        h.send_header = lambda key, value: headers.append((key, value))
+        h.end_headers = lambda: None
+        with patch.object(robot_avatar, 'read', return_value=b'png-data') as read, \
+             patch.object(h, '_authorized', side_effect=AssertionError('avatar needs no dashboard login')):
+            h.do_GET()
+        read.assert_called_once_with(token)
+        self.assertEqual(responses, [200])
+        self.assertIn(('Content-Type', 'image/png'), headers)
+        self.assertEqual(h.wfile.getvalue(), b'png-data')
+
+    def test_missing_avatar_is_not_found(self):
+        from cos import robot_avatar
+        h = self.handler('/neo-avatar/' + 'b' * 64 + '.png')
+        with patch.object(robot_avatar, 'read', return_value=None):
+            h.do_GET()
+        self.assertEqual(h.out[0][0], 404)
+
+    def test_avatar_head_reports_image_without_a_body(self):
+        from cos import robot_avatar
+        token = 'c' * 64
+        h = self.handler('/neo-avatar/' + token + '.png', method='HEAD')
+        responses, headers = [], []
+        h.send_response = responses.append
+        h.send_header = lambda key, value: headers.append((key, value))
+        h.end_headers = lambda: None
+        with patch.object(robot_avatar, 'read', return_value=b'png-data'):
+            h.do_HEAD()
+        self.assertEqual(responses, [200])
+        self.assertIn(('Content-Length', '8'), headers)
+        self.assertEqual(h.wfile.getvalue(), b'')
+
+
 if __name__ == "__main__":
     unittest.main()
 

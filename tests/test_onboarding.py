@@ -254,7 +254,7 @@ if __name__ == "__main__":
 
 
 class CosNameTest(Base):
-    """Each person's neo posts under its own name and a robot icon (chat:write.customize)."""
+    """Each person's neo posts with their name and a robot version of their profile photo."""
 
     def test_default_and_chosen_names(self):
         import app
@@ -278,7 +278,8 @@ class CosNameTest(Base):
             client = app.AsyncWebClient(token="xoxb-test")
             with patch.object(app, "_slack_post", fake_post), \
                     patch.object(app, "slack_user", AsyncMock(return_value={"profile": {
-                        "real_name": "Ajay Arora", "image_72": "https://avatars.slack-edge.com/a.png"}})):
+                        "real_name": "Ajay Arora", "image_72": "https://avatars.slack-edge.com/a.png"}})), \
+                    patch.object(app.robot_avatar, "url_for", return_value="https://neo.example/neo-avatar/robot.png"):
                 app._COS_ICONS.clear()
                 app.SPEAKER.set(None)
                 await client.chat_postMessage(channel="C1", text="alert RCA")
@@ -288,11 +289,20 @@ class CosNameTest(Base):
                 await client.chat_postMessage(channel="C1", text="conflicting icon", icon_url="https://example.com/person.png")
         asyncio.run(go())
         self.assertNotIn("username", sent[0])
-        self.assertEqual((sent[1]["username"], sent[1]["icon_emoji"]), ("Ajay's neo", ":robot_face:"))
-        self.assertNotIn("icon_url", sent[1])
+        self.assertEqual((sent[1]["username"], sent[1]["icon_url"]), ("Ajay's neo", "https://neo.example/neo-avatar/robot.png"))
         self.assertEqual(sent[2]["username"], "custom")
-        self.assertEqual(sent[3]["icon_emoji"], ":robot_face:")
-        self.assertNotIn("icon_url", sent[3])
+        self.assertEqual(sent[3]["icon_url"], "https://neo.example/neo-avatar/robot.png")
+
+    def test_keeps_person_recognizable_if_robot_avatar_is_unavailable(self):
+        import app
+        async def go():
+            with patch.object(app, 'slack_user', AsyncMock(return_value={'profile': {
+                    'real_name': 'Ajay Arora', 'image_72': 'https://avatars.slack-edge.com/a.png'}})), \
+                 patch.object(app.robot_avatar, 'url_for', side_effect=OSError('offline')):
+                app._COS_ICONS.clear()
+                identity = await app._identity(AJAY)
+            self.assertEqual(identity['icon_url'], 'https://avatars.slack-edge.com/a.png')
+        asyncio.run(go())
 
     def test_renaming_in_plain_words_is_a_request_about_neo(self):
         self.assertTrue(intent.likely("call my neo Friday"))

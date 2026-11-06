@@ -580,8 +580,35 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ verbs
 
+    def _avatar(self, name: str, *, head: bool = False):
+        from . import robot_avatar
+        body = robot_avatar.read(name[:-4]) if name.endswith(".png") else None
+        if body is None:
+            if head:
+                self.send_response(HTTPStatus.NOT_FOUND)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            return self._error(HTTPStatus.NOT_FOUND, "avatar not found")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if not head:
+            self.wfile.write(body)
+
+    def do_HEAD(self):
+        parts = self._route()
+        if len(parts) == 2 and parts[0] == "neo-avatar":
+            return self._avatar(parts[1], head=True)
+        return self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
+
     def do_GET(self):
         parts = self._route()
+        if len(parts) == 2 and parts[0] == "neo-avatar":
+            return self._avatar(parts[1])
         if len(parts) == 1 and parts[0] in PUBLIC_FILES:
             # App icon and manifest: harmless, and fetched by the phone without cookies.
             return self._static(parts[0], PUBLIC_FILES[parts[0]])
