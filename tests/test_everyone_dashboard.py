@@ -61,6 +61,16 @@ class Scoped(Base):
 
 
 class DashboardTest(Scoped):
+    def test_owner_live_task_runs_in_the_selected_folder(self):
+        from types import SimpleNamespace
+
+        live = SimpleNamespace(run=SimpleNamespace(meta=lambda: {"id": "r1", "herdr_session": "neo", "herdr_pane": "p1"}))
+        with patch("cos.interactive.InteractiveRun.start", return_value=live) as start, \
+             patch.object(server, "LIVE_RUNS", []):
+            status, _ = self.post("/api/live", {"engine": "claude", "prompt": "test", "cwd": str(self.dir)}, user=OWNER)
+        self.assertEqual(status, 201)
+        self.assertEqual(start.call_args.kwargs["extra"]["account"], None)
+
     def test_overview_and_home_are_theirs(self):
         status, data = self.get("/api/overview")
         self.assertEqual(status, 200)

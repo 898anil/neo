@@ -1236,9 +1236,9 @@ class Handler(BaseHTTPRequestHandler):
                 irun = InteractiveRun.start(
                     engine, str(body.get("prompt", "")), cwd,
                     label="dash", source="dashboard", system=agent_brief(cwd),
-                    # account None for a new branch: work.new_worktree makes it in neo's own home
-                    # (~/.neo/worktrees), which the owner's account can't enter; it runs where it is.
-                    extra={"branch": branch, "account": None} if branch else None,
+                    # The owner selected a folder on the service account's disk; the owner's
+                    # separate Linux account cannot necessarily access that folder.
+                    extra={"branch": branch, "account": None},
                 )
             except (ValueError, HerdrError) as exc:
                 return self._error(HTTPStatus.BAD_REQUEST, str(exc))
