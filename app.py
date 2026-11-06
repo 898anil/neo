@@ -103,7 +103,7 @@ app = AsyncApp(token=os.environ.pop("SLACK_BOT_TOKEN"))
 # Whose chief of staff is speaking: set where neo starts working for someone (their message, their brief,
 # their watch, a broker note for them). Messages for nobody in particular (alert RCAs) post as neo.
 SPEAKER: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("neo_speaker", default=None)
-_COS_ICONS: dict[str, tuple[float, Optional[str], str]] = {}
+_COS_ICONS: dict[str, tuple[float, str]] = {}
 
 
 def cos_name(user: str, info: Optional[dict] = None) -> str:
@@ -120,18 +120,14 @@ def cos_name(user: str, info: Optional[dict] = None) -> str:
 
 
 async def _identity(user: str) -> dict:
-    """username / icon_url for a message from this person's CoS (chat:write.customize)."""
+    """Personalized name and robot icon for this person's CoS (chat:write.customize)."""
     hit = _COS_ICONS.get(user)
     if not hit or time.monotonic() > hit[0]:
         info = await slack_user(app.client, user)
-        icon = ((info or {}).get("profile") or {}).get("image_72")
-        hit = (time.monotonic() + 3600, icon if str(icon or "").startswith("https://") else None, cos_name(user, info))
+        hit = (time.monotonic() + 3600, cos_name(user, info))
         _COS_ICONS[user] = hit
-    name = people.load(user).get("cos_name") or hit[2]  # a name they chose wins at once; else the cached default
-    out = {"username": name[:80]}
-    if hit[1]:
-        out["icon_url"] = hit[1]
-    return out
+    name = people.load(user).get("cos_name") or hit[1]  # a name they chose wins at once; else the cached default
+    return {"username": name[:80], "icon_emoji": ":robot_face:"}
 
 
 _slack_post = AsyncWebClient.chat_postMessage
@@ -160,6 +156,7 @@ async def _post_as_cos(self, **kwargs):
             named = False
     if named:
         try:
+            kwargs.pop("icon_url", None)
             kwargs.update(await _identity(who))
         except Exception:  # noqa: BLE001 - post as neo rather than not at all
             log.exception("could not name the CoS for %s", who)

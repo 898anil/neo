@@ -254,7 +254,7 @@ if __name__ == "__main__":
 
 
 class CosNameTest(Base):
-    """Each person's neo posts under its own name and photo (chat:write.customize)."""
+    """Each person's neo posts under its own name and a robot icon (chat:write.customize)."""
 
     def test_default_and_chosen_names(self):
         import app
@@ -285,10 +285,14 @@ class CosNameTest(Base):
                 app.SPEAKER.set(AJAY)
                 await client.chat_postMessage(channel="C1", text="your task")
                 await client.chat_postMessage(channel="C1", text="named", username="custom")
+                await client.chat_postMessage(channel="C1", text="conflicting icon", icon_url="https://example.com/person.png")
         asyncio.run(go())
         self.assertNotIn("username", sent[0])
-        self.assertEqual((sent[1]["username"], sent[1]["icon_url"]), ("Ajay's neo", "https://avatars.slack-edge.com/a.png"))
+        self.assertEqual((sent[1]["username"], sent[1]["icon_emoji"]), ("Ajay's neo", ":robot_face:"))
+        self.assertNotIn("icon_url", sent[1])
         self.assertEqual(sent[2]["username"], "custom")
+        self.assertEqual(sent[3]["icon_emoji"], ":robot_face:")
+        self.assertNotIn("icon_url", sent[3])
 
     def test_renaming_in_plain_words_is_a_request_about_neo(self):
         self.assertTrue(intent.likely("call my neo Friday"))
