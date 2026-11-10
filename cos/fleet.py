@@ -299,7 +299,18 @@ def run_title(meta: dict) -> str:
     if not prompt.startswith(SLACK_CONTEXT):
         return _one_line(prompt, 120)
     thread, _, ask = prompt[len(SLACK_CONTEXT):].partition(SLACK_ASK)
-    first = re.sub(r"^[^:\n]{1,40}:\s*", "", thread.strip().split("\n", 1)[0])
+    lines = thread.strip().splitlines()
+    if lines and lines[0].startswith("(Speakers are Slack ids. Only the new message"):
+        lines = lines[1:]
+    first = re.sub(r"^[^:\n]{1,40}:\s*", "", lines[0]) if lines else ""
+    # User-visible alerts start with a generic label and UUID; their next line gives the error type.
+    report = re.fullmatch(r"User-visible error report ([0-9a-fA-F-]{8,})", first)
+    if report and len(lines) > 1 and lines[1].startswith("    "):
+        category = lines[1].strip()
+        if category and not category.startswith("*"):
+            first = f"User-visible error: {category} · {report.group(1)[:8]}"
+    if ask.startswith("An alert just arrived in this thread. Find the root cause"):
+        ask = ""
     ask = _one_line(ask, 60)
     return _one_line(first, 90) + (f" \u00b7 {ask}" if ask else "") if first else ask
 
