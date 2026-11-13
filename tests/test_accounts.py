@@ -260,15 +260,40 @@ class NeoRunTest(unittest.TestCase):
         self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "sk-owner")
         self.assertEqual(env["GH_TOKEN"], "ghp-owner")
         self.assertTrue(env["GIT_CONFIG_VALUE_1"].endswith("auth git-credential"))
-        (self.home / ".claude").mkdir()
-        (self.home / ".claude" / ".credentials.json").write_text("{}")
-        (self.home / ".config" / "gh").mkdir(parents=True)
-        (self.home / ".config" / "gh" / "hosts.yml").write_text("")
-        env, used = self.mod.login_env(self.home, shared)
-        self.assertEqual(used["claude"], "own")
-        self.assertEqual(used["gh"], "own")
+        self.write(".claude/.credentials.json",
+                   {"claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}, "mcpOAuth": {"sentry": {}}})
+        self.write(".config/gh/hosts.yml", "github.com:\n    users:\n        ajay:\n            oauth_token: gho_x\n"
+                                           "    git_protocol: https\n    oauth_token: gho_x\n    user: ajay\n")
+        self.write(".codex/auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": "a", "refresh_token": "r"}})
+        env, used = self.mod.login_env(self.home, {**shared, "openai_key": "sk-o"})
+        self.assertEqual(used, {"claude": "own", "gh": "own", "codex": "own"})
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
         self.assertNotIn("GH_TOKEN", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
+
+    def write(self, rel: str, content) -> None:
+        path = self.home / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content if isinstance(content, str) else json.dumps(content))
+
+    def test_a_file_without_a_login_in_it_still_gets_the_owners(self):
+        # Claude writes .credentials.json for a connector's sign-in (mcpOAuth) even when it isn't logged in itself
+        self.write(".claude/.credentials.json", {"mcpOAuth": {"slack|abc": {"accessToken": "x"}}})
+        self.write(".config/gh/hosts.yml", "github.com:\n    git_protocol: https\n")
+        self.write(".codex/auth.json", {"auth_mode": "chatgpt", "tokens": {}})
+        shared = {"claude_token": "sk-owner", "gh_token": "ghp-owner", "openai_key": "sk-o"}
+        env, used = self.mod.login_env(self.home, shared)
+        self.assertEqual(used, {"claude": "shared", "gh": "shared", "codex": "shared"})
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "sk-owner")
+
+    def test_unreadable_login_files_are_not_a_login(self):
+        self.write(".claude/.credentials.json", "{not json")
+        self.write(".codex/auth.json", "")
+        self.assertEqual(self.mod.own_logins(self.home), {"claude": False, "gh": False, "codex": False})
+
+    def test_a_codex_api_key_is_a_login(self):
+        self.write(".codex/auth.json", {"OPENAI_API_KEY": "sk-mine", "tokens": None})
+        self.assertTrue(self.mod.own_logins(self.home)["codex"])
 
     def test_folders_outside_home_are_refused(self):
         self.assertEqual(self.mod.resolve_cwd(self.home, ""), (self.home / "code").resolve())

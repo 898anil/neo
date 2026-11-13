@@ -134,12 +134,30 @@ def clean_env(given: dict) -> dict:
     return out
 
 
+def _json_file(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def own_logins(home: Path) -> dict:
-    """Which tools this account has logged in to itself."""
+    """Which tools this account has logged in to itself: a login in the file, not just the file. Claude
+    writes .credentials.json for a connector's sign-in (mcpOAuth) without being logged in itself, and
+    counting that as a login stopped the owner's from being lent."""
+    claude = _json_file(home / ".claude" / ".credentials.json").get("claudeAiOauth") or {}
+    codex = _json_file(home / ".codex" / "auth.json")
+    tokens = codex.get("tokens") or {}
+    try:
+        hosts = (home / ".config" / "gh" / "hosts.yml").read_text()
+    except OSError:
+        hosts = ""
     return {
-        "claude": (home / ".claude" / ".credentials.json").is_file(),
-        "gh": (home / ".config" / "gh" / "hosts.yml").is_file(),
-        "codex": (home / ".codex" / "auth.json").is_file(),
+        "claude": isinstance(claude, dict) and bool(claude.get("accessToken") or claude.get("refreshToken")),
+        "gh": bool(re.search(r"^\s*oauth_token:\s*\S", hosts, re.M)),
+        "codex": bool(codex.get("OPENAI_API_KEY"))
+                 or (isinstance(tokens, dict) and bool(tokens.get("access_token") or tokens.get("refresh_token"))),
     }
 
 
