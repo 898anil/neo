@@ -317,6 +317,31 @@ class DelegatedWorkTest(Base):
         self.assertEqual(note["user"], OWNER)
         self.assertIsNone(broker.approve_work(out["task"], AJAY, True))  # only the owner of that neo decides
 
+    def test_let_my_neo_do_it_starts_the_work(self):
+        out, _ = self.delegate("ask_owner")
+        broker.take_outbox()
+        with patch.object(broker.threading, "Thread") as thread:
+            row = broker.approve_work(out["task"], OWNER, True)
+        self.assertEqual(row["status"], "working")
+        self.assertTrue(row["run"])
+        thread.return_value.start.assert_called_once()
+        self.assertTrue(any(o["user"] == AJAY and "said yes" in o["text"] for o in broker.take_outbox()))
+
+    def test_clicking_yes_twice_starts_the_work_once(self):
+        out, _ = self.delegate("ask_owner")
+        with patch.object(broker.threading, "Thread") as thread:
+            self.assertIsNotNone(broker.approve_work(out["task"], OWNER, True))
+            self.assertIsNone(broker.approve_work(out["task"], OWNER, True))
+            self.assertIsNone(broker.approve_work(out["task"], OWNER, False))
+        self.assertEqual(thread.return_value.start.call_count, 1)
+
+    def test_work_that_fails_to_start_can_be_approved_again(self):
+        out, _ = self.delegate("ask_owner")
+        with patch.object(broker, "start_work", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                broker.approve_work(out["task"], OWNER, True)
+        self.assertEqual(broker._task(out["task"])["status"], "waiting_owner")
+
     def test_finishing_tells_both_and_the_askers_neo_gets_a_turn(self):
         out, _ = self.delegate("accept")
         work = Run.create("claude", "x", str(self.dir), "full", source="a2a", extra={"kind": "a2a-work"})

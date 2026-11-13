@@ -712,7 +712,8 @@ def start_work(task_id: str, row: dict) -> None:
         account = accounts.ensure(target, people.name(target))
         extra["account"], cwd = account, accounts.cwd_for(account, None)
     run = Run.create("claude", prompt, cwd or workdir(), settings["mode"], source="a2a", extra=extra)
-    _set_task(task_id, **row, status="working", run=run.id, started=datetime.now().isoformat(timespec="seconds"))
+    _set_task(task_id, **{**row, "status": "working", "run": run.id,  # an approved row already has a status
+                          "started": datetime.now().isoformat(timespec="seconds")})
     _log({"id": task_id, "asker": asker, "target": target, "question": row["request"], "decision": "accept", "run": run.id})
     _notify(target, f":hammer_and_wrench: {label(asker)}'s neo asked me to: _{_safe(_short(row['request'], 400))}_\n"
                     f"I'm on it (task {task_id}); I'll tell you both when it's done.")
@@ -753,17 +754,28 @@ def finish(task_id: str, meta: dict) -> dict:
 
 
 def approve_work(task_id: str, by: str, yes: bool) -> Optional[dict]:
-    """The answerer's owner decides an escalated work request."""
-    row = _task(task_id)
-    if not row or row.get("target") != by or row.get("status") != "waiting_owner":
+    """The answerer's owner decides an escalated work request. The decision is claimed in one locked step,
+    so a second click (or Decline after Let my neo do it) finds it already decided and starts nothing."""
+    def claim(d: dict) -> Optional[dict]:
+        found = (d.get("tasks") or {}).get(task_id)
+        if not found or found.get("target") != by or found.get("status") != "waiting_owner":
+            return None
+        found.update(status="starting" if yes else "declined", updated=datetime.now().isoformat(timespec="seconds"))
+        return dict(found)
+
+    row = STATE.update(claim)
+    if not row:
         return None
     if not yes:
-        row = _set_task(task_id, status="declined")
         STATE.update(lambda d: d.setdefault("outbox", []).append(
             {"user": row["asker"], "text": f"<@{by}> decided not to do that (_{_safe(_short(row['request']))}_, task {task_id}).",
              "at": time.time()}))
         return row
-    start_work(task_id, row)
+    try:
+        start_work(task_id, row)
+    except Exception:
+        _set_task(task_id, status="waiting_owner")  # not started: the owner can click again
+        raise
     STATE.update(lambda d: d.setdefault("outbox", []).append(
         {"user": row["asker"], "text": f"<@{by}> said yes; their neo is working on _{_safe(_short(row['request']))}_ (task {task_id}).",
          "at": time.time()}))

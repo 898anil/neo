@@ -2153,7 +2153,13 @@ async def on_a2a_work(ack, body, client) -> None:
     if not await may_use(client, user):
         return
     yes = action["action_id"] == "a2a_work_yes"
-    row = await asyncio.to_thread(broker.approve_work, action["value"], user, yes)
+    try:
+        row = await asyncio.to_thread(broker.approve_work, action["value"], user, yes)
+    except Exception:  # noqa: BLE001 - say so; the task is back to waiting, so the buttons still work
+        log.exception("could not start delegated task %s", action["value"])
+        await client.chat_postEphemeral(channel=body["channel"]["id"], user=user,
+                                        text=":warning: Your neo couldn't start that. Try the button again in a minute.")
+        return
     note = "Already decided." if not row else ":hammer_and_wrench: Your neo is on it." if yes else ":no_entry: Declined."
     kept = [b for b in body["message"].get("blocks", []) if b.get("type") != "actions"]
     await client.chat_update(channel=body["channel"]["id"], ts=body["message"]["ts"], text=note,
